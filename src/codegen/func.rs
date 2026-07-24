@@ -10,12 +10,14 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::JITModule;
 use cranelift_module::{Linkage, Module};
 
-use crate::ast::TypedFuncDecl;
+use crate::ast::{Type, TypedFuncDecl};
 use crate::codegen::expr::compile_expr;
+use crate::sanal::StructLayout;
 
 /// Compiles a single function declaration to native machine code in the JITModule.
 pub fn compile_func(
     func: &TypedFuncDecl,
+    struct_layouts: &HashMap<String, StructLayout>,
     module: &mut JITModule,
     ctx: &mut Context,
     builder_context: &mut FunctionBuilderContext,
@@ -24,12 +26,21 @@ pub fn compile_func(
     ctx.func.signature = module.make_signature();
 
     // Add parameter signatures to Cranelift function
-    for _param in &func.params {
-        ctx.func.signature.params.push(AbiParam::new(types::I64));
+    for param in &func.params {
+        let param_ty = match param.ty {
+            Type::Float => types::F64,
+            _ => types::I64,
+        };
+        ctx.func.signature.params.push(AbiParam::new(param_ty));
     }
 
-    // Return type for our compiled function: i64 integer
-    ctx.func.signature.returns.push(AbiParam::new(types::I64));
+    // Return type for our compiled function
+    let ret_cranelift_ty = match func.return_type {
+        Type::Float => types::F64,
+        Type::Int | Type::Bool | Type::String | Type::Obj(_) | Type::Array(_, _) => types::I64,
+        Type::Unit => types::I64,
+    };
+    ctx.func.signature.returns.push(AbiParam::new(ret_cranelift_ty));
 
     let mut builder = FunctionBuilder::new(&mut ctx.func, builder_context);
 
@@ -47,26 +58,41 @@ pub fn compile_func(
     for (i, param) in func.params.iter().enumerate() {
         let var = Variable::from_u32(var_counter as u32);
         var_counter += 1;
-        builder.declare_var(var, types::I64);
+        let param_ty = match param.ty {
+            Type::Float => types::F64,
+            _ => types::I64,
+        };
+        builder.declare_var(var, param_ty);
         builder.def_var(var, block_params[i]);
         vars.insert(param.name.clone(), var);
     }
 
     let ret_var = Variable::from_u32(var_counter as u32);
     var_counter += 1;
-    builder.declare_var(ret_var, types::I64);
+    let ret_cranelift_ty = match func.return_type {
+        Type::Float => types::F64,
+        _ => types::I64,
+    };
+    builder.declare_var(ret_var, ret_cranelift_ty);
 
-    let zero = builder.ins().iconst(types::I64, 0);
+    let zero = match func.return_type {
+        Type::Float => builder.ins().f64const(0.0),
+        _ => builder.ins().iconst(types::I64, 0),
+    };
     builder.def_var(ret_var, zero);
 
     for expr in &func.body {
-        let val = compile_expr(&mut builder, expr, &mut vars, &mut var_counter, module);
-        builder.def_var(ret_var, val);
+        let val = compile_expr(&mut builder, expr, &mut vars, &mut var_counter, module, struct_layouts);
+        if !builder.is_unreachable() && func.return_type != Type::Unit {
+            builder.def_var(ret_var, val);
+        }
     }
 
-    // Return the result of the last statement cleanly across blocks
-    let final_ret = builder.use_var(ret_var);
-    builder.ins().return_(&[final_ret]);
+    // Return the result of the last statement cleanly if block is not already filled
+    if !builder.is_unreachable() {
+        let final_ret = builder.use_var(ret_var);
+        builder.ins().return_(&[final_ret]);
+    }
 
     builder.finalize();
 
@@ -81,3 +107,4 @@ pub fn compile_func(
 
     module.get_finalized_function(func_id)
 }
+

@@ -1,12 +1,10 @@
 mod ast;
 mod cli;
 mod codegen;
-mod compiler;
 mod diagnostics;
 mod parser;
 mod sanal;
 
-use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::Parser; // Stream is imported directly below
 use clap::Parser as ClapParser;
 use logos::Logos;

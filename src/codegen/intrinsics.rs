@@ -4,13 +4,14 @@
 use std::collections::HashMap;
 
 use cranelift_codegen::ir::types;
-use cranelift_codegen::ir::{AbiParam, InstBuilder, Value};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_jit::JITModule;
 use cranelift_module::{Linkage, Module};
 
 use crate::ast::{Type, TypedExpr};
 use crate::codegen::expr::compile_expr;
+use crate::sanal::StructLayout;
 
 /// Type Tag ABI:
 /// 0 = Int (i64)
@@ -29,15 +30,19 @@ pub extern "C" fn intrinsic_log(type_tag: u64, value_bits: u64) -> i64 {
                 println!("{}", c_str.to_string_lossy());
             }
         }
+        3 => println!("{}", f64::from_bits(value_bits)),
         _ => println!("<unknown type 0x{:x}: 0x{:x}>", type_tag, value_bits),
     }
     0
 }
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+static STR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 fn compile_string_constant(
     builder: &mut FunctionBuilder,
     s: &str,
-    var_counter: &mut usize,
+    _var_counter: &mut usize,
     module: &mut JITModule,
 ) -> Value {
     use cranelift_module::DataDescription;
@@ -46,8 +51,7 @@ fn compile_string_constant(
     bytes.push(0);
     data_ctx.define(bytes.into_boxed_slice());
 
-    let name = format!("__str_{}", var_counter);
-    *var_counter += 1;
+    let name = format!("__str_{}", STR_COUNTER.fetch_add(1, Ordering::SeqCst));
 
     let data_id = module
         .declare_data(&name, Linkage::Export, true, false)
@@ -66,6 +70,7 @@ pub fn compile_macro_call(
     vars: &mut HashMap<String, Variable>,
     var_counter: &mut usize,
     module: &mut JITModule,
+    struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
     match name {
         "log" | "println" => {
@@ -75,11 +80,18 @@ pub fn compile_macro_call(
                     Type::Int => 0,
                     Type::Bool => 1,
                     Type::String => 2,
-                    Type::Unit => 0,
+                    Type::Float => 3,
+                    Type::Unit | Type::Obj(_) | Type::Array(_, _) => 0,
                 };
 
                 let type_tag_val = builder.ins().iconst(types::I64, type_tag);
-                let value_bits = compile_expr(builder, arg, vars, var_counter, module);
+                let raw_val = compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
+
+                let value_bits = if arg.ty() == Type::Float {
+                    builder.ins().bitcast(types::I64, MemFlags::new(), raw_val)
+                } else {
+                    raw_val
+                };
 
                 let mut sig = module.make_signature();
                 sig.params.push(AbiParam::new(types::I64)); // type_tag
@@ -100,9 +112,12 @@ pub fn compile_macro_call(
             for arg in args {
                 let type_name = match arg.ty() {
                     Type::Int => "Int",
+                    Type::Float => "Float",
                     Type::Bool => "Bool",
                     Type::String => "String",
                     Type::Unit => "Unit",
+                    Type::Obj(name) => name,
+                    Type::Array(_, _) => "Array",
                 };
 
                 let ptr_val = compile_string_constant(builder, type_name, var_counter, module);
@@ -125,3 +140,4 @@ pub fn compile_macro_call(
         _ => panic!("Unknown intrinsic macro: '{name}!'"),
     }
 }
+

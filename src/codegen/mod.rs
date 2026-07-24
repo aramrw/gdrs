@@ -6,6 +6,7 @@ pub mod func;
 pub mod intrinsics;
 pub mod jit;
 
+use std::collections::HashMap;
 use std::mem;
 
 use cranelift_codegen::Context;
@@ -16,6 +17,7 @@ use cranelift_module::Module;
 use crate::ast::TypedProgram;
 use crate::codegen::func::compile_func;
 use crate::codegen::jit::create_jit_module;
+use crate::sanal::StructLayout;
 
 pub struct JitCompiler {
     builder_context: FunctionBuilderContext,
@@ -37,9 +39,28 @@ impl JitCompiler {
     pub fn compile_and_run(&mut self, program: &TypedProgram) -> i64 {
         let mut main_fn_ptr = None;
 
+        let mut struct_layouts = HashMap::new();
+        for s in &program.structs {
+            let mut total_size = 0u32;
+            let mut field_offsets = HashMap::new();
+            for field in &s.fields {
+                field_offsets.insert(field.name.clone(), (total_size, field.ty));
+                total_size += 8;
+            }
+            struct_layouts.insert(
+                s.name.clone(),
+                StructLayout {
+                    name: s.name.clone(),
+                    total_size,
+                    field_offsets,
+                },
+            );
+        }
+
         for func in &program.functions {
             let code_ptr = compile_func(
                 func,
+                &struct_layouts,
                 &mut self.module,
                 &mut self.ctx,
                 &mut self.builder_context,
@@ -59,3 +80,4 @@ impl JitCompiler {
         }
     }
 }
+

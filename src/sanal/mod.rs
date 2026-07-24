@@ -1,7 +1,12 @@
 //! sanal.rs
 //! Semantic analysis & Type Checking pass converting untyped AST into Typed AST.
 
-use crate::ast::{Expr, FuncDecl, Program, Span, Type, TypedExpr, TypedFuncDecl, TypedProgram};
+pub mod types;
+
+use crate::{
+    ast::{intern_str, Expr, FuncDecl, Program, Span, StructDecl, Type, TypedExpr, TypedFuncDecl, TypedProgram},
+    sanal::types::type_check_expr,
+};
 use std::collections::HashMap;
 
 // A custom struct to hold the error message, label, optional help message, AND where it happened
@@ -11,6 +16,13 @@ pub struct SemanticError {
     pub label: String,
     pub help: Option<String>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructLayout {
+    pub name: String,
+    pub total_size: u32,
+    pub field_offsets: HashMap<String, (u32, Type)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -74,6 +86,26 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
         fn_map.insert(func.name.clone(), func);
     }
 
+    let mut struct_map = HashMap::new();
+    for s in &program.structs {
+        let mut total_size = 0u32;
+        let mut field_offsets = HashMap::new();
+
+        for field in &s.fields {
+            field_offsets.insert(field.name.clone(), (total_size, field.ty));
+            total_size += 8; // Each primitive or pointer field occupies 8 bytes (i64 stack aligned)
+        }
+
+        struct_map.insert(
+            s.name.clone(),
+            StructLayout {
+                name: s.name.clone(),
+                total_size,
+                field_offsets,
+            },
+        );
+    }
+
     for func in &program.functions {
         let mut scope_stack = ScopeStack::new();
         let mut typed_body = Vec::new();
@@ -83,7 +115,7 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
         }
 
         for expr in &func.body {
-            if let Some(typed_expr) = type_check_expr(&mut scope_stack, &mut errors, &fn_map, expr) {
+            if let Some(typed_expr) = type_check_expr(&mut scope_stack, &mut errors, &fn_map, &struct_map, expr) {
                 typed_body.push(typed_expr);
             }
         }
@@ -91,12 +123,14 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
         typed_functions.push(TypedFuncDecl {
             name: func.name.clone(),
             params: func.params.clone(),
+            return_type: func.return_type,
             body: typed_body,
         });
     }
 
     if errors.is_empty() {
         Ok(TypedProgram {
+            structs: program.structs.clone(),
             functions: typed_functions,
         })
     } else {
@@ -104,170 +138,3 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
     }
 }
 
-// Type checks an untyped Expr and produces a TypedExpr
-fn type_check_expr(
-    scopes: &mut ScopeStack,
-    errors: &mut Vec<SemanticError>,
-    fn_map: &HashMap<String, &FuncDecl>,
-    expr: &Expr,
-) -> Option<TypedExpr> {
-    match expr {
-        Expr::Int(n, span) => Some(TypedExpr::Int(*n, span.clone())),
-        Expr::Bool(b, span) => Some(TypedExpr::Bool(*b, span.clone())),
-        Expr::String(s, span) => Some(TypedExpr::String(s.clone(), span.clone())),
-
-        Expr::Ident(name, span) => {
-            if let Some(info) = scopes.lookup(name) {
-                Some(TypedExpr::Ident(name.clone(), info.ty, span.clone()))
-            } else {
-                errors.push(SemanticError {
-                    message: format!("Undefined variable '{name}'"),
-                    label: "Variable does not exist in this scope".to_string(),
-                    help: None,
-                    span: span.clone(),
-                });
-                None
-            }
-        }
-
-        Expr::Let(name, is_mutable, value, span) => {
-            let typed_val = type_check_expr(scopes, errors, fn_map, value)?;
-            let ty = typed_val.ty();
-            scopes.declare(name.clone(), *is_mutable, ty);
-            Some(TypedExpr::Let(
-                name.clone(),
-                *is_mutable,
-                Box::new(typed_val),
-                ty,
-                span.clone(),
-            ))
-        }
-
-        Expr::Assign(name, value, span) => {
-            match scopes.lookup(name) {
-                Some(info) => {
-                    let err = format!("Cannot reassign immutable variable '{name}'");
-                    if !info.is_mutable {
-                        errors.push(SemanticError {
-                            message: err.clone(),
-                            label: err,
-                            help: Some(format!(
-                                "Consider declaring this variable as mutable: 'let mut {name}'"
-                            )),
-                            span: span.clone(),
-                        });
-                    }
-                    let typed_val = type_check_expr(scopes, errors, fn_map, value)?;
-                    Some(TypedExpr::Assign(name.clone(), Box::new(typed_val), span.clone()))
-                }
-                None => {
-                    errors.push(SemanticError {
-                        message: format!("Cannot assign to undefined variable '{name}'"),
-                        label: format!("Variable '{name}' does not exist in this scope"),
-                        help: None,
-                        span: span.clone(),
-                    });
-                    let typed_val = type_check_expr(scopes, errors, fn_map, value)?;
-                    errors.retain(|err| !(err.message == format!("Undefined variable '{name}'")));
-                    Some(TypedExpr::Assign(name.clone(), Box::new(typed_val), span.clone()))
-                }
-            }
-        }
-
-        Expr::Add(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, rhs)?;
-            Some(TypedExpr::Add(Box::new(t_lhs), Box::new(t_rhs), span.clone()))
-        }
-
-        Expr::Sub(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, rhs)?;
-            Some(TypedExpr::Sub(Box::new(t_lhs), Box::new(t_rhs), span.clone()))
-        }
-
-        Expr::GreaterThan(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, rhs)?;
-            Some(TypedExpr::GreaterThan(Box::new(t_lhs), Box::new(t_rhs), span.clone()))
-        }
-
-        Expr::LessThan(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, rhs)?;
-            Some(TypedExpr::LessThan(Box::new(t_lhs), Box::new(t_rhs), span.clone()))
-        }
-
-        Expr::Equal(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, rhs)?;
-            Some(TypedExpr::Equal(Box::new(t_lhs), Box::new(t_rhs), span.clone()))
-        }
-
-        Expr::Block(stmts, span) => {
-            scopes.push_scope();
-            let mut typed_stmts = Vec::new();
-            for stmt in stmts {
-                if let Some(t_stmt) = type_check_expr(scopes, errors, fn_map, stmt) {
-                    typed_stmts.push(t_stmt);
-                }
-            }
-            scopes.pop_scope();
-            let block_ty = typed_stmts.last().map(|s| s.ty()).unwrap_or(Type::Unit);
-            Some(TypedExpr::Block(typed_stmts, block_ty, span.clone()))
-        }
-
-        Expr::While(cond, body, span) => {
-            let t_cond = type_check_expr(scopes, errors, fn_map, cond)?;
-            let t_body = type_check_expr(scopes, errors, fn_map, body)?;
-            Some(TypedExpr::While(Box::new(t_cond), Box::new(t_body), span.clone()))
-        }
-
-        Expr::If(cond, body, span) => {
-            let t_cond = type_check_expr(scopes, errors, fn_map, cond)?;
-            let t_body = type_check_expr(scopes, errors, fn_map, body)?;
-            Some(TypedExpr::If(Box::new(t_cond), Box::new(t_body), span.clone()))
-        }
-
-        Expr::MacroCall(name, args, span) => {
-            let mut typed_args = Vec::new();
-            for arg in args {
-                if let Some(t_arg) = type_check_expr(scopes, errors, fn_map, arg) {
-                    typed_args.push(t_arg);
-                }
-            }
-            Some(TypedExpr::MacroCall(name.clone(), typed_args, span.clone()))
-        }
-
-        Expr::Call(name, args, span) => {
-            let mut typed_args = Vec::new();
-            for arg in args {
-                if let Some(t_arg) = type_check_expr(scopes, errors, fn_map, arg) {
-                    typed_args.push(t_arg);
-                }
-            }
-            if let Some(target_func) = fn_map.get(name) {
-                if target_func.params.len() != typed_args.len() {
-                    errors.push(SemanticError {
-                        message: format!(
-                            "Function '{name}' expects {} arguments, found {}",
-                            target_func.params.len(),
-                            typed_args.len()
-                        ),
-                        label: format!("Expected {} args", target_func.params.len()),
-                        help: None,
-                        span: span.clone(),
-                    });
-                }
-            } else {
-                errors.push(SemanticError {
-                    message: format!("Undefined function '{name}'"),
-                    label: "Function does not exist".to_string(),
-                    help: None,
-                    span: span.clone(),
-                });
-            }
-            Some(TypedExpr::Call(name.clone(), typed_args, Type::Int, span.clone()))
-        }
-    }
-}
