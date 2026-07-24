@@ -1,0 +1,16 @@
+[package]
+name = "newlang"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ariadne = { version = "0.6.0", features = ["auto-color"] }
+chumsky = "0.9.3"
+clap = { version = "4.6.4", features = ["derive"] }
+logos = "0.16.1"
+cranelift-codegen = "0.118.0"
+cranelift-frontend = "0.118.0"
+cranelift-module = "0.118.0"
+cranelift-jit = "0.118.0"
+cranelift-native = "0.118.0"
+target-lexicon = "0.13.2"

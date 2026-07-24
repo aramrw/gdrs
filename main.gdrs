@@ -1,0 +1,8 @@
+fn add(a: i64, b: i64):
+	let res = a + b
+	log!("Inside add function, result is:", res)
+
+fn main():
+	log!("Starting program...")
+	add(10, 20)
+	add(100, 500)
