@@ -65,7 +65,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
 
     let field_decl = select! { Token::Ident(name) => name }
         .then_ignore(just(Token::Colon))
-        .then(type_parser)
+        .then(type_parser.clone())
         .map_with_span(|(name, ty), span| FieldDecl { name, ty, span })
         .then_ignore(just(Token::Newline).or_not());
 
@@ -81,24 +81,59 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         )
         .map_with_span(|(name, fields), span| StructDecl { name, fields, span });
 
+    let enum_variant = select! { Token::Ident(name) => name }
+        .then(
+            type_parser
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .delimited_by(just(Token::LParen), just(Token::RParen))
+                .or_not(),
+        )
+        .map_with_span(|(name, payload), span| EnumVariantDecl {
+            name,
+            payload_types: payload.unwrap_or_default(),
+            span,
+        })
+        .then_ignore(just(Token::Newline).or_not());
+
+    let enum_decl = just(Token::Enum)
+        .ignore_then(select! { Token::Ident(s) => s })
+        .then_ignore(just(Token::Colon))
+        .then_ignore(just(Token::Newline).or_not())
+        .then(
+            enum_variant
+                .repeated()
+                .at_least(1)
+                .delimited_by(just(Token::Indent), just(Token::Dedent)),
+        )
+        .map_with_span(|(name, variants), span| EnumDecl { name, variants, span });
+
     let item = function
-        .map(Either::Left)
-        .or(obj_decl.map(Either::Right));
+        .map(Item::Func)
+        .or(obj_decl.map(Item::Struct))
+        .or(enum_decl.map(Item::Enum));
 
     item.repeated().then_ignore(end()).map(|items| {
         let mut structs = Vec::new();
+        let mut enums = Vec::new();
         let mut functions = Vec::new();
         for item in items {
             match item {
-                Either::Left(f) => functions.push(f),
-                Either::Right(s) => structs.push(s),
+                Item::Func(f) => functions.push(f),
+                Item::Struct(s) => structs.push(s),
+                Item::Enum(e) => enums.push(e),
             }
         }
-        Program { structs, functions }
+        Program {
+            structs,
+            enums,
+            functions,
+        }
     })
 }
 
-enum Either<L, R> {
-    Left(L),
-    Right(R),
+enum Item {
+    Func(FuncDecl),
+    Struct(StructDecl),
+    Enum(EnumDecl),
 }

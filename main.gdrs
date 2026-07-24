@@ -1,38 +1,51 @@
+// Comprehensive test suite for gdrs Rust-style tagged union enums
+
+enum Option:
+	Some(i64)
+	None
+
+enum Result:
+	Ok(f64)
+	Err(i64)
+
+enum Shape:
+	Circle(f64)
+	Rectangle(f64, f64)
+	Point
+
+fn is_some(opt: Option) -> bool:
+	if opt == Option.None:
+		return false
+	else:
+		return true
+
+fn is_ok(res: Result) -> bool:
+	if res == Result.Ok(0.0):
+		return true
+	else:
+		if res != Result.Err(0):
+			return true
+		else:
+			return false
+
 fn main():
-	let mut x = 5          // Binary: 0000 0101
-	log!("starting at 5")
+	log!("=== Testing GDRS Rust-Style Tagged Union Enums ===")
 
-	// Shift Left (<<): Shifts bits left, doubling the number for each step
-	let doubled = x << 1   // 0000 1010 = 10
-	let quadrupled = x << 2 // 0001 0100 = 20
-	log!(doubled)          // Logs 10
-	log!(quadrupled)       // Logs 20
+	let none_opt = Option.None
+	let some_opt = Option.Some(42)
 
-	// Shift Right (>>): Shifts bits right, halving (integer division)
-	let x2 = 20
-	let halved = x2 >> 1   // Logs 10
-	log!(halved)
+	log!("is_some(Option.None) =", is_some(none_opt))
+	log!("is_some(Option.Some(42)) =", is_some(some_opt))
 
-	// Bitwise AND (&): Only keeps bits that are 1 in BOTH numbers
-	// 5 = 0101
-	// 3 = 0011
-	// -----------
-	//     0001 = 1
-	let and_res = 5 & 3
-	log!(and_res)          // Logs 1
+	let ok_res = Result.Ok(3.14159)
+	let err_res = Result.Err(404)
 
-	// Bitwise OR (|): Keeps bits that are 1 in EITHER number
-	// 4 = 0100
-	// 1 = 0001
-	// -----------
-	//     0101 = 5
-	let or_res = 4 | 1
-	log!(or_res)           // Logs 5
+	log!("is_ok(Result.Ok(3.14159)) =", is_ok(ok_res))
+	log!("is_ok(Result.Err(404)) =", is_ok(err_res))
 
-	// Bitwise XOR (^): Keeps bits if they are DIFFERENT (one is 1, one is 0)
-	// 5 = 0101
-	// 3 = 0011
-	// -----------
-	//     0110 = 6
-	let xor_res = 5 ^ 3
-	log!(xor_res)          // Logs 6
+	let c1 = Shape.Circle(5.0)
+	let c2 = Shape.Circle(5.0)
+	let r = Shape.Rectangle(10.0, 20.0)
+
+	log!("Shape.Circle == Shape.Circle =", c1 == c2)
+	log!("Shape.Circle == Shape.Rectangle =", c1 == r)

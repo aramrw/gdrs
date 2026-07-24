@@ -4,7 +4,7 @@
 pub mod types;
 
 use crate::{
-    ast::{intern_str, Expr, FuncDecl, Program, Span, StructDecl, Type, TypedExpr, TypedFuncDecl, TypedProgram},
+    ast::{intern_str, Expr, FuncDecl, Param, Program, Span, StructDecl, Type, TypedExpr, TypedFuncDecl, TypedProgram},
     sanal::types::type_check_expr,
 };
 use std::collections::HashMap;
@@ -106,24 +106,43 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
         );
     }
 
+    let mut enum_names: std::collections::HashSet<String> = program.enums.iter().map(|e| e.name.clone()).collect();
+    let mut enum_map = HashMap::new();
+    for e in &program.enums {
+        let mut variant_map = HashMap::new();
+        for (i, variant) in e.variants.iter().enumerate() {
+            variant_map.insert(variant.name.clone(), (i as i64, variant.payload_types.clone()));
+        }
+        enum_map.insert(e.name.clone(), (intern_str(&e.name), variant_map));
+    }
+
     for func in &program.functions {
         let mut scope_stack = ScopeStack::new();
         let mut typed_body = Vec::new();
 
+        let resolved_return_type = resolve_type(func.return_type, &enum_names);
+        let mut resolved_params = Vec::new();
+
         for param in &func.params {
-            scope_stack.declare(param.name.clone(), false, param.ty);
+            let res_ty = resolve_type(param.ty, &enum_names);
+            scope_stack.declare(param.name.clone(), false, res_ty);
+            resolved_params.push(Param {
+                name: param.name.clone(),
+                ty: res_ty,
+                span: param.span.clone(),
+            });
         }
 
         for expr in &func.body {
-            if let Some(typed_expr) = type_check_expr(&mut scope_stack, &mut errors, &fn_map, &struct_map, expr) {
+            if let Some(typed_expr) = type_check_expr(&mut scope_stack, &mut errors, &fn_map, &struct_map, &enum_map, expr) {
                 typed_body.push(typed_expr);
             }
         }
 
         typed_functions.push(TypedFuncDecl {
             name: func.name.clone(),
-            params: func.params.clone(),
-            return_type: func.return_type,
+            params: resolved_params,
+            return_type: resolved_return_type,
             body: typed_body,
         });
     }
@@ -131,10 +150,19 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
     if errors.is_empty() {
         Ok(TypedProgram {
             structs: program.structs.clone(),
+            enums: program.enums.clone(),
             functions: typed_functions,
         })
     } else {
         Err(errors)
+    }
+}
+
+fn resolve_type(ty: Type, enum_names: &std::collections::HashSet<String>) -> Type {
+    match ty {
+        Type::Obj(name) if enum_names.contains(name) => Type::Enum(intern_str(name)),
+        Type::Array(elem_ty, len) => Type::Array(crate::ast::intern_type(resolve_type(*elem_ty, enum_names)), len),
+        other => other,
     }
 }
 

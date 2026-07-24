@@ -136,6 +136,8 @@ pub enum Token {
 
     #[token("obj")]
     Obj,
+    #[token("enum")]
+    Enum,
 
     #[token(".")]
     Dot,
@@ -151,6 +153,7 @@ pub enum Type {
     String,
     Unit,
     Obj(&'static str),
+    Enum(&'static str),
     Array(&'static Type, usize),
 }
 
@@ -173,6 +176,20 @@ pub struct FieldDecl {
 pub struct StructDecl {
     pub name: String,
     pub fields: Vec<FieldDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumVariantDecl {
+    pub name: String,
+    pub payload_types: Vec<Type>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumDecl {
+    pub name: String,
+    pub variants: Vec<EnumVariantDecl>,
     pub span: Span,
 }
 
@@ -232,6 +249,8 @@ pub enum Expr {
     Caret(Box<Expr>, Box<Expr>, Span),
     Shl(Box<Expr>, Box<Expr>, Span),
     Shr(Box<Expr>, Box<Expr>, Span),
+
+    EnumConstruct(String, String, Vec<Expr>, Span),
 }
 
 impl Expr {
@@ -276,6 +295,7 @@ impl Expr {
             Expr::ArrayInit(_, s) => s.clone(),
             Expr::IndexAccess(_, _, s) => s.clone(),
             Expr::IndexAssign(_, _, _, s) => s.clone(),
+            Expr::EnumConstruct(_, _, _, s) => s.clone(),
         }
     }
 }
@@ -334,6 +354,8 @@ pub enum TypedExpr {
     ArrayInit(Vec<TypedExpr>, Type, Span),
     IndexAccess(Box<TypedExpr>, Box<TypedExpr>, Type, Span),
     IndexAssign(Box<TypedExpr>, Box<TypedExpr>, Box<TypedExpr>, Span),
+
+    EnumConstruct(String, String, usize, Vec<TypedExpr>, Type, Span),
 }
 
 impl TypedExpr {
@@ -373,7 +395,8 @@ impl TypedExpr {
             | TypedExpr::ObjInit(_, _, ty, _)
             | TypedExpr::FieldAccess(_, _, ty, _)
             | TypedExpr::ArrayInit(_, ty, _)
-            | TypedExpr::IndexAccess(_, _, ty, _) => *ty,
+            | TypedExpr::IndexAccess(_, _, ty, _)
+            | TypedExpr::EnumConstruct(_, _, _, _, ty, _) => *ty,
             TypedExpr::Assign(..)
             | TypedExpr::While(..)
             | TypedExpr::If(..)
@@ -425,6 +448,7 @@ impl TypedExpr {
             TypedExpr::ArrayInit(_, _, s) => s.clone(),
             TypedExpr::IndexAccess(_, _, _, s) => s.clone(),
             TypedExpr::IndexAssign(_, _, _, s) => s.clone(),
+            TypedExpr::EnumConstruct(_, _, _, _, _, s) => s.clone(),
         }
     }
 }
@@ -432,6 +456,7 @@ impl TypedExpr {
 #[derive(Debug)]
 pub struct Program {
     pub structs: Vec<StructDecl>,
+    pub enums: Vec<EnumDecl>,
     pub functions: Vec<FuncDecl>,
 }
 
@@ -446,6 +471,7 @@ pub struct FuncDecl {
 #[derive(Debug)]
 pub struct TypedProgram {
     pub structs: Vec<StructDecl>,
+    pub enums: Vec<EnumDecl>,
     pub functions: Vec<TypedFuncDecl>,
 }
 

@@ -10,6 +10,7 @@ pub fn type_check_expr(
     errors: &mut Vec<SemanticError>,
     fn_map: &HashMap<String, &FuncDecl>,
     struct_map: &HashMap<String, StructLayout>,
+    enum_map: &HashMap<String, (&'static str, HashMap<String, (i64, Vec<Type>)>)>,
     expr: &Expr,
 ) -> Option<TypedExpr> {
     match expr {
@@ -33,7 +34,7 @@ pub fn type_check_expr(
         }
 
         Expr::Let(name, is_mutable, value, span) => {
-            let typed_val = type_check_expr(scopes, errors, fn_map, struct_map, value)?;
+            let typed_val = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, value)?;
             let ty = typed_val.ty();
             scopes.declare(name.clone(), *is_mutable, ty);
             Some(TypedExpr::Let(
@@ -58,7 +59,7 @@ pub fn type_check_expr(
                         span: span.clone(),
                     });
                 }
-                let typed_val = type_check_expr(scopes, errors, fn_map, struct_map, value)?;
+                let typed_val = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, value)?;
                 Some(TypedExpr::Assign(
                     name.clone(),
                     Box::new(typed_val),
@@ -72,7 +73,7 @@ pub fn type_check_expr(
                     help: None,
                     span: span.clone(),
                 });
-                let typed_val = type_check_expr(scopes, errors, fn_map, struct_map, value)?;
+                let typed_val = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, value)?;
                 errors.retain(|err| !(err.message == format!("Undefined variable '{name}'")));
                 Some(TypedExpr::Assign(
                     name.clone(),
@@ -83,8 +84,8 @@ pub fn type_check_expr(
         },
 
         Expr::Add(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
                 Type::Float
             } else {
@@ -99,8 +100,8 @@ pub fn type_check_expr(
         }
 
         Expr::Sub(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
                 Type::Float
             } else {
@@ -115,8 +116,8 @@ pub fn type_check_expr(
         }
 
         Expr::Mul(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
                 Type::Float
             } else {
@@ -131,8 +132,8 @@ pub fn type_check_expr(
         }
 
         Expr::Div(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
                 Type::Float
             } else {
@@ -147,8 +148,8 @@ pub fn type_check_expr(
         }
 
         Expr::Pipe(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
                 Type::Float
             } else {
@@ -173,8 +174,8 @@ pub fn type_check_expr(
         }
 
         Expr::Ampersand(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
                 Type::Float
             } else {
@@ -199,8 +200,8 @@ pub fn type_check_expr(
         }
 
         Expr::Caret(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
                 Type::Float
             } else {
@@ -225,8 +226,8 @@ pub fn type_check_expr(
         }
 
         Expr::Shr(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
                 Type::Float
             } else {
@@ -251,8 +252,8 @@ pub fn type_check_expr(
         }
 
         Expr::Shl(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
                 Type::Float
             } else {
@@ -277,8 +278,8 @@ pub fn type_check_expr(
         }
 
         Expr::Mod(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
                 Type::Float
             } else {
@@ -293,19 +294,19 @@ pub fn type_check_expr(
         }
 
         Expr::Neg(val, span) => {
-            let t_val = type_check_expr(scopes, errors, fn_map, struct_map, val)?;
+            let t_val = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, val)?;
             let ty = t_val.ty();
             Some(TypedExpr::Neg(Box::new(t_val), ty, span.clone()))
         }
 
         Expr::Not(val, span) => {
-            let t_val = type_check_expr(scopes, errors, fn_map, struct_map, val)?;
+            let t_val = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, val)?;
             Some(TypedExpr::Not(Box::new(t_val), span.clone()))
         }
 
         Expr::GreaterThan(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             Some(TypedExpr::GreaterThan(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -314,8 +315,8 @@ pub fn type_check_expr(
         }
 
         Expr::LessThan(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             Some(TypedExpr::LessThan(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -324,8 +325,8 @@ pub fn type_check_expr(
         }
 
         Expr::GreaterEqual(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             Some(TypedExpr::GreaterEqual(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -334,8 +335,8 @@ pub fn type_check_expr(
         }
 
         Expr::LessEqual(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             Some(TypedExpr::LessEqual(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -344,8 +345,8 @@ pub fn type_check_expr(
         }
 
         Expr::Equal(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             Some(TypedExpr::Equal(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -354,8 +355,8 @@ pub fn type_check_expr(
         }
 
         Expr::NotEqual(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             Some(TypedExpr::NotEqual(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -364,8 +365,8 @@ pub fn type_check_expr(
         }
 
         Expr::And(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             Some(TypedExpr::And(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -374,8 +375,8 @@ pub fn type_check_expr(
         }
 
         Expr::Or(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
             Some(TypedExpr::Or(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -387,7 +388,7 @@ pub fn type_check_expr(
             scopes.push_scope();
             let mut typed_stmts = Vec::new();
             for stmt in stmts {
-                if let Some(t_stmt) = type_check_expr(scopes, errors, fn_map, struct_map, stmt) {
+                if let Some(t_stmt) = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, stmt) {
                     typed_stmts.push(t_stmt);
                 }
             }
@@ -397,8 +398,8 @@ pub fn type_check_expr(
         }
 
         Expr::While(cond, body, span) => {
-            let t_cond = type_check_expr(scopes, errors, fn_map, struct_map, cond)?;
-            let t_body = type_check_expr(scopes, errors, fn_map, struct_map, body)?;
+            let t_cond = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, cond)?;
+            let t_body = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, body)?;
             Some(TypedExpr::While(
                 Box::new(t_cond),
                 Box::new(t_body),
@@ -407,8 +408,8 @@ pub fn type_check_expr(
         }
 
         Expr::If(cond, body, span) => {
-            let t_cond = type_check_expr(scopes, errors, fn_map, struct_map, cond)?;
-            let t_body = type_check_expr(scopes, errors, fn_map, struct_map, body)?;
+            let t_cond = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, cond)?;
+            let t_body = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, body)?;
             Some(TypedExpr::If(
                 Box::new(t_cond),
                 Box::new(t_body),
@@ -417,9 +418,9 @@ pub fn type_check_expr(
         }
 
         Expr::IfElse(cond, then_b, else_b, span) => {
-            let t_cond = type_check_expr(scopes, errors, fn_map, struct_map, cond)?;
-            let t_then = type_check_expr(scopes, errors, fn_map, struct_map, then_b)?;
-            let t_else = type_check_expr(scopes, errors, fn_map, struct_map, else_b)?;
+            let t_cond = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, cond)?;
+            let t_then = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, then_b)?;
+            let t_else = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, else_b)?;
             let res_ty = t_then.ty();
             Some(TypedExpr::IfElse(
                 Box::new(t_cond),
@@ -433,7 +434,7 @@ pub fn type_check_expr(
         Expr::Return(opt_expr, span) => {
             let t_opt = match opt_expr {
                 Some(e) => Some(Box::new(type_check_expr(
-                    scopes, errors, fn_map, struct_map, e,
+                    scopes, errors, fn_map, struct_map, enum_map, e,
                 )?)),
                 None => None,
             };
@@ -443,7 +444,7 @@ pub fn type_check_expr(
         Expr::MacroCall(name, args, span) => {
             let mut typed_args = Vec::new();
             for arg in args {
-                if let Some(t_arg) = type_check_expr(scopes, errors, fn_map, struct_map, arg) {
+                if let Some(t_arg) = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, arg) {
                     typed_args.push(t_arg);
                 }
             }
@@ -453,8 +454,22 @@ pub fn type_check_expr(
         Expr::Call(name, args, span) => {
             let mut typed_args = Vec::new();
             for arg in args {
-                if let Some(t_arg) = type_check_expr(scopes, errors, fn_map, struct_map, arg) {
+                if let Some(t_arg) = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, arg) {
                     typed_args.push(t_arg);
+                }
+            }
+            if let Some((enum_name, variant_name)) = name.split_once('.') {
+                if let Some((static_enum_name, variants)) = enum_map.get(enum_name) {
+                    if let Some((disc, _)) = variants.get(variant_name) {
+                        return Some(TypedExpr::EnumConstruct(
+                            enum_name.to_string(),
+                            variant_name.to_string(),
+                            *disc as usize,
+                            typed_args,
+                            Type::Enum(static_enum_name),
+                            span.clone(),
+                        ));
+                    }
                 }
             }
             let ret_ty = if let Some(target_func) = fn_map.get(name) {
@@ -492,7 +507,7 @@ pub fn type_check_expr(
         Expr::ArrayInit(elems, span) => {
             let mut typed_elems = Vec::new();
             for e in elems {
-                if let Some(te) = type_check_expr(scopes, errors, fn_map, struct_map, e) {
+                if let Some(te) = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, e) {
                     typed_elems.push(te);
                 }
             }
@@ -506,8 +521,8 @@ pub fn type_check_expr(
         }
 
         Expr::IndexAccess(target, idx, span) => {
-            let t_target = type_check_expr(scopes, errors, fn_map, struct_map, target)?;
-            let t_idx = type_check_expr(scopes, errors, fn_map, struct_map, idx)?;
+            let t_target = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, target)?;
+            let t_idx = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, idx)?;
             let elem_ty = match t_target.ty() {
                 Type::Array(e_ty, _) => *e_ty,
                 _ => Type::Int,
@@ -521,9 +536,9 @@ pub fn type_check_expr(
         }
 
         Expr::IndexAssign(target, idx, val, span) => {
-            let t_target = type_check_expr(scopes, errors, fn_map, struct_map, target)?;
-            let t_idx = type_check_expr(scopes, errors, fn_map, struct_map, idx)?;
-            let t_val = type_check_expr(scopes, errors, fn_map, struct_map, val)?;
+            let t_target = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, target)?;
+            let t_idx = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, idx)?;
+            let t_val = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, val)?;
             Some(TypedExpr::IndexAssign(
                 Box::new(t_target),
                 Box::new(t_idx),
@@ -535,7 +550,7 @@ pub fn type_check_expr(
         Expr::ObjInit(name, fields, span) => {
             let mut typed_fields = Vec::new();
             for (f_name, f_expr) in fields {
-                let t_expr = type_check_expr(scopes, errors, fn_map, struct_map, f_expr)?;
+                let t_expr = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, f_expr)?;
                 typed_fields.push((f_name.clone(), t_expr));
             }
 
@@ -558,7 +573,22 @@ pub fn type_check_expr(
         }
 
         Expr::FieldAccess(target, field_name, span) => {
-            let t_target = type_check_expr(scopes, errors, fn_map, struct_map, target)?;
+            if let Expr::Ident(ref enum_name, _) = **target {
+                if let Some((static_enum_name, variants)) = enum_map.get(enum_name) {
+                    if let Some((disc, _)) = variants.get(field_name) {
+                        return Some(TypedExpr::EnumConstruct(
+                            enum_name.clone(),
+                            field_name.clone(),
+                            *disc as usize,
+                            vec![],
+                            Type::Enum(static_enum_name),
+                            span.clone(),
+                        ));
+                    }
+                }
+            }
+
+            let t_target = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, target)?;
             let mut field_ty = Type::Int;
 
             if let Type::Obj(struct_name) = t_target.ty() {
@@ -592,8 +622,8 @@ pub fn type_check_expr(
         }
 
         Expr::FieldAssign(target, field_name, val, span) => {
-            let t_target = type_check_expr(scopes, errors, fn_map, struct_map, target)?;
-            let t_val = type_check_expr(scopes, errors, fn_map, struct_map, val)?;
+            let t_target = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, target)?;
+            let t_val = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, val)?;
 
             if let Expr::Ident(var_name, _) = target.as_ref() {
                 if let Some(info) = scopes.lookup(var_name) {
@@ -614,6 +644,34 @@ pub fn type_check_expr(
                 Box::new(t_target),
                 field_name.clone(),
                 Box::new(t_val),
+                span.clone(),
+            ))
+        }
+
+        Expr::EnumConstruct(enum_name, variant_name, args, span) => {
+            let mut typed_args = Vec::new();
+            for a in args {
+                if let Some(ta) = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, a) {
+                    typed_args.push(ta);
+                }
+            }
+
+            let mut disc = 0;
+            let mut static_enum_name = intern_str(enum_name);
+
+            if let Some((static_name, variants)) = enum_map.get(enum_name) {
+                static_enum_name = *static_name;
+                if let Some((d, _)) = variants.get(variant_name) {
+                    disc = *d as usize;
+                }
+            }
+
+            Some(TypedExpr::EnumConstruct(
+                enum_name.clone(),
+                variant_name.clone(),
+                disc,
+                typed_args,
+                Type::Enum(static_enum_name),
                 span.clone(),
             ))
         }

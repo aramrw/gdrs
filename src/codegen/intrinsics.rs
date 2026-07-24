@@ -81,7 +81,7 @@ pub fn compile_macro_call(
                     Type::Bool => 1,
                     Type::String => 2,
                     Type::Float => 3,
-                    Type::Unit | Type::Obj(_) | Type::Array(_, _) => 0,
+                    Type::Unit | Type::Obj(_) | Type::Enum(_) | Type::Array(_, _) => 0,
                 };
 
                 let type_tag_val = builder.ins().iconst(types::I64, type_tag);
@@ -117,6 +117,7 @@ pub fn compile_macro_call(
                     Type::String => "String",
                     Type::Unit => "Unit",
                     Type::Obj(name) => name,
+                    Type::Enum(name) => name,
                     Type::Array(_, _) => "Array",
                 };
 

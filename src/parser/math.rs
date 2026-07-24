@@ -61,12 +61,20 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
 
         let call_expr = select! { Token::Ident(name) => name }
             .then(
+                just(Token::Dot)
+                    .ignore_then(select! { Token::Ident(field) => field })
+                    .or_not(),
+            )
+            .then(
                 math.clone()
                     .separated_by(just(Token::Comma))
                     .allow_trailing()
                     .delimited_by(just(Token::LParen), just(Token::RParen)),
             )
-            .map_with_span(|(name, args), span| Expr::Call(name, args, span));
+            .map_with_span(|((name, opt_sub), args), span| match opt_sub {
+                Some(sub) => Expr::Call(format!("{name}.{sub}"), args, span),
+                None => Expr::Call(name, args, span),
+            });
 
         let array_init = math
             .clone()

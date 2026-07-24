@@ -167,8 +167,17 @@ pub fn compile_expr(
 
         // Not Equal (!=)
         TypedExpr::NotEqual(lhs, rhs, _) => {
-            let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
-            let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+            let left_raw = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
+            let right_raw = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+
+            let (left, right) = if let Type::Enum(_) = lhs.ty() {
+                let l_tag = builder.ins().load(types::I64, MemFlags::new(), left_raw, 0);
+                let r_tag = builder.ins().load(types::I64, MemFlags::new(), right_raw, 0);
+                (l_tag, r_tag)
+            } else {
+                (left_raw, right_raw)
+            };
+
             let cmp = if lhs.ty() == Type::Float {
                 builder.ins().fcmp(FloatCC::NotEqual, left, right)
             } else {
@@ -266,8 +275,17 @@ pub fn compile_expr(
         }
 
         TypedExpr::Equal(lhs, rhs, _) => {
-            let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
-            let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+            let left_raw = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
+            let right_raw = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+
+            let (left, right) = if let Type::Enum(_) = lhs.ty() {
+                let l_tag = builder.ins().load(types::I64, MemFlags::new(), left_raw, 0);
+                let r_tag = builder.ins().load(types::I64, MemFlags::new(), right_raw, 0);
+                (l_tag, r_tag)
+            } else {
+                (left_raw, right_raw)
+            };
+
             let cmp = if lhs.ty() == Type::Float {
                 builder.ins().fcmp(FloatCC::Equal, left, right)
             } else {
@@ -546,6 +564,29 @@ pub fn compile_expr(
 
             builder.ins().store(MemFlags::new(), new_val, elem_addr, 0);
             new_val
+        }
+
+        TypedExpr::EnumConstruct(_enum_name, _variant_name, disc, payload_exprs, _ty, _) => {
+            let total_bytes = ((1 + payload_exprs.len()) * 8) as u32;
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                if total_bytes == 0 { 8 } else { total_bytes },
+                0,
+            ));
+            let base_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+
+            // Store discriminant tag at offset 0
+            let disc_val = builder.ins().iconst(types::I64, *disc as i64);
+            builder.ins().store(MemFlags::new(), disc_val, base_ptr, 0);
+
+            // Store payload fields at offsets 8, 16, ...
+            for (i, expr) in payload_exprs.iter().enumerate() {
+                let val = compile_expr(builder, expr, vars, var_counter, module, struct_layouts);
+                let offset = ((i + 1) * 8) as i32;
+                builder.ins().store(MemFlags::new(), val, base_ptr, offset);
+            }
+
+            base_ptr
         }
     }
 }
