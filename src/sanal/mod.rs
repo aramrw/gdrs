@@ -4,8 +4,8 @@
 pub mod types;
 
 use crate::{
-    ast::{intern_str, Expr, FuncDecl, Param, Program, Span, StructDecl, Type, TypedExpr, TypedFuncDecl, TypedProgram},
-    sanal::types::type_check_expr,
+    ast::{intern_str, FuncDecl, Param, Program, Span, Type, TypedFuncDecl, TypedProgram},
+    sanal::types::{type_check_expr, TypeCtx},
 };
 use std::collections::HashMap;
 
@@ -106,17 +106,62 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
         );
     }
 
-    let mut enum_names: std::collections::HashSet<String> = program.enums.iter().map(|e| e.name.clone()).collect();
+    let mut enum_names: std::collections::HashSet<String> =
+        program.enums.iter().map(|e| e.name.clone()).collect();
     let mut enum_map = HashMap::new();
     for e in &program.enums {
         let mut variant_map = HashMap::new();
         for (i, variant) in e.variants.iter().enumerate() {
-            variant_map.insert(variant.name.clone(), (i as i64, variant.payload_types.clone()));
+            variant_map.insert(
+                variant.name.clone(),
+                (i as i64, variant.payload_types.clone()),
+            );
         }
         enum_map.insert(e.name.clone(), (intern_str(&e.name), variant_map));
     }
 
-    for func in &program.functions {
+    let mut all_functions = Vec::new();
+
+    for impl_block in &program.impls {
+        let target_ty = resolve_type(Type::Obj(intern_str(&impl_block.target_type)), &enum_names);
+        for method in &impl_block.methods {
+            let mangled_name = format!("{}_{}", impl_block.target_type, method.name);
+            let mut params = Vec::new();
+            for p in &method.params {
+                if p.name == "self" {
+                    params.push(Param {
+                        name: "self".to_string(),
+                        is_mutable: p.is_mutable,
+                        ty: target_ty,
+                        span: p.span.clone(),
+                    });
+                } else {
+                    params.push(p.clone());
+                }
+            }
+            all_functions.push(FuncDecl {
+                name: mangled_name,
+                params,
+                return_type: method.return_type,
+                body: method.body.clone(),
+            });
+        }
+    }
+
+    all_functions.extend(program.functions.clone());
+
+    let mut fn_map = HashMap::new();
+    for func in &all_functions {
+        fn_map.insert(func.name.clone(), func);
+    }
+
+    let type_ctx = TypeCtx {
+        fn_map: &fn_map,
+        struct_map: &struct_map,
+        enum_map: &enum_map,
+    };
+
+    for func in &all_functions {
         let mut scope_stack = ScopeStack::new();
         let mut typed_body = Vec::new();
 
@@ -125,16 +170,19 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
 
         for param in &func.params {
             let res_ty = resolve_type(param.ty, &enum_names);
-            scope_stack.declare(param.name.clone(), false, res_ty);
+            scope_stack.declare(param.name.clone(), param.is_mutable, res_ty);
             resolved_params.push(Param {
                 name: param.name.clone(),
+                is_mutable: param.is_mutable,
                 ty: res_ty,
                 span: param.span.clone(),
             });
         }
 
         for expr in &func.body {
-            if let Some(typed_expr) = type_check_expr(&mut scope_stack, &mut errors, &fn_map, &struct_map, &enum_map, expr) {
+            if let Some(typed_expr) =
+                type_check_expr(&mut scope_stack, &mut errors, &type_ctx, expr)
+            {
                 typed_body.push(typed_expr);
             }
         }
@@ -151,6 +199,7 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
         Ok(TypedProgram {
             structs: program.structs.clone(),
             enums: program.enums.clone(),
+            impls: program.impls.clone(),
             functions: typed_functions,
         })
     } else {
@@ -161,8 +210,10 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
 fn resolve_type(ty: Type, enum_names: &std::collections::HashSet<String>) -> Type {
     match ty {
         Type::Obj(name) if enum_names.contains(name) => Type::Enum(intern_str(name)),
-        Type::Array(elem_ty, len) => Type::Array(crate::ast::intern_type(resolve_type(*elem_ty, enum_names)), len),
+        Type::Array(elem_ty, len) => Type::Array(
+            crate::ast::intern_type(resolve_type(*elem_ty, enum_names)),
+            len,
+        ),
         other => other,
     }
 }
-

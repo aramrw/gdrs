@@ -146,6 +146,22 @@ pub fn stmt_parser<'a>(
             .map_with_span(|(name, args), span| Expr::MacroCall(name, args, span))
             .then_ignore(just(Token::Newline).or_not());
 
+        let method_call_stmt = select! { Token::Ident(target) => target }
+            .then_ignore(just(Token::Dot))
+            .then(select! { Token::Ident(method) => method })
+            .then(
+                math.clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .map_with_span(|((target, method), args), span| {
+                let mut call_args = vec![Expr::Ident(target, span.clone())];
+                call_args.extend(args);
+                Expr::Call(method, call_args, span)
+            })
+            .then_ignore(just(Token::Newline).or_not());
+
         let call_stmt = select! { Token::Ident(name) => name }
             .then(
                 math.clone()
@@ -164,6 +180,7 @@ pub fn stmt_parser<'a>(
             .or(if_stmt)
             .or(while_stmt)
             .or(macro_call)
+            .or(method_call_stmt)
             .or(call_stmt)
             .or(block)
     });

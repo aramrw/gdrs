@@ -306,10 +306,32 @@ pub fn compile_expr(
                 _ => types::I64,
             };
             builder.declare_var(var, cranelift_ty);
-            builder.def_var(var, val);
+
+            let stored_val = match ty {
+                Type::Obj(struct_name) => {
+                    let total_bytes = struct_layouts.get(*struct_name).map(|l| l.total_size).unwrap_or(16);
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        if total_bytes == 0 { 8 } else { total_bytes },
+                        0,
+                    ));
+                    let dst_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+
+                    let num_words = if total_bytes == 0 { 1 } else { (total_bytes + 7) / 8 };
+                    for i in 0..num_words {
+                        let offset = (i * 8) as i32;
+                        let word = builder.ins().load(types::I64, MemFlags::new(), val, offset);
+                        builder.ins().store(MemFlags::new(), word, dst_ptr, offset);
+                    }
+                    dst_ptr
+                }
+                _ => val,
+            };
+
+            builder.def_var(var, stored_val);
             vars.insert(name.clone(), var);
 
-            val
+            stored_val
         }
 
         // Variable Reassignment -> Update Cranelift variable value

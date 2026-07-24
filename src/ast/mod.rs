@@ -138,6 +138,8 @@ pub enum Token {
     Obj,
     #[token("enum")]
     Enum,
+    #[token("impl")]
+    Impl,
 
     #[token(".")]
     Dot,
@@ -194,8 +196,16 @@ pub struct EnumDecl {
 }
 
 #[derive(Debug, Clone)]
+pub struct ImplDecl {
+    pub target_type: String,
+    pub methods: Vec<FuncDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct Param {
     pub name: String,
+    pub is_mutable: bool,
     pub ty: Type,
     pub span: Span,
 }
@@ -457,10 +467,11 @@ impl TypedExpr {
 pub struct Program {
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
+    pub impls: Vec<ImplDecl>,
     pub functions: Vec<FuncDecl>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FuncDecl {
     pub name: String,
     pub params: Vec<Param>,
@@ -472,6 +483,7 @@ pub struct FuncDecl {
 pub struct TypedProgram {
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
+    pub impls: Vec<ImplDecl>,
     pub functions: Vec<TypedFuncDecl>,
 }
 

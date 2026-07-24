@@ -1,0 +1,49 @@
+enum Option:
+	Some(i64)
+	None
+
+enum Result:
+	Ok(f64)
+	Err(i64)
+
+enum Shape:
+	Circle(f64)
+	Rectangle(f64, f64)
+	Point
+
+fn is_some(opt: Option) -> bool:
+	if opt == Option.None:
+		return false
+	else:
+		return true
+
+fn is_ok(res: Result) -> bool:
+	if res == Result.Ok(0.0):
+		return true
+	else:
+		if res != Result.Err(0):
+			return true
+		else:
+			return false
+
+fn main():
+	log!("=== Testing GDRS Rust-Style Tagged Union Enums ===")
+
+	let none_opt = Option.None
+	let some_opt = Option.Some(42)
+
+	log!("is_some(Option.None) =", is_some(none_opt))
+	log!("is_some(Option.Some(42)) =", is_some(some_opt))
+
+	let ok_res = Result.Ok(3.14159)
+	let err_res = Result.Err(404)
+
+	log!("is_ok(Result.Ok(3.14159)) =", is_ok(ok_res))
+	log!("is_ok(Result.Err(404)) =", is_ok(err_res))
+
+	let c1 = Shape.Circle(5.0)
+	let c2 = Shape.Circle(5.0)
+	let r = Shape.Rectangle(10.0, 20.0)
+
+	log!("Shape.Circle == Shape.Circle =", c1 == c2)
+	log!("Shape.Circle == Shape.Rectangle =", c1 == r)

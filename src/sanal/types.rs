@@ -1,16 +1,21 @@
 use crate::{
-    ast::{Expr, FuncDecl, Type, TypedExpr, intern_str},
+    ast::{Expr, FuncDecl, Span, Type, TypedExpr, intern_str},
     sanal::{ScopeStack, SemanticError, StructLayout},
 };
 use std::collections::HashMap;
 
+/// Context Group for types
+pub struct TypeCtx<'a> {
+    pub fn_map: &'a HashMap<String, &'a FuncDecl>,
+    pub struct_map: &'a HashMap<String, StructLayout>,
+    pub enum_map: &'a HashMap<String, (&'static str, HashMap<String, (i64, Vec<Type>)>)>,
+}
+
 /// Type checks an untyped Expr and produces a TypedExpr
-pub fn type_check_expr(
+pub fn type_check_expr<'a>(
     scopes: &mut ScopeStack,
     errors: &mut Vec<SemanticError>,
-    fn_map: &HashMap<String, &FuncDecl>,
-    struct_map: &HashMap<String, StructLayout>,
-    enum_map: &HashMap<String, (&'static str, HashMap<String, (i64, Vec<Type>)>)>,
+    type_ctx: &TypeCtx<'a>,
     expr: &Expr,
 ) -> Option<TypedExpr> {
     match expr {
@@ -34,7 +39,7 @@ pub fn type_check_expr(
         }
 
         Expr::Let(name, is_mutable, value, span) => {
-            let typed_val = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, value)?;
+            let typed_val = type_check_expr(scopes, errors, type_ctx, value)?;
             let ty = typed_val.ty();
             scopes.declare(name.clone(), *is_mutable, ty);
             Some(TypedExpr::Let(
@@ -46,51 +51,54 @@ pub fn type_check_expr(
             ))
         }
 
-        Expr::Assign(name, value, span) => match scopes.lookup(name) {
-            Some(info) => {
-                let err = format!("Cannot reassign immutable variable '{name}'");
+        Expr::Assign(name, value, span) => {
+            let typed_val = type_check_expr(scopes, errors, type_ctx, value)?;
+
+            if let Some(info) = scopes.lookup(name) {
                 if !info.is_mutable {
                     errors.push(SemanticError {
-                        message: err.clone(),
-                        label: err,
+                        message: format!("Cannot reassign immutable variable '{name}'"),
+                        label: format!("Variable '{name}' is immutable"),
                         help: Some(format!(
                             "Consider declaring this variable as mutable: 'let mut {name}'"
                         )),
                         span: span.clone(),
                     });
                 }
-                let typed_val = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, value)?;
-                Some(TypedExpr::Assign(
-                    name.clone(),
-                    Box::new(typed_val),
-                    span.clone(),
-                ))
-            }
-            None => {
+
+                // Optional: Check if typed_val.ty() matches info.ty!
+                if typed_val.ty() != info.ty {
+                    errors.push(SemanticError {
+                        message: format!(
+                            "Cannot assign type `{:?}` to variable '{name}' of type `{:?}`",
+                            typed_val.ty(),
+                            info.ty
+                        ),
+                        label: "Type mismatch".to_string(),
+                        help: None,
+                        span: span.clone(),
+                    });
+                }
+            } else {
                 errors.push(SemanticError {
                     message: format!("Cannot assign to undefined variable '{name}'"),
                     label: format!("Variable '{name}' does not exist in this scope"),
                     help: None,
                     span: span.clone(),
                 });
-                let typed_val = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, value)?;
-                errors.retain(|err| !(err.message == format!("Undefined variable '{name}'")));
-                Some(TypedExpr::Assign(
-                    name.clone(),
-                    Box::new(typed_val),
-                    span.clone(),
-                ))
             }
-        },
+
+            Some(TypedExpr::Assign(
+                name.clone(),
+                Box::new(typed_val),
+                span.clone(),
+            ))
+        }
 
         Expr::Add(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
-                Type::Float
-            } else {
-                Type::Int
-            };
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+            let ty = check_binary_op("+", &t_lhs, &t_rhs, true, span, errors);
             Some(TypedExpr::Add(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -100,13 +108,9 @@ pub fn type_check_expr(
         }
 
         Expr::Sub(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
-                Type::Float
-            } else {
-                Type::Int
-            };
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+            let ty = check_binary_op("-", &t_lhs, &t_rhs, true, span, errors);
             Some(TypedExpr::Sub(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -116,13 +120,9 @@ pub fn type_check_expr(
         }
 
         Expr::Mul(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
-                Type::Float
-            } else {
-                Type::Int
-            };
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+            let ty = check_binary_op("*", &t_lhs, &t_rhs, true, span, errors);
             Some(TypedExpr::Mul(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -132,13 +132,9 @@ pub fn type_check_expr(
         }
 
         Expr::Div(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
-                Type::Float
-            } else {
-                Type::Int
-            };
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+            let ty = check_binary_op("/", &t_lhs, &t_rhs, true, span, errors);
             Some(TypedExpr::Div(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -148,23 +144,9 @@ pub fn type_check_expr(
         }
 
         Expr::Pipe(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
-                Type::Float
-            } else {
-                Type::Int
-            };
-
-            if ty != Type::Int {
-                errors.push(SemanticError {
-                    message: "You can only use bitwise operators on integers.".into(),
-                    label: "Invalid Use of Bitwise Operator".into(),
-                    help: Some("Use an integer instead, or use: +, -, *, /".into()),
-                    span: span.clone(),
-                });
-            }
-
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+            let ty = check_binary_op("|", &t_lhs, &t_rhs, true, span, errors);
             Some(TypedExpr::Pipe(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -174,23 +156,9 @@ pub fn type_check_expr(
         }
 
         Expr::Ampersand(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
-                Type::Float
-            } else {
-                Type::Int
-            };
-
-            if ty != Type::Int {
-                errors.push(SemanticError {
-                    message: "You can only use bitwise operators on integers.".into(),
-                    label: "Invalid Use of Bitwise Operator".into(),
-                    help: Some("Use an integer instead, or use: +, -, *, /".into()),
-                    span: span.clone(),
-                });
-            }
-
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+            let ty = check_binary_op("&", &t_lhs, &t_rhs, true, span, errors);
             Some(TypedExpr::Ampersand(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -200,23 +168,9 @@ pub fn type_check_expr(
         }
 
         Expr::Caret(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
-                Type::Float
-            } else {
-                Type::Int
-            };
-
-            if ty != Type::Int {
-                errors.push(SemanticError {
-                    message: "You can only use bitwise operators on integers.".into(),
-                    label: "Invalid Use of Bitwise Operator".into(),
-                    help: Some("Use an integer instead, or use: +, -, *, /".into()),
-                    span: span.clone(),
-                });
-            }
-
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+            let ty = check_binary_op("^", &t_lhs, &t_rhs, true, span, errors);
             Some(TypedExpr::Caret(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -225,50 +179,10 @@ pub fn type_check_expr(
             ))
         }
 
-        Expr::Shr(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
-                Type::Float
-            } else {
-                Type::Int
-            };
-
-            if ty != Type::Int {
-                errors.push(SemanticError {
-                    message: "You can only use bitwise operators on integers.".into(),
-                    label: "Invalid Use of Bitwise Operator".into(),
-                    help: Some("Use an integer instead, or use: +, -, *, /".into()),
-                    span: span.clone(),
-                });
-            }
-
-            Some(TypedExpr::Shr(
-                Box::new(t_lhs),
-                Box::new(t_rhs),
-                ty,
-                span.clone(),
-            ))
-        }
-
         Expr::Shl(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
-                Type::Float
-            } else {
-                Type::Int
-            };
-
-            if ty != Type::Int {
-                errors.push(SemanticError {
-                    message: "You can only use bitwise operators on integers.".into(),
-                    label: "Invalid Use of Bitwise Operator".into(),
-                    help: Some("Use an integer instead, or use: +, -, *, /".into()),
-                    span: span.clone(),
-                });
-            }
-
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+            let ty = check_binary_op("<<", &t_lhs, &t_rhs, true, span, errors);
             Some(TypedExpr::Shl(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -277,14 +191,22 @@ pub fn type_check_expr(
             ))
         }
 
+        Expr::Shr(lhs, rhs, span) => {
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+            let ty = check_binary_op(">>", &t_lhs, &t_rhs, true, span, errors);
+            Some(TypedExpr::Shr(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                ty,
+                span.clone(),
+            ))
+        }
+
         Expr::Mod(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
-                Type::Float
-            } else {
-                Type::Int
-            };
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+            let ty = check_binary_op("%", &t_lhs, &t_rhs, true, span, errors);
             Some(TypedExpr::Mod(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -294,19 +216,42 @@ pub fn type_check_expr(
         }
 
         Expr::Neg(val, span) => {
-            let t_val = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, val)?;
+            let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
             let ty = t_val.ty();
+
+            if ty != Type::Int && ty != Type::Float {
+                errors.push(SemanticError {
+                    message: format!("Cannot negate non-numeric type `{:?}`", ty),
+                    label: "Invalid negation".into(),
+                    help: Some("The '-' operator can only be used on integers and floats".into()),
+                    span: span.clone(),
+                });
+            }
+
             Some(TypedExpr::Neg(Box::new(t_val), ty, span.clone()))
         }
 
         Expr::Not(val, span) => {
-            let t_val = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, val)?;
+            let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
+
+            if t_val.ty() != Type::Bool {
+                errors.push(SemanticError {
+                    message: format!(
+                        "Cannot apply logical NOT to non-boolean type `{:?}`",
+                        t_val.ty()
+                    ),
+                    label: "Expected boolean expression".into(),
+                    help: None,
+                    span: span.clone(),
+                });
+            }
+
             Some(TypedExpr::Not(Box::new(t_val), span.clone()))
         }
 
         Expr::GreaterThan(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
             Some(TypedExpr::GreaterThan(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -315,8 +260,8 @@ pub fn type_check_expr(
         }
 
         Expr::LessThan(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
             Some(TypedExpr::LessThan(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -325,9 +270,28 @@ pub fn type_check_expr(
         }
 
         Expr::GreaterEqual(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
-            Some(TypedExpr::GreaterEqual(
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+
+            let l_ty = t_lhs.ty();
+            let r_ty = t_rhs.ty();
+
+            // Ensure both sides are numeric (Int or Float)
+            if !(l_ty == Type::Int || l_ty == Type::Float)
+                || !(r_ty == Type::Int || r_ty == Type::Float)
+            {
+                errors.push(SemanticError {
+                    message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '>='"),
+                    label: "Invalid comparison operator".into(),
+                    help: Some(
+                        "Ordering comparisons can only be used on numbers (`Int` or `Float`)"
+                            .into(),
+                    ),
+                    span: span.clone(),
+                });
+            }
+
+            Some(TypedExpr::LessEqual(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
                 span.clone(),
@@ -335,8 +299,27 @@ pub fn type_check_expr(
         }
 
         Expr::LessEqual(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+
+            let l_ty = t_lhs.ty();
+            let r_ty = t_rhs.ty();
+
+            // Ensure both sides are numeric (Int or Float)
+            if !(l_ty == Type::Int || l_ty == Type::Float)
+                || !(r_ty == Type::Int || r_ty == Type::Float)
+            {
+                errors.push(SemanticError {
+                    message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '<='"),
+                    label: "Invalid comparison operator".into(),
+                    help: Some(
+                        "Ordering comparisons can only be used on numbers (`Int` or `Float`)"
+                            .into(),
+                    ),
+                    span: span.clone(),
+                });
+            }
+
             Some(TypedExpr::LessEqual(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -345,8 +328,25 @@ pub fn type_check_expr(
         }
 
         Expr::Equal(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+
+            let l_ty = t_lhs.ty();
+            let r_ty = t_rhs.ty();
+
+            if l_ty != r_ty {
+                errors.push(SemanticError {
+                    message: format!(
+                        "Cannot compare distinct types `{l_ty:?}` and `{r_ty:?}` for equality"
+                    ),
+                    label: format!("Type mismatch: `{l_ty:?}` vs `{r_ty:?}`"),
+                    help: Some(
+                        "Both operands must be the exact same type to check for equality".into(),
+                    ),
+                    span: span.clone(),
+                });
+            }
+
             Some(TypedExpr::Equal(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -355,8 +355,25 @@ pub fn type_check_expr(
         }
 
         Expr::NotEqual(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+
+            let l_ty = t_lhs.ty();
+            let r_ty = t_rhs.ty();
+
+            if l_ty != r_ty {
+                errors.push(SemanticError {
+                    message: format!(
+                        "Cannot compare distinct types `{l_ty:?}` and `{r_ty:?}` for equality"
+                    ),
+                    label: format!("Type mismatch: `{l_ty:?}` vs `{r_ty:?}`"),
+                    help: Some(
+                        "Both operands must be the exact same type to check for equality".into(),
+                    ),
+                    span: span.clone(),
+                });
+            }
+
             Some(TypedExpr::NotEqual(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -365,8 +382,33 @@ pub fn type_check_expr(
         }
 
         Expr::And(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+
+            if t_lhs.ty() != Type::Bool {
+                errors.push(SemanticError {
+                    message: format!(
+                        "Left side of '&&' must be a `Bool`, found `{:?}`",
+                        t_lhs.ty()
+                    ),
+                    label: "Expected boolean".into(),
+                    help: None,
+                    span: t_lhs.span().clone(),
+                });
+            }
+
+            if t_rhs.ty() != Type::Bool {
+                errors.push(SemanticError {
+                    message: format!(
+                        "Right side of '&&' must be a `Bool`, found `{:?}`",
+                        t_rhs.ty()
+                    ),
+                    label: "Expected boolean".into(),
+                    help: None,
+                    span: t_rhs.span().clone(),
+                });
+            }
+
             Some(TypedExpr::And(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -375,8 +417,33 @@ pub fn type_check_expr(
         }
 
         Expr::Or(lhs, rhs, span) => {
-            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, lhs)?;
-            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, rhs)?;
+            let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+
+            if t_lhs.ty() != Type::Bool {
+                errors.push(SemanticError {
+                    message: format!(
+                        "Left side of '||' must be a `Bool`, found `{:?}`",
+                        t_lhs.ty()
+                    ),
+                    label: "Expected boolean".into(),
+                    help: None,
+                    span: t_lhs.span().clone(),
+                });
+            }
+
+            if t_rhs.ty() != Type::Bool {
+                errors.push(SemanticError {
+                    message: format!(
+                        "Right side of '||' must be a `Bool`, found `{:?}`",
+                        t_rhs.ty()
+                    ),
+                    label: "Expected boolean".into(),
+                    help: None,
+                    span: t_rhs.span().clone(),
+                });
+            }
+
             Some(TypedExpr::Or(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -388,7 +455,7 @@ pub fn type_check_expr(
             scopes.push_scope();
             let mut typed_stmts = Vec::new();
             for stmt in stmts {
-                if let Some(t_stmt) = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, stmt) {
+                if let Some(t_stmt) = type_check_expr(scopes, errors, type_ctx, stmt) {
                     typed_stmts.push(t_stmt);
                 }
             }
@@ -398,8 +465,21 @@ pub fn type_check_expr(
         }
 
         Expr::While(cond, body, span) => {
-            let t_cond = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, cond)?;
-            let t_body = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, body)?;
+            let t_cond = type_check_expr(scopes, errors, type_ctx, cond)?;
+            let t_body = type_check_expr(scopes, errors, type_ctx, body)?;
+
+            if t_cond.ty() != Type::Bool {
+                errors.push(SemanticError {
+                    message: format!(
+                        "`while` condition must be a `Bool`, found `{:?}`",
+                        t_cond.ty()
+                    ),
+                    label: "Expected boolean condition".into(),
+                    help: None,
+                    span: t_cond.span().clone(),
+                });
+            }
+
             Some(TypedExpr::While(
                 Box::new(t_cond),
                 Box::new(t_body),
@@ -408,8 +488,19 @@ pub fn type_check_expr(
         }
 
         Expr::If(cond, body, span) => {
-            let t_cond = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, cond)?;
-            let t_body = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, body)?;
+            let t_cond = type_check_expr(scopes, errors, type_ctx, cond)?;
+            let t_body = type_check_expr(scopes, errors, type_ctx, body)?;
+
+            // 1. Condition must be a boolean
+            if t_cond.ty() != Type::Bool {
+                errors.push(SemanticError {
+                    message: format!("`if` condition must be a `Bool`, found `{:?}`", t_cond.ty()),
+                    label: "Expected boolean expression".into(),
+                    help: Some("Try using a comparison operator like ==, <, or >".into()),
+                    span: t_cond.span().clone(),
+                });
+            }
+
             Some(TypedExpr::If(
                 Box::new(t_cond),
                 Box::new(t_body),
@@ -418,9 +509,37 @@ pub fn type_check_expr(
         }
 
         Expr::IfElse(cond, then_b, else_b, span) => {
-            let t_cond = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, cond)?;
-            let t_then = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, then_b)?;
-            let t_else = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, else_b)?;
+            let t_cond = type_check_expr(scopes, errors, type_ctx, cond)?;
+            let t_then = type_check_expr(scopes, errors, type_ctx, then_b)?;
+            let t_else = type_check_expr(scopes, errors, type_ctx, else_b)?;
+
+            // 1. Condition check
+            if t_cond.ty() != Type::Bool {
+                errors.push(SemanticError {
+                    message: format!("`if` condition must be a `Bool`, found `{:?}`", t_cond.ty()),
+                    label: "Expected boolean expression".into(),
+                    help: None,
+                    span: t_cond.span().clone(),
+                });
+            }
+
+            // 2. Both branches must produce the same type!
+            if t_then.ty() != t_else.ty() {
+                errors.push(SemanticError {
+                    message: format!(
+                        "`if` and `else` branches have incompatible types (`{:?}` vs `{:?}`)",
+                        t_then.ty(),
+                        t_else.ty()
+                    ),
+                    label: format!("Expected `{:?}` because of `if` branch", t_then.ty()),
+                    help: Some(
+                        "Both branches of an if/else expression must yield the exact same type"
+                            .into(),
+                    ),
+                    span: t_else.span().clone(),
+                });
+            }
+
             let res_ty = t_then.ty();
             Some(TypedExpr::IfElse(
                 Box::new(t_cond),
@@ -433,9 +552,7 @@ pub fn type_check_expr(
 
         Expr::Return(opt_expr, span) => {
             let t_opt = match opt_expr {
-                Some(e) => Some(Box::new(type_check_expr(
-                    scopes, errors, fn_map, struct_map, enum_map, e,
-                )?)),
+                Some(e) => Some(Box::new(type_check_expr(scopes, errors, type_ctx, e)?)),
                 None => None,
             };
             Some(TypedExpr::Return(t_opt, span.clone()))
@@ -444,7 +561,7 @@ pub fn type_check_expr(
         Expr::MacroCall(name, args, span) => {
             let mut typed_args = Vec::new();
             for arg in args {
-                if let Some(t_arg) = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, arg) {
+                if let Some(t_arg) = type_check_expr(scopes, errors, type_ctx, arg) {
                     typed_args.push(t_arg);
                 }
             }
@@ -454,16 +571,17 @@ pub fn type_check_expr(
         Expr::Call(name, args, span) => {
             let mut typed_args = Vec::new();
             for arg in args {
-                if let Some(t_arg) = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, arg) {
+                if let Some(t_arg) = type_check_expr(scopes, errors, type_ctx, arg) {
                     typed_args.push(t_arg);
                 }
             }
-            if let Some((enum_name, variant_name)) = name.split_once('.') {
-                if let Some((static_enum_name, variants)) = enum_map.get(enum_name) {
-                    if let Some((disc, _)) = variants.get(variant_name) {
+            let mut resolved_name = name.clone();
+            if let Some((target_or_var, method_name)) = name.split_once('.') {
+                if let Some((static_enum_name, variants)) = type_ctx.enum_map.get(target_or_var) {
+                    if let Some((disc, _)) = variants.get(method_name) {
                         return Some(TypedExpr::EnumConstruct(
-                            enum_name.to_string(),
-                            variant_name.to_string(),
+                            target_or_var.to_string(),
+                            method_name.to_string(),
                             *disc as usize,
                             typed_args,
                             Type::Enum(static_enum_name),
@@ -471,12 +589,51 @@ pub fn type_check_expr(
                         ));
                     }
                 }
+
+                let mangled = format!("{}_{}", target_or_var, method_name);
+                if type_ctx.fn_map.contains_key(&mangled) {
+                    resolved_name = mangled;
+                } else if let Some(var_info) = scopes.lookup(target_or_var) {
+                    let type_name = match var_info.ty {
+                        Type::Obj(n) => Some(n),
+                        Type::Enum(n) => Some(n),
+                        _ => None,
+                    };
+                    if let Some(tn) = type_name {
+                        let var_mangled = format!("{}_{}", tn, method_name);
+                        if type_ctx.fn_map.contains_key(&var_mangled) {
+                            resolved_name = var_mangled;
+                            if let Some(target_expr) = type_check_expr(
+                                scopes,
+                                errors,
+                                type_ctx,
+                                &Expr::Ident(target_or_var.to_string(), span.clone()),
+                            ) {
+                                typed_args.insert(0, target_expr);
+                            }
+                        }
+                    }
+                }
+            } else if !type_ctx.fn_map.contains_key(name) && !typed_args.is_empty() {
+                let first_arg_ty = typed_args[0].ty();
+                let type_name = match first_arg_ty {
+                    Type::Obj(n) => Some(n),
+                    Type::Enum(n) => Some(n),
+                    _ => None,
+                };
+                if let Some(tn) = type_name {
+                    let mangled = format!("{}_{}", tn, name);
+                    if type_ctx.fn_map.contains_key(&mangled) {
+                        resolved_name = mangled;
+                    }
+                }
             }
-            let ret_ty = if let Some(target_func) = fn_map.get(name) {
+
+            let ret_ty = if let Some(target_func) = type_ctx.fn_map.get(&resolved_name) {
                 if target_func.params.len() != typed_args.len() {
                     errors.push(SemanticError {
                         message: format!(
-                            "Function '{name}' expects {} arguments, found {}",
+                            "Function '{resolved_name}' expects {} arguments, found {}",
                             target_func.params.len(),
                             typed_args.len()
                         ),
@@ -488,7 +645,7 @@ pub fn type_check_expr(
                 target_func.return_type
             } else {
                 errors.push(SemanticError {
-                    message: format!("Undefined function '{name}'"),
+                    message: format!("Undefined function '{resolved_name}'"),
                     label: "Function does not exist".to_string(),
                     help: None,
                     span: span.clone(),
@@ -497,7 +654,7 @@ pub fn type_check_expr(
             };
 
             Some(TypedExpr::Call(
-                name.clone(),
+                resolved_name,
                 typed_args,
                 ret_ty,
                 span.clone(),
@@ -507,26 +664,64 @@ pub fn type_check_expr(
         Expr::ArrayInit(elems, span) => {
             let mut typed_elems = Vec::new();
             for e in elems {
-                if let Some(te) = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, e) {
+                if let Some(te) = type_check_expr(scopes, errors, type_ctx, e) {
                     typed_elems.push(te);
                 }
             }
+
             let elem_ty = if !typed_elems.is_empty() {
                 typed_elems[0].ty()
             } else {
                 Type::Int
             };
+
+            // Verify all array elements match the first element's type
+            for (i, elem) in typed_elems.iter().enumerate().skip(1) {
+                if elem.ty() != elem_ty {
+                    errors.push(SemanticError {
+                message: format!(
+                    "Array elements must all have the same type. Expected `{:?}`, element {} has type `{:?}`",
+                    elem_ty, i + 1, elem.ty()
+                ),
+                label: format!("Expected `{:?}`", elem_ty),
+                help: Some("Arrays are homogeneous and cannot hold mixed types".into()),
+                span: elem.span().clone(),
+            });
+                }
+            }
+
             let arr_ty = Type::Array(crate::ast::intern_type(elem_ty), typed_elems.len());
             Some(TypedExpr::ArrayInit(typed_elems, arr_ty, span.clone()))
         }
 
         Expr::IndexAccess(target, idx, span) => {
-            let t_target = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, target)?;
-            let t_idx = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, idx)?;
+            let t_target = type_check_expr(scopes, errors, type_ctx, target)?;
+            let t_idx = type_check_expr(scopes, errors, type_ctx, idx)?;
+
+            // 1. Validate index is an integer
+            if t_idx.ty() != Type::Int {
+                errors.push(SemanticError {
+                    message: format!("Array index must be an `Int`, found `{:?}`", t_idx.ty()),
+                    label: "Invalid index type".into(),
+                    help: None,
+                    span: t_idx.span().clone(),
+                });
+            }
+
+            // 2. Validate target is indexable
             let elem_ty = match t_target.ty() {
                 Type::Array(e_ty, _) => *e_ty,
-                _ => Type::Int,
+                other_ty => {
+                    errors.push(SemanticError {
+                        message: format!("Cannot index into non-array type `{:?}`", other_ty),
+                        label: "Not an array".into(),
+                        help: None,
+                        span: t_target.span().clone(),
+                    });
+                    Type::Int // Fallback recovery type
+                }
             };
+
             Some(TypedExpr::IndexAccess(
                 Box::new(t_target),
                 Box::new(t_idx),
@@ -536,9 +731,34 @@ pub fn type_check_expr(
         }
 
         Expr::IndexAssign(target, idx, val, span) => {
-            let t_target = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, target)?;
-            let t_idx = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, idx)?;
-            let t_val = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, val)?;
+            let t_target = type_check_expr(scopes, errors, type_ctx, target)?;
+            let t_idx = type_check_expr(scopes, errors, type_ctx, idx)?;
+            let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
+
+            if t_idx.ty() != Type::Int {
+                errors.push(SemanticError {
+                    message: format!("Array index must be an `Int`, found `{:?}`", t_idx.ty()),
+                    label: "Invalid index type".into(),
+                    help: None,
+                    span: t_idx.span().clone(),
+                });
+            }
+
+            if let Type::Array(elem_ty, _) = t_target.ty() {
+                if *elem_ty != t_val.ty() {
+                    errors.push(SemanticError {
+                        message: format!(
+                            "Cannot assign type `{:?}` to array holding `{:?}`",
+                            t_val.ty(),
+                            elem_ty
+                        ),
+                        label: "Type mismatch".into(),
+                        help: None,
+                        span: t_val.span().clone(),
+                    });
+                }
+            }
+
             Some(TypedExpr::IndexAssign(
                 Box::new(t_target),
                 Box::new(t_idx),
@@ -550,14 +770,50 @@ pub fn type_check_expr(
         Expr::ObjInit(name, fields, span) => {
             let mut typed_fields = Vec::new();
             for (f_name, f_expr) in fields {
-                let t_expr = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, f_expr)?;
+                let t_expr = type_check_expr(scopes, errors, type_ctx, f_expr)?;
                 typed_fields.push((f_name.clone(), t_expr));
             }
 
-            if !struct_map.contains_key(name) {
+            if let Some(layout) = type_ctx.struct_map.get(name) {
+                // A. Check for missing required fields
+                for (expected_field, (_, expected_ty)) in &layout.field_offsets {
+                    if !typed_fields.iter().any(|(f, _)| f == expected_field) {
+                        errors.push(SemanticError {
+                    message: format!("Missing field '{expected_field}' in struct initialization of '{name}'"),
+                    label: format!("Field '{expected_field}: {expected_ty:?}' is missing"),
+                    help: None,
+                    span: span.clone(),
+                });
+                    }
+                }
+
+                // B. Check field types and unknown fields
+                for (f_name, f_expr) in &typed_fields {
+                    if let Some((_, expected_ty)) = layout.field_offsets.get(f_name) {
+                        if expected_ty != &f_expr.ty() {
+                            errors.push(SemanticError {
+                        message: format!(
+                            "Field '{f_name}' in struct '{name}' expects type `{:?}`, found `{:?}`",
+                            expected_ty, f_expr.ty()
+                        ),
+                        label: format!("Expected `{:?}`", expected_ty),
+                        help: None,
+                        span: f_expr.span().clone(),
+                    });
+                        }
+                    } else {
+                        errors.push(SemanticError {
+                            message: format!("Struct '{name}' has no field named '{f_name}'"),
+                            label: "Unknown field".into(),
+                            help: None,
+                            span: f_expr.span().clone(),
+                        });
+                    }
+                }
+            } else {
                 errors.push(SemanticError {
                     message: format!("Undefined struct '{name}'"),
-                    label: "Struct does not exist".to_string(),
+                    label: "Struct does not exist".into(),
                     help: None,
                     span: span.clone(),
                 });
@@ -574,7 +830,7 @@ pub fn type_check_expr(
 
         Expr::FieldAccess(target, field_name, span) => {
             if let Expr::Ident(ref enum_name, _) = **target {
-                if let Some((static_enum_name, variants)) = enum_map.get(enum_name) {
+                if let Some((static_enum_name, variants)) = type_ctx.enum_map.get(enum_name) {
                     if let Some((disc, _)) = variants.get(field_name) {
                         return Some(TypedExpr::EnumConstruct(
                             enum_name.clone(),
@@ -588,11 +844,11 @@ pub fn type_check_expr(
                 }
             }
 
-            let t_target = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, target)?;
+            let t_target = type_check_expr(scopes, errors, type_ctx, target)?;
             let mut field_ty = Type::Int;
 
             if let Type::Obj(struct_name) = t_target.ty() {
-                if let Some(layout) = struct_map.get(struct_name) {
+                if let Some(layout) = type_ctx.struct_map.get(struct_name) {
                     if let Some((_, fty)) = layout.field_offsets.get(field_name) {
                         field_ty = *fty;
                     } else {
@@ -622,8 +878,8 @@ pub fn type_check_expr(
         }
 
         Expr::FieldAssign(target, field_name, val, span) => {
-            let t_target = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, target)?;
-            let t_val = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, val)?;
+            let t_target = type_check_expr(scopes, errors, type_ctx, target)?;
+            let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
 
             if let Expr::Ident(var_name, _) = target.as_ref() {
                 if let Some(info) = scopes.lookup(var_name) {
@@ -651,7 +907,7 @@ pub fn type_check_expr(
         Expr::EnumConstruct(enum_name, variant_name, args, span) => {
             let mut typed_args = Vec::new();
             for a in args {
-                if let Some(ta) = type_check_expr(scopes, errors, fn_map, struct_map, enum_map, a) {
+                if let Some(ta) = type_check_expr(scopes, errors, type_ctx, a) {
                     typed_args.push(ta);
                 }
             }
@@ -659,7 +915,7 @@ pub fn type_check_expr(
             let mut disc = 0;
             let mut static_enum_name = intern_str(enum_name);
 
-            if let Some((static_name, variants)) = enum_map.get(enum_name) {
+            if let Some((static_name, variants)) = type_ctx.enum_map.get(enum_name) {
                 static_enum_name = *static_name;
                 if let Some((d, _)) = variants.get(variant_name) {
                     disc = *d as usize;
@@ -674,6 +930,41 @@ pub fn type_check_expr(
                 Type::Enum(static_enum_name),
                 span.clone(),
             ))
+        }
+    }
+}
+
+fn check_binary_op(
+    op_name: &str,
+    t_lhs: &TypedExpr,
+    t_rhs: &TypedExpr,
+    allow_float: bool,
+    span: &Span,
+    errors: &mut Vec<SemanticError>,
+) -> Type {
+    let l_ty = t_lhs.ty();
+    let r_ty = t_rhs.ty();
+
+    match (l_ty, r_ty) {
+        (Type::Int, Type::Int) => Type::Int,
+        (Type::Float, Type::Float) if allow_float => Type::Float,
+
+        // Mixed Int and Float (if you allow implicit promotion)
+        (Type::Int, Type::Float) | (Type::Float, Type::Int) if allow_float => Type::Float,
+
+        // Invalid types for math/bitwise
+        _ => {
+            errors.push(SemanticError {
+                message: format!("Cannot perform '{op_name}' on types `{l_ty:?}` and `{r_ty:?}`"),
+                label: format!("Type mismatch: `{l_ty:?}` vs `{r_ty:?}`"),
+                help: if !allow_float && (l_ty == Type::Float || r_ty == Type::Float) {
+                    Some("Bitwise operations can only be used on integers.".into())
+                } else {
+                    Some("Both operands must be numeric types.".into())
+                },
+                span: span.clone(),
+            });
+            Type::Int // Fallback error recovery type
         }
     }
 }

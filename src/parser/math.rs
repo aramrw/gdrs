@@ -97,9 +97,20 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
 
         #[derive(Clone)]
         enum Postfix {
+            DotCall(String, Vec<Expr>, Span),
             Dot(String, Span),
             Index(Expr, Span),
         }
+
+        let dot_call_post = just(Token::Dot)
+            .ignore_then(select! { Token::Ident(s) => s })
+            .then(
+                math.clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .map_with_span(|(method, args), span: Span| Postfix::DotCall(method, args, span));
 
         let dot_post = just(Token::Dot)
             .ignore_then(select! { Token::Ident(s) => s })
@@ -111,8 +122,14 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
             .map_with_span(|idx, span: Span| Postfix::Index(idx, span));
 
         let postfix_atom = atom
-            .then(dot_post.or(index_post).repeated())
+            .then(dot_call_post.or(dot_post).or(index_post).repeated())
             .foldl(|target, post| match post {
+                Postfix::DotCall(method, args, method_span) => {
+                    let span = target.span().start..method_span.end;
+                    let mut call_args = vec![target];
+                    call_args.extend(args);
+                    Expr::Call(method, call_args, span)
+                }
                 Postfix::Dot(field, field_span) => {
                     let span = target.span().start..field_span.end;
                     Expr::FieldAccess(Box::new(target), field, span)

@@ -37,10 +37,17 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
     // 4. Recursive statement and block parser
     let stmt = stmt_parser(math);
 
-    let param = select! { Token::Ident(name) => name }
-        .then_ignore(just(Token::Colon))
-        .then(type_parser.clone())
-        .map_with_span(|(name, ty), span| Param { name, ty, span });
+    let self_param = select! { Token::Ident(s) if s == "self" => s }
+        .map_with_span(|s, span| Param { name: s, is_mutable: false, ty: Type::Unit, span });
+    let mut_self_param = just(Token::Mut)
+        .ignore_then(select! { Token::Ident(s) if s == "self" => s })
+        .map_with_span(|s, span| Param { name: s, is_mutable: true, ty: Type::Unit, span });
+    let param = mut_self_param.or(self_param).or(
+        select! { Token::Ident(name) => name }
+            .then_ignore(just(Token::Colon))
+            .then(type_parser.clone())
+            .map_with_span(|(name, ty), span| Param { name, is_mutable: false, ty, span }),
+    );
 
     // Function signature: fn name(params) -> return_type:
     let function = just(Token::Fn)
@@ -108,25 +115,46 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         )
         .map_with_span(|(name, variants), span| EnumDecl { name, variants, span });
 
+    let impl_decl = just(Token::Impl)
+        .ignore_then(select! { Token::Ident(s) => s })
+        .then_ignore(just(Token::Colon))
+        .then_ignore(just(Token::Newline).or_not())
+        .then(
+            function
+                .clone()
+                .repeated()
+                .at_least(1)
+                .delimited_by(just(Token::Indent), just(Token::Dedent)),
+        )
+        .map_with_span(|(target_type, methods), span| ImplDecl {
+            target_type,
+            methods,
+            span,
+        });
+
     let item = function
         .map(Item::Func)
         .or(obj_decl.map(Item::Struct))
-        .or(enum_decl.map(Item::Enum));
+        .or(enum_decl.map(Item::Enum))
+        .or(impl_decl.map(Item::Impl));
 
     item.repeated().then_ignore(end()).map(|items| {
         let mut structs = Vec::new();
         let mut enums = Vec::new();
+        let mut impls = Vec::new();
         let mut functions = Vec::new();
         for item in items {
             match item {
                 Item::Func(f) => functions.push(f),
                 Item::Struct(s) => structs.push(s),
                 Item::Enum(e) => enums.push(e),
+                Item::Impl(i) => impls.push(i),
             }
         }
         Program {
             structs,
             enums,
+            impls,
             functions,
         }
     })
@@ -136,4 +164,5 @@ enum Item {
     Func(FuncDecl),
     Struct(StructDecl),
     Enum(EnumDecl),
+    Impl(ImplDecl),
 }
