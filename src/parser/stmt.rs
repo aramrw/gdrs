@@ -18,6 +18,11 @@ pub fn stmt_parser<'a>(
             })
             .then_ignore(just(Token::Newline).or_not());
 
+        let path = select! { Token::Ident(s) => s }
+            .separated_by(just(Token::ColonColon))
+            .at_least(1)
+            .map(|parts| parts.join("::"));
+
         // Parses `=`, `+=`, `-=`, `*=`, `/=`
         let assign_op = just(Token::Assign)
             .to(None)
@@ -54,19 +59,32 @@ pub fn stmt_parser<'a>(
             })
             .then_ignore(just(Token::Newline).or_not());
 
-        // Index assignment statement: arr[0] = 42 or arr[0] += 5
-        let index_assign_stmt = select! { Token::Ident(target) => target }
+        let assign_target_expr = path
+            .clone()
+            .map_with_span(|name, span| Expr::Ident(name, span))
+            .then(
+                just(Token::Dot)
+                    .ignore_then(select! { Token::Ident(f) => f })
+                    .repeated(),
+            )
+            .foldl(|target, field| {
+                let span = target.span().clone();
+                Expr::FieldAccess(Box::new(target), field, span)
+            });
+
+        // Index assignment statement: arr[0] = 42 or self.keys[slot] = key
+        let index_assign_stmt = assign_target_expr
+            .clone()
             .then_ignore(just(Token::LBracket))
             .then(math.clone())
             .then_ignore(just(Token::RBracket))
             .then(assign_op.clone())
             .then(math.clone())
-            .map_with_span(|(((target, idx), op), rhs), span| {
-                let target_ident = Expr::Ident(target.clone(), span.clone());
+            .map_with_span(|(((target_expr, idx), op), rhs), span| {
                 let final_rhs = match op {
                     Some(make_expr) => {
                         let lhs = Expr::IndexAccess(
-                            Box::new(target_ident.clone()),
+                            Box::new(target_expr.clone()),
                             Box::new(idx.clone()),
                             span.clone(),
                         );
@@ -75,7 +93,7 @@ pub fn stmt_parser<'a>(
                     None => rhs,
                 };
                 Expr::IndexAssign(
-                    Box::new(target_ident),
+                    Box::new(target_expr),
                     Box::new(idx),
                     Box::new(final_rhs),
                     span,
@@ -162,7 +180,9 @@ pub fn stmt_parser<'a>(
             })
             .then_ignore(just(Token::Newline).or_not());
 
-        let call_stmt = select! { Token::Ident(name) => name }
+
+
+        let call_stmt = path
             .then(
                 math.clone()
                     .separated_by(just(Token::Comma))
@@ -172,17 +192,22 @@ pub fn stmt_parser<'a>(
             .map_with_span(|(name, args), span| Expr::Call(name, args, span))
             .then_ignore(just(Token::Newline).or_not());
 
-        let_stmt
-            .or(index_assign_stmt)
-            .or(field_assign_stmt)
-            .or(assign_stmt)
-            .or(return_stmt)
-            .or(if_stmt)
-            .or(while_stmt)
-            .or(macro_call)
-            .or(method_call_stmt)
-            .or(call_stmt)
-            .or(block)
+        just(Token::Newline)
+            .repeated()
+            .ignore_then(
+                let_stmt
+                    .or(index_assign_stmt)
+                    .or(field_assign_stmt)
+                    .or(assign_stmt)
+                    .or(return_stmt)
+                    .or(if_stmt)
+                    .or(while_stmt)
+                    .or(macro_call)
+                    .or(method_call_stmt)
+                    .or(call_stmt)
+                    .or(block),
+            )
+            .then_ignore(just(Token::Newline).repeated())
     });
 
     stmt

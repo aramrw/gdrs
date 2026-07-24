@@ -49,8 +49,10 @@ pub enum Token {
     #[token("not")]
     Not,
     #[token("&&")]
+    #[token("and")]
     And,
     #[token("||")]
+    #[token("or")]
     Or,
 
     #[token("|")]
@@ -91,6 +93,8 @@ pub enum Token {
 
     #[token("fn")]
     Fn,
+    #[token("::")]
+    ColonColon,
     #[token(":")]
     Colon,
 
@@ -140,6 +144,10 @@ pub enum Token {
     Enum,
     #[token("impl")]
     Impl,
+    #[token("mod")]
+    Mod,
+    #[token("use")]
+    Use,
 
     #[token(".")]
     Dot,
@@ -152,11 +160,14 @@ pub enum Type {
     Int,
     Float,
     Bool,
+    Str,
     String,
     Unit,
     Obj(&'static str),
     Enum(&'static str),
     Array(&'static Type, usize),
+    Slice(&'static Type),
+    Vec(&'static Type),
 }
 
 pub fn intern_type(ty: Type) -> &'static Type {
@@ -396,7 +407,7 @@ impl TypedExpr {
             | TypedExpr::And(..)
             | TypedExpr::Or(..) => Type::Bool,
 
-            TypedExpr::String(..) => Type::String,
+            TypedExpr::String(..) => Type::Str,
             TypedExpr::Ident(_, ty, _)
             | TypedExpr::Let(_, _, _, ty, _)
             | TypedExpr::Block(_, ty, _)
@@ -463,8 +474,23 @@ impl TypedExpr {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ModDecl {
+    pub path: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct UseDecl {
+    pub path: Vec<String>,
+    pub alias: Option<String>,
+    pub span: Span,
+}
+
 #[derive(Debug)]
 pub struct Program {
+    pub mods: Vec<ModDecl>,
+    pub uses: Vec<UseDecl>,
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
     pub impls: Vec<ImplDecl>,

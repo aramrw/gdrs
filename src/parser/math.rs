@@ -7,7 +7,6 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
     let float_lit = select! { Token::Float(bits) => f64::from_bits(bits) }
         .map_with_span(|f, span| Expr::Float(f, span));
     let boolean = select! { Token::Bool(b) => b }.map_with_span(|b, span| Expr::Bool(b, span));
-    let ident = select! { Token::Ident(s) => s }.map_with_span(|s, span| Expr::Ident(s, span));
     let string = select! { Token::String(s) => s }.map_with_span(|s, span| Expr::String(s, span));
 
     let shift_op = just::<_, _, Simple<Token>>(Token::Shl)
@@ -47,7 +46,13 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
             .then_ignore(just(Token::Colon))
             .then(math.clone());
 
-        let struct_init = select! { Token::Ident(s) => s }
+        let path = select! { Token::Ident(s) => s }
+            .separated_by(just(Token::ColonColon))
+            .at_least(1)
+            .map(|parts| parts.join("::"));
+
+        let struct_init = path
+            .clone()
             .then(
                 field_init
                     .separated_by(just(Token::Comma))
@@ -56,25 +61,15 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
             )
             .map_with_span(|(name, fields), span| Expr::ObjInit(name, fields, span));
 
-        // When you build EnumInit, you can drop it right here!
-        // let enum_init = ...
-
-        let call_expr = select! { Token::Ident(name) => name }
-            .then(
-                just(Token::Dot)
-                    .ignore_then(select! { Token::Ident(field) => field })
-                    .or_not(),
-            )
+        let call_expr = path
+            .clone()
             .then(
                 math.clone()
                     .separated_by(just(Token::Comma))
                     .allow_trailing()
                     .delimited_by(just(Token::LParen), just(Token::RParen)),
             )
-            .map_with_span(|((name, opt_sub), args), span| match opt_sub {
-                Some(sub) => Expr::Call(format!("{name}.{sub}"), args, span),
-                None => Expr::Call(name, args, span),
-            });
+            .map_with_span(|(name, args), span| Expr::Call(name, args, span));
 
         let array_init = math
             .clone()
@@ -83,14 +78,26 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
             .delimited_by(just(Token::LBracket), just(Token::RBracket))
             .map_with_span(|elems, span| Expr::ArrayInit(elems, span));
 
-        let atom = struct_init
-            .or(call_expr)
-            .or(array_init)
+        let macro_call = select! { Token::MacroIdent(name) => name }
+            .then(
+                math.clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .map_with_span(|(name, args), span| Expr::MacroCall(name, args, span));
+
+        let ident = path.map_with_span(|name, span| Expr::Ident(name, span));
+
+        let atom = string
             .or(float_lit)
             .or(int)
             .or(boolean)
+            .or(macro_call)
+            .or(struct_init)
+            .or(call_expr)
+            .or(array_init)
             .or(ident)
-            .or(string)
             .or(math
                 .clone()
                 .delimited_by(just(Token::LParen), just(Token::RParen)));

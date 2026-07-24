@@ -28,19 +28,45 @@ pub fn type_check_expr<'a>(
             if let Some(info) = scopes.lookup(name) {
                 Some(TypedExpr::Ident(name.clone(), info.ty, span.clone()))
             } else {
-                errors.push(SemanticError {
-                    message: format!("Undefined variable '{name}'"),
-                    label: "Variable does not exist in this scope".to_string(),
-                    help: None,
-                    span: span.clone(),
-                });
-                None
+                let normalized = name.replace("::", "_");
+                if type_ctx.struct_map.contains_key(&normalized) {
+                    Some(TypedExpr::Ident(name.clone(), Type::Obj(intern_str(&normalized)), span.clone()))
+                } else if type_ctx.enum_map.contains_key(&normalized) {
+                    Some(TypedExpr::Ident(name.clone(), Type::Enum(intern_str(&normalized)), span.clone()))
+                } else {
+                    errors.push(SemanticError {
+                        message: format!("Undefined variable '{name}'"),
+                        label: "Variable does not exist in this scope".to_string(),
+                        help: None,
+                        span: span.clone(),
+                    });
+                    None
+                }
             }
         }
 
         Expr::Let(name, is_mutable, value, span) => {
             let typed_val = type_check_expr(scopes, errors, type_ctx, value)?;
-            let ty = typed_val.ty();
+            let mut ty = typed_val.ty();
+
+            if *is_mutable {
+                if ty == Type::Str {
+                    ty = Type::String;
+                } else if let Type::Array(elem_ty, _) = ty {
+                    ty = Type::Vec(elem_ty);
+                } else if let Type::Slice(elem_ty) = ty {
+                    ty = Type::Vec(elem_ty);
+                }
+            } else {
+                if ty == Type::String {
+                    ty = Type::Str;
+                } else if let Type::Array(elem_ty, _) = ty {
+                    ty = Type::Slice(elem_ty);
+                } else if let Type::Vec(elem_ty) = ty {
+                    ty = Type::Slice(elem_ty);
+                }
+            }
+
             scopes.declare(name.clone(), *is_mutable, ty);
             Some(TypedExpr::Let(
                 name.clone(),
@@ -568,12 +594,30 @@ pub fn type_check_expr<'a>(
             Some(TypedExpr::MacroCall(name.clone(), typed_args, span.clone()))
         }
 
-        Expr::Call(name, args, span) => {
+        Expr::Call(raw_name, args, span) => {
+            let name = raw_name.replace("::", "_");
             let mut typed_args = Vec::new();
             for arg in args {
                 if let Some(t_arg) = type_check_expr(scopes, errors, type_ctx, arg) {
                     typed_args.push(t_arg);
                 }
+            }
+            if name == "push_str" || name == "push" || name == "pop" {
+                if !typed_args.is_empty() {
+                    if let TypedExpr::Ident(var_name, _, _) = &typed_args[0] {
+                        if let Some(target_info) = scopes.lookup(var_name) {
+                            if !target_info.is_mutable {
+                                errors.push(SemanticError {
+                                    message: format!("Cannot call mutating method '{name}' on immutable variable '{var_name}'"),
+                                    label: format!("'{var_name}' is immutable"),
+                                    help: Some(format!("Declare as mutable: 'let mut {var_name}'")),
+                                    span: span.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+                return Some(TypedExpr::MacroCall(name.clone(), typed_args, span.clone()));
             }
             let mut resolved_name = name.clone();
             if let Some((target_or_var, method_name)) = name.split_once('.') {
@@ -591,6 +635,27 @@ pub fn type_check_expr<'a>(
                 }
 
                 let mangled = format!("{}_{}", target_or_var, method_name);
+                if method_name == "len" || method_name == "push" || method_name == "pop" || method_name == "push_str" {
+                    if let Some(target_info) = scopes.lookup(target_or_var) {
+                        if (method_name == "push" || method_name == "push_str" || method_name == "pop") && !target_info.is_mutable {
+                            errors.push(SemanticError {
+                                message: format!("Cannot call mutating method '{method_name}' on immutable variable '{target_or_var}'"),
+                                label: format!("'{target_or_var}' is immutable"),
+                                help: Some(format!("Declare as mutable: 'let mut {target_or_var}'")),
+                                span: span.clone(),
+                            });
+                        }
+                    }
+                    if let Some(target_expr) = type_check_expr(
+                        scopes,
+                        errors,
+                        type_ctx,
+                        &Expr::Ident(target_or_var.to_string(), span.clone()),
+                    ) {
+                        typed_args.insert(0, target_expr);
+                        return Some(TypedExpr::MacroCall(method_name.to_string(), typed_args, span.clone()));
+                    }
+                }
                 if type_ctx.fn_map.contains_key(&mangled) {
                     resolved_name = mangled;
                 } else if let Some(var_info) = scopes.lookup(target_or_var) {
@@ -614,17 +679,29 @@ pub fn type_check_expr<'a>(
                         }
                     }
                 }
-            } else if !type_ctx.fn_map.contains_key(name) && !typed_args.is_empty() {
-                let first_arg_ty = typed_args[0].ty();
-                let type_name = match first_arg_ty {
-                    Type::Obj(n) => Some(n),
-                    Type::Enum(n) => Some(n),
-                    _ => None,
-                };
-                if let Some(tn) = type_name {
-                    let mangled = format!("{}_{}", tn, name);
+            } else if !type_ctx.fn_map.contains_key(&name) && !typed_args.is_empty() {
+                if let TypedExpr::Ident(target_name, _, _) = &typed_args[0] {
+                    let normalized_target = target_name.replace("::", "_");
+                    let mangled = format!("{}_{}", normalized_target, name);
                     if type_ctx.fn_map.contains_key(&mangled) {
                         resolved_name = mangled;
+                        if type_ctx.struct_map.contains_key(&normalized_target) || type_ctx.enum_map.contains_key(&normalized_target) {
+                            typed_args.remove(0);
+                        }
+                    }
+                }
+                if resolved_name == name {
+                    let first_arg_ty = typed_args[0].ty();
+                    let type_name = match first_arg_ty {
+                        Type::Obj(n) => Some(n),
+                        Type::Enum(n) => Some(n),
+                        _ => None,
+                    };
+                    if let Some(tn) = type_name {
+                        let mangled = format!("{}_{}", tn, name);
+                        if type_ctx.fn_map.contains_key(&mangled) {
+                            resolved_name = mangled;
+                        }
                     }
                 }
             }
@@ -710,7 +787,7 @@ pub fn type_check_expr<'a>(
 
             // 2. Validate target is indexable
             let elem_ty = match t_target.ty() {
-                Type::Array(e_ty, _) => *e_ty,
+                Type::Array(e_ty, _) | Type::Slice(e_ty) | Type::Vec(e_ty) => *e_ty,
                 other_ty => {
                     errors.push(SemanticError {
                         message: format!("Cannot index into non-array type `{:?}`", other_ty),
@@ -744,8 +821,12 @@ pub fn type_check_expr<'a>(
                 });
             }
 
-            if let Type::Array(elem_ty, _) = t_target.ty() {
-                if *elem_ty != t_val.ty() {
+            let opt_elem_ty = match t_target.ty() {
+                Type::Array(e_ty, _) | Type::Slice(e_ty) | Type::Vec(e_ty) => Some(*e_ty),
+                _ => None,
+            };
+            if let Some(elem_ty) = opt_elem_ty {
+                if elem_ty != t_val.ty() {
                     errors.push(SemanticError {
                         message: format!(
                             "Cannot assign type `{:?}` to array holding `{:?}`",
@@ -767,7 +848,8 @@ pub fn type_check_expr<'a>(
             ))
         }
 
-        Expr::ObjInit(name, fields, span) => {
+        Expr::ObjInit(raw_name, fields, span) => {
+            let name = &raw_name.replace("::", "_");
             let mut typed_fields = Vec::new();
             for (f_name, f_expr) in fields {
                 let t_expr = type_check_expr(scopes, errors, type_ctx, f_expr)?;

@@ -19,7 +19,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         let array_type = just(Token::LBracket)
             .ignore_then(type_parser)
             .then_ignore(just(Token::RBracket))
-            .map(|t| Type::Array(intern_type(t), 0));
+            .map(|t| Type::Vec(intern_type(t)));
 
         select! {
             Token::TypeInt => Type::Int,
@@ -132,19 +132,44 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
             span,
         });
 
-    let item = function
-        .map(Item::Func)
-        .or(obj_decl.map(Item::Struct))
-        .or(enum_decl.map(Item::Enum))
-        .or(impl_decl.map(Item::Impl));
+    let path_parser = select! { Token::Ident(s) => s }
+        .separated_by(just(Token::ColonColon))
+        .at_least(1);
+
+    let mod_decl = just(Token::Mod)
+        .ignore_then(path_parser.clone())
+        .then_ignore(just(Token::Newline).or_not())
+        .map_with_span(|path, span| ModDecl { path, span });
+
+    let use_decl = just(Token::Use)
+        .ignore_then(path_parser)
+        .then_ignore(just(Token::Newline).or_not())
+        .map_with_span(|path, span| UseDecl { path, alias: None, span });
+
+    let item = just(Token::Newline)
+        .repeated()
+        .ignore_then(
+            mod_decl
+                .map(Item::Mod)
+                .or(use_decl.map(Item::Use))
+                .or(function.map(Item::Func))
+                .or(obj_decl.map(Item::Struct))
+                .or(enum_decl.map(Item::Enum))
+                .or(impl_decl.map(Item::Impl)),
+        )
+        .then_ignore(just(Token::Newline).repeated());
 
     item.repeated().then_ignore(end()).map(|items| {
+        let mut mods = Vec::new();
+        let mut uses = Vec::new();
         let mut structs = Vec::new();
         let mut enums = Vec::new();
         let mut impls = Vec::new();
         let mut functions = Vec::new();
         for item in items {
             match item {
+                Item::Mod(m) => mods.push(m),
+                Item::Use(u) => uses.push(u),
                 Item::Func(f) => functions.push(f),
                 Item::Struct(s) => structs.push(s),
                 Item::Enum(e) => enums.push(e),
@@ -152,6 +177,8 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
             }
         }
         Program {
+            mods,
+            uses,
             structs,
             enums,
             impls,
@@ -161,6 +188,8 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
 }
 
 enum Item {
+    Mod(ModDecl),
+    Use(UseDecl),
     Func(FuncDecl),
     Struct(StructDecl),
     Enum(EnumDecl),

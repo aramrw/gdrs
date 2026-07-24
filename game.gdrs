@@ -1,0 +1,15 @@
+// Module: src/app/game.gdrs
+
+mod src::math::ops
+mod src::math::vector
+
+obj Player:
+	id: i64
+	score: i64
+
+impl Player:
+	fn new(id: i64) -> Player:
+		return Player{ id: id, score: 0 }
+
+	fn add_score(mut self, points: i64):
+		self.score = self.score + points

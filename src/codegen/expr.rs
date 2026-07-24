@@ -325,6 +325,63 @@ pub fn compile_expr(
                     }
                     dst_ptr
                 }
+                Type::Str => {
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        16,
+                        0,
+                    ));
+                    let dst_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(MemFlags::new(), val, dst_ptr, 0);
+                    let zero = builder.ins().iconst(types::I64, 0);
+                    builder.ins().store(MemFlags::new(), zero, dst_ptr, 8);
+                    dst_ptr
+                }
+                Type::String => {
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
+                    ));
+                    let dst_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(MemFlags::new(), val, dst_ptr, 0);
+                    let zero = builder.ins().iconst(types::I64, 0);
+                    builder.ins().store(MemFlags::new(), zero, dst_ptr, 8);
+                    builder.ins().store(MemFlags::new(), zero, dst_ptr, 16); // cap = 0 sentinel!
+                    dst_ptr
+                }
+                Type::Slice(_) => {
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        16,
+                        0,
+                    ));
+                    let dst_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(MemFlags::new(), val, dst_ptr, 0);
+                    let len_val = match value.as_ref() {
+                        TypedExpr::ArrayInit(elems, _, _) => builder.ins().iconst(types::I64, elems.len() as i64),
+                        _ => builder.ins().iconst(types::I64, 0),
+                    };
+                    builder.ins().store(MemFlags::new(), len_val, dst_ptr, 8);
+                    dst_ptr
+                }
+                Type::Vec(_) => {
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
+                    ));
+                    let dst_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    builder.ins().store(MemFlags::new(), val, dst_ptr, 0);
+                    let len_val = match value.as_ref() {
+                        TypedExpr::ArrayInit(elems, _, _) => builder.ins().iconst(types::I64, elems.len() as i64),
+                        _ => builder.ins().iconst(types::I64, 0),
+                    };
+                    builder.ins().store(MemFlags::new(), len_val, dst_ptr, 8);
+                    let zero = builder.ins().iconst(types::I64, 0);
+                    builder.ins().store(MemFlags::new(), zero, dst_ptr, 16); // cap = 0 sentinel!
+                    dst_ptr
+                }
                 _ => val,
             };
 
@@ -338,7 +395,18 @@ pub fn compile_expr(
         TypedExpr::Assign(name, value, _) => {
             let val = compile_expr(builder, value, vars, var_counter, module, struct_layouts);
             let var = vars.get(name).expect("Undefined variable during codegen");
-            builder.def_var(*var, val);
+            let dest_ptr = builder.use_var(*var);
+            if let Type::Obj(struct_name) = value.ty() {
+                if let Some(layout) = struct_layouts.get(struct_name) {
+                    for i in 0..(layout.total_size / 8) {
+                        let offset = (i * 8) as i32;
+                        let field_val = builder.ins().load(types::I64, MemFlags::new(), val, offset);
+                        builder.ins().store(MemFlags::new(), field_val, dest_ptr, offset);
+                    }
+                }
+            } else {
+                builder.def_var(*var, val);
+            }
             val
         }
 
@@ -560,10 +628,17 @@ pub fn compile_expr(
 
         TypedExpr::IndexAccess(target, idx, elem_ty, _) => {
             let base_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
+            let buffer_ptr = match target.as_ref() {
+                TypedExpr::Ident(_, _, _) => match target.ty() {
+                    Type::Slice(_) | Type::Vec(_) => builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0),
+                    _ => base_ptr,
+                },
+                _ => base_ptr,
+            };
             let idx_val = compile_expr(builder, idx, vars, var_counter, module, struct_layouts);
             let elem_size = builder.ins().iconst(types::I64, 8);
             let offset = builder.ins().imul(idx_val, elem_size);
-            let elem_addr = builder.ins().iadd(base_ptr, offset);
+            let elem_addr = builder.ins().iadd(buffer_ptr, offset);
 
             let cranelift_ty = match elem_ty {
                 Type::Float => types::F64,
@@ -577,12 +652,19 @@ pub fn compile_expr(
 
         TypedExpr::IndexAssign(target, idx, val, _) => {
             let base_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
+            let buffer_ptr = match target.as_ref() {
+                TypedExpr::Ident(_, _, _) => match target.ty() {
+                    Type::Slice(_) | Type::Vec(_) => builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0),
+                    _ => base_ptr,
+                },
+                _ => base_ptr,
+            };
             let idx_val = compile_expr(builder, idx, vars, var_counter, module, struct_layouts);
             let new_val = compile_expr(builder, val, vars, var_counter, module, struct_layouts);
 
             let elem_size = builder.ins().iconst(types::I64, 8);
             let offset = builder.ins().imul(idx_val, elem_size);
-            let elem_addr = builder.ins().iadd(base_ptr, offset);
+            let elem_addr = builder.ins().iadd(buffer_ptr, offset);
 
             builder.ins().store(MemFlags::new(), new_val, elem_addr, 0);
             new_val

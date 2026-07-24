@@ -1,35 +1,18 @@
-// Main test script for gdrs impl methods
+// Main test script for gdrs HashMap standard library collection
 
-obj Vec2:
-	x: i64
-	y: i64
-
-impl Vec2:
-	fn new(x: i64, y: i64) -> Vec2:
-		return Vec2{ x: x, y: y }
-
-	fn area(self) -> i64:
-		return self.x * self.y
-
-	fn scale(mut self, factor: i64):
-		self.x = self.x * factor
-		self.y = self.y * factor
-
-enum Status:
-	Active
-	Inactive
-
-impl Status:
-	fn is_active(self) -> bool:
-		if self == Status.Active:
-			return true
-		else:
-			return false
+mod std_lib::collections::hashmap
 
 fn main():
-	let mut pos = Vec2.new(0, 0)
+	log!("=== Testing Native GDRS HashMap ===")
 
-	while pos.x < 500000:
-		pos.x += 1
-		log!(pos.x)
-	
+	let mut map = std_lib::collections::hashmap::HashMap.new()
+	map = map.insert(1001, 42)
+	map = map.insert(2002, 999)
+	map = map.insert(3003, 12345)
+
+	log!("map.get(1001) =", map.get(1001))
+	log!("map.get(2002) =", map.get(2002))
+	log!("map.get(3003) =", map.get(3003))
+
+	log!("map.contains(1001) =", map.contains(1001))
+	log!("map.contains(9999) =", map.contains(9999))

@@ -196,6 +196,7 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
     }
 
     if errors.is_empty() {
+        typed_functions.sort_by_key(|f| if f.name == "main" { 1 } else { 0 });
         Ok(TypedProgram {
             structs: program.structs.clone(),
             enums: program.enums.clone(),
