@@ -1,0 +1,21 @@
+```rust
+obj Vec2:
+	x: i64
+	y: i64
+
+fn add(v1: Vec2, v2: Vec2) -> Vec2:
+	let x = v1.x + v2.x
+	let y = v1.y + v2.y
+	let v = Vec2{x: x, y: y}
+	return v
+
+fn main():
+	let mut v1 = Vec2{x: 3, y: 4}
+	let v2 = Vec2{x: 5, y: 2}
+	let res = add(v1, v2)
+	log!(res.x, res.y)
+
+	let mut x = 5
+	x *= 5
+	log!(x)
+```
