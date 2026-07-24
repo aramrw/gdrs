@@ -10,6 +10,15 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
     let ident = select! { Token::Ident(s) => s }.map_with_span(|s, span| Expr::Ident(s, span));
     let string = select! { Token::String(s) => s }.map_with_span(|s, span| Expr::String(s, span));
 
+    let shift_op = just::<_, _, Simple<Token>>(Token::Shl)
+        .to(Expr::Shl as fn(_, _, _) -> _)
+        .or(just(Token::Shr).to(Expr::Shr as fn(_, _, _) -> _));
+
+    let bitwise_op = just::<_, _, Simple<Token>>(Token::Ampersand)
+        .to(Expr::Ampersand as fn(_, _, _) -> _)
+        .or(just(Token::Caret).to(Expr::Caret as fn(_, _, _) -> _))
+        .or(just(Token::Pipe).to(Expr::Pipe as fn(_, _, _) -> _));
+
     // 2. Operators by Precedence
     let mul_op = just::<_, _, Simple<Token>>(Token::Star)
         .to(Expr::Mul as fn(_, _, _) -> _)
@@ -135,13 +144,32 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
                     make_expr(Box::new(lhs), Box::new(rhs), span)
                 });
 
-        let comp =
+        // 1. Shift operations (<<, >>) - Binds looser than +, - but tighter than comparisons
+        let shift_term =
             term.clone()
-                .then(comp_op.then(term).repeated())
+                .then(shift_op.then(term).repeated())
                 .foldl(|lhs, (make_expr, rhs)| {
                     let span = lhs.span().start..rhs.span().end;
                     make_expr(Box::new(lhs), Box::new(rhs), span)
-                });
+                }).boxed();
+
+        // 2. Bitwise operations (&, ^, |) - Binds looser than shifts but tighter than comparisons
+        let bitwise_term = shift_term
+            .clone()
+            .then(bitwise_op.then(shift_term).repeated())
+            .foldl(|lhs, (make_expr, rhs)| {
+                let span = lhs.span().start..rhs.span().end;
+                make_expr(Box::new(lhs), Box::new(rhs), span)
+            }).boxed();
+
+        // 3. Comparisons (<, >, ==, etc.) - Updated to use `bitwise_term`
+        let comp = bitwise_term
+            .clone()
+            .then(comp_op.then(bitwise_term).repeated())
+            .foldl(|lhs, (make_expr, rhs)| {
+                let span = lhs.span().start..rhs.span().end;
+                make_expr(Box::new(lhs), Box::new(rhs), span)
+            });
 
         comp.clone()
             .then(logic_op.then(comp).repeated())

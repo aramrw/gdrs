@@ -1,5 +1,5 @@
 use crate::{
-    ast::{intern_str, Expr, FuncDecl, Type, TypedExpr},
+    ast::{Expr, FuncDecl, Type, TypedExpr, intern_str},
     sanal::{ScopeStack, SemanticError, StructLayout},
 };
 use std::collections::HashMap;
@@ -85,36 +85,211 @@ pub fn type_check_expr(
         Expr::Add(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float { Type::Float } else { Type::Int };
-            Some(TypedExpr::Add(Box::new(t_lhs), Box::new(t_rhs), ty, span.clone()))
+            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
+                Type::Float
+            } else {
+                Type::Int
+            };
+            Some(TypedExpr::Add(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                ty,
+                span.clone(),
+            ))
         }
 
         Expr::Sub(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float { Type::Float } else { Type::Int };
-            Some(TypedExpr::Sub(Box::new(t_lhs), Box::new(t_rhs), ty, span.clone()))
+            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
+                Type::Float
+            } else {
+                Type::Int
+            };
+            Some(TypedExpr::Sub(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                ty,
+                span.clone(),
+            ))
         }
 
         Expr::Mul(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float { Type::Float } else { Type::Int };
-            Some(TypedExpr::Mul(Box::new(t_lhs), Box::new(t_rhs), ty, span.clone()))
+            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
+                Type::Float
+            } else {
+                Type::Int
+            };
+            Some(TypedExpr::Mul(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                ty,
+                span.clone(),
+            ))
         }
 
         Expr::Div(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float { Type::Float } else { Type::Int };
-            Some(TypedExpr::Div(Box::new(t_lhs), Box::new(t_rhs), ty, span.clone()))
+            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
+                Type::Float
+            } else {
+                Type::Int
+            };
+            Some(TypedExpr::Div(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                ty,
+                span.clone(),
+            ))
+        }
+
+        Expr::Pipe(lhs, rhs, span) => {
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
+                Type::Float
+            } else {
+                Type::Int
+            };
+
+            if ty != Type::Int {
+                errors.push(SemanticError {
+                    message: "You can only use bitwise operators on integers.".into(),
+                    label: "Invalid Use of Bitwise Operator".into(),
+                    help: Some("Use an integer instead, or use: +, -, *, /".into()),
+                    span: span.clone(),
+                });
+            }
+
+            Some(TypedExpr::Pipe(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                ty,
+                span.clone(),
+            ))
+        }
+
+        Expr::Ampersand(lhs, rhs, span) => {
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
+                Type::Float
+            } else {
+                Type::Int
+            };
+
+            if ty != Type::Int {
+                errors.push(SemanticError {
+                    message: "You can only use bitwise operators on integers.".into(),
+                    label: "Invalid Use of Bitwise Operator".into(),
+                    help: Some("Use an integer instead, or use: +, -, *, /".into()),
+                    span: span.clone(),
+                });
+            }
+
+            Some(TypedExpr::Ampersand(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                ty,
+                span.clone(),
+            ))
+        }
+
+        Expr::Caret(lhs, rhs, span) => {
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
+                Type::Float
+            } else {
+                Type::Int
+            };
+
+            if ty != Type::Int {
+                errors.push(SemanticError {
+                    message: "You can only use bitwise operators on integers.".into(),
+                    label: "Invalid Use of Bitwise Operator".into(),
+                    help: Some("Use an integer instead, or use: +, -, *, /".into()),
+                    span: span.clone(),
+                });
+            }
+
+            Some(TypedExpr::Caret(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                ty,
+                span.clone(),
+            ))
+        }
+
+        Expr::Shr(lhs, rhs, span) => {
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
+                Type::Float
+            } else {
+                Type::Int
+            };
+
+            if ty != Type::Int {
+                errors.push(SemanticError {
+                    message: "You can only use bitwise operators on integers.".into(),
+                    label: "Invalid Use of Bitwise Operator".into(),
+                    help: Some("Use an integer instead, or use: +, -, *, /".into()),
+                    span: span.clone(),
+                });
+            }
+
+            Some(TypedExpr::Shr(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                ty,
+                span.clone(),
+            ))
+        }
+
+        Expr::Shl(lhs, rhs, span) => {
+            let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
+            let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
+            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
+                Type::Float
+            } else {
+                Type::Int
+            };
+
+            if ty != Type::Int {
+                errors.push(SemanticError {
+                    message: "You can only use bitwise operators on integers.".into(),
+                    label: "Invalid Use of Bitwise Operator".into(),
+                    help: Some("Use an integer instead, or use: +, -, *, /".into()),
+                    span: span.clone(),
+                });
+            }
+
+            Some(TypedExpr::Shl(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                ty,
+                span.clone(),
+            ))
         }
 
         Expr::Mod(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
-            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float { Type::Float } else { Type::Int };
-            Some(TypedExpr::Mod(Box::new(t_lhs), Box::new(t_rhs), ty, span.clone()))
+            let ty = if t_lhs.ty() == Type::Float || t_rhs.ty() == Type::Float {
+                Type::Float
+            } else {
+                Type::Int
+            };
+            Some(TypedExpr::Mod(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                ty,
+                span.clone(),
+            ))
         }
 
         Expr::Neg(val, span) => {
@@ -131,49 +306,81 @@ pub fn type_check_expr(
         Expr::GreaterThan(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
-            Some(TypedExpr::GreaterThan(Box::new(t_lhs), Box::new(t_rhs), span.clone()))
+            Some(TypedExpr::GreaterThan(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                span.clone(),
+            ))
         }
 
         Expr::LessThan(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
-            Some(TypedExpr::LessThan(Box::new(t_lhs), Box::new(t_rhs), span.clone()))
+            Some(TypedExpr::LessThan(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                span.clone(),
+            ))
         }
 
         Expr::GreaterEqual(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
-            Some(TypedExpr::GreaterEqual(Box::new(t_lhs), Box::new(t_rhs), span.clone()))
+            Some(TypedExpr::GreaterEqual(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                span.clone(),
+            ))
         }
 
         Expr::LessEqual(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
-            Some(TypedExpr::LessEqual(Box::new(t_lhs), Box::new(t_rhs), span.clone()))
+            Some(TypedExpr::LessEqual(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                span.clone(),
+            ))
         }
 
         Expr::Equal(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
-            Some(TypedExpr::Equal(Box::new(t_lhs), Box::new(t_rhs), span.clone()))
+            Some(TypedExpr::Equal(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                span.clone(),
+            ))
         }
 
         Expr::NotEqual(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
-            Some(TypedExpr::NotEqual(Box::new(t_lhs), Box::new(t_rhs), span.clone()))
+            Some(TypedExpr::NotEqual(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                span.clone(),
+            ))
         }
 
         Expr::And(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
-            Some(TypedExpr::And(Box::new(t_lhs), Box::new(t_rhs), span.clone()))
+            Some(TypedExpr::And(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                span.clone(),
+            ))
         }
 
         Expr::Or(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, fn_map, struct_map, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, fn_map, struct_map, rhs)?;
-            Some(TypedExpr::Or(Box::new(t_lhs), Box::new(t_rhs), span.clone()))
+            Some(TypedExpr::Or(
+                Box::new(t_lhs),
+                Box::new(t_rhs),
+                span.clone(),
+            ))
         }
 
         Expr::Block(stmts, span) => {
@@ -192,13 +399,21 @@ pub fn type_check_expr(
         Expr::While(cond, body, span) => {
             let t_cond = type_check_expr(scopes, errors, fn_map, struct_map, cond)?;
             let t_body = type_check_expr(scopes, errors, fn_map, struct_map, body)?;
-            Some(TypedExpr::While(Box::new(t_cond), Box::new(t_body), span.clone()))
+            Some(TypedExpr::While(
+                Box::new(t_cond),
+                Box::new(t_body),
+                span.clone(),
+            ))
         }
 
         Expr::If(cond, body, span) => {
             let t_cond = type_check_expr(scopes, errors, fn_map, struct_map, cond)?;
             let t_body = type_check_expr(scopes, errors, fn_map, struct_map, body)?;
-            Some(TypedExpr::If(Box::new(t_cond), Box::new(t_body), span.clone()))
+            Some(TypedExpr::If(
+                Box::new(t_cond),
+                Box::new(t_body),
+                span.clone(),
+            ))
         }
 
         Expr::IfElse(cond, then_b, else_b, span) => {
@@ -217,7 +432,9 @@ pub fn type_check_expr(
 
         Expr::Return(opt_expr, span) => {
             let t_opt = match opt_expr {
-                Some(e) => Some(Box::new(type_check_expr(scopes, errors, fn_map, struct_map, e)?)),
+                Some(e) => Some(Box::new(type_check_expr(
+                    scopes, errors, fn_map, struct_map, e,
+                )?)),
                 None => None,
             };
             Some(TypedExpr::Return(t_opt, span.clone()))
@@ -264,7 +481,12 @@ pub fn type_check_expr(
                 Type::Unit
             };
 
-            Some(TypedExpr::Call(name.clone(), typed_args, ret_ty, span.clone()))
+            Some(TypedExpr::Call(
+                name.clone(),
+                typed_args,
+                ret_ty,
+                span.clone(),
+            ))
         }
 
         Expr::ArrayInit(elems, span) => {
@@ -377,7 +599,9 @@ pub fn type_check_expr(
                 if let Some(info) = scopes.lookup(var_name) {
                     if !info.is_mutable {
                         errors.push(SemanticError {
-                            message: format!("Cannot mutate field of immutable object '{var_name}'"),
+                            message: format!(
+                                "Cannot mutate field of immutable object '{var_name}'"
+                            ),
                             label: "Object is immutable".to_string(),
                             help: Some(format!("Declare as mutable: 'let mut {var_name}'")),
                             span: span.clone(),
@@ -395,4 +619,3 @@ pub fn type_check_expr(
         }
     }
 }
-

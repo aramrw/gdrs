@@ -76,6 +76,36 @@ pub fn compile_expr(
             }
         }
 
+        TypedExpr::Pipe(lhs, rhs, _, _) => {
+            let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
+            let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+            builder.ins().bor(left, right)
+        }
+
+        TypedExpr::Ampersand(lhs, rhs, _, _) => {
+            let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
+            let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+            builder.ins().band(left, right)
+        }
+
+        TypedExpr::Caret(lhs, rhs, _, _) => {
+            let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
+            let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+            builder.ins().bxor(left, right)
+        }
+
+        TypedExpr::Shr(lhs, rhs, _, _) => {
+            let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
+            let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+            builder.ins().sshr(left, right)
+        }
+
+        TypedExpr::Shl(lhs, rhs, _, _) => {
+            let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
+            let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+            builder.ins().ishl(left, right)
+        }
+
         // Modulo -> Cranelift srem / float modulo instruction
         TypedExpr::Mod(lhs, rhs, ty, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
@@ -114,7 +144,9 @@ pub fn compile_expr(
             let cmp = if lhs.ty() == Type::Float {
                 builder.ins().fcmp(FloatCC::GreaterThanOrEqual, left, right)
             } else {
-                builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, left, right)
+                builder
+                    .ins()
+                    .icmp(IntCC::SignedGreaterThanOrEqual, left, right)
             };
             builder.ins().uextend(types::I64, cmp)
         }
@@ -126,7 +158,9 @@ pub fn compile_expr(
             let cmp = if lhs.ty() == Type::Float {
                 builder.ins().fcmp(FloatCC::LessThanOrEqual, left, right)
             } else {
-                builder.ins().icmp(IntCC::SignedLessThanOrEqual, left, right)
+                builder
+                    .ins()
+                    .icmp(IntCC::SignedLessThanOrEqual, left, right)
             };
             builder.ins().uextend(types::I64, cmp)
         }
@@ -336,9 +370,15 @@ pub fn compile_expr(
         }
 
         // Intrinsic Macro: name!(args...) -> Central intrinsic dispatcher
-        TypedExpr::MacroCall(name, args, _) => {
-            crate::codegen::intrinsics::compile_macro_call(builder, name, args, vars, var_counter, module, struct_layouts)
-        }
+        TypedExpr::MacroCall(name, args, _) => crate::codegen::intrinsics::compile_macro_call(
+            builder,
+            name,
+            args,
+            vars,
+            var_counter,
+            module,
+            struct_layouts,
+        ),
 
         // String literal -> Allocate string data in JITModule and return pointer
         TypedExpr::String(raw_s, _) => {
@@ -367,7 +407,8 @@ pub fn compile_expr(
             let mut sig = module.make_signature();
 
             for arg in args {
-                let compiled_arg = compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
+                let compiled_arg =
+                    compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
                 compiled_args.push(compiled_arg);
                 let param_ty = match arg.ty() {
                     Type::Float => types::F64,
@@ -403,7 +444,14 @@ pub fn compile_expr(
             let base_ptr = builder.ins().stack_addr(types::I64, slot, 0);
 
             for (i, (_field_name, field_expr)) in fields.iter().enumerate() {
-                let val = compile_expr(builder, field_expr, vars, var_counter, module, struct_layouts);
+                let val = compile_expr(
+                    builder,
+                    field_expr,
+                    vars,
+                    var_counter,
+                    module,
+                    struct_layouts,
+                );
                 let offset = (i * 8) as i32;
                 builder.ins().store(MemFlags::new(), val, base_ptr, offset);
             }
@@ -428,7 +476,9 @@ pub fn compile_expr(
                 _ => types::I64,
             };
 
-            builder.ins().load(field_cranelift_ty, MemFlags::new(), base_ptr, offset)
+            builder
+                .ins()
+                .load(field_cranelift_ty, MemFlags::new(), base_ptr, offset)
         }
 
         TypedExpr::FieldAssign(target, field_name, val, _) => {
@@ -444,7 +494,9 @@ pub fn compile_expr(
                 }
             }
 
-            builder.ins().store(MemFlags::new(), new_val, base_ptr, offset);
+            builder
+                .ins()
+                .store(MemFlags::new(), new_val, base_ptr, offset);
             new_val
         }
 
@@ -478,7 +530,9 @@ pub fn compile_expr(
                 _ => types::I64,
             };
 
-            builder.ins().load(cranelift_ty, MemFlags::new(), elem_addr, 0)
+            builder
+                .ins()
+                .load(cranelift_ty, MemFlags::new(), elem_addr, 0)
         }
 
         TypedExpr::IndexAssign(target, idx, val, _) => {
@@ -495,4 +549,3 @@ pub fn compile_expr(
         }
     }
 }
-

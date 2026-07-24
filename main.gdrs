@@ -1,19 +1,38 @@
-obj Vec2:
-	x: i64
-	y: i64
-
-fn add(v1: Vec2, v2: Vec2) -> Vec2:
-	let x = v1.x + v2.x
-	let y = v1.y + v2.y
-	let v = Vec2{x: x, y: y}
-	return v
-
 fn main():
-	let mut v1 = Vec2{x: 3, y: 4}
-	let v2 = Vec2{x: 5, y: 2}
-	let res = add(v1, v2)
-	log!(res.x, res.y)
+	let mut x = 5          // Binary: 0000 0101
+	log!("starting at 5")
 
-	let mut x = 5
-	x *= 5
-	log!(x)
+	// Shift Left (<<): Shifts bits left, doubling the number for each step
+	let doubled = x << 1   // 0000 1010 = 10
+	let quadrupled = x << 2 // 0001 0100 = 20
+	log!(doubled)          // Logs 10
+	log!(quadrupled)       // Logs 20
+
+	// Shift Right (>>): Shifts bits right, halving (integer division)
+	let x2 = 20
+	let halved = x2 >> 1   // Logs 10
+	log!(halved)
+
+	// Bitwise AND (&): Only keeps bits that are 1 in BOTH numbers
+	// 5 = 0101
+	// 3 = 0011
+	// -----------
+	//     0001 = 1
+	let and_res = 5 & 3
+	log!(and_res)          // Logs 1
+
+	// Bitwise OR (|): Keeps bits that are 1 in EITHER number
+	// 4 = 0100
+	// 1 = 0001
+	// -----------
+	//     0101 = 5
+	let or_res = 4 | 1
+	log!(or_res)           // Logs 5
+
+	// Bitwise XOR (^): Keeps bits if they are DIFFERENT (one is 1, one is 0)
+	// 5 = 0101
+	// 3 = 0011
+	// -----------
+	//     0110 = 6
+	let xor_res = 5 ^ 3
+	log!(xor_res)          // Logs 6

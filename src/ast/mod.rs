@@ -49,11 +49,21 @@ pub enum Token {
     #[token("not")]
     Not,
     #[token("&&")]
-    #[token("and")]
     And,
     #[token("||")]
-    #[token("or")]
     Or,
+
+    #[token("|")]
+    Pipe,
+    #[token("&")]
+    Ampersand,
+    #[token("^")]
+    Caret,
+    #[token("<<")]
+    Shl,
+    #[token(">>")]
+    Shr,
+
     #[token("->")]
     Arrow,
     #[token("return")]
@@ -128,7 +138,7 @@ pub enum Token {
     Obj,
 
     #[token(".")]
-    Dot
+    Dot,
 }
 
 pub type Span = std::ops::Range<usize>;
@@ -216,6 +226,12 @@ pub enum Expr {
     ArrayInit(Vec<Expr>, Span),
     IndexAccess(Box<Expr>, Box<Expr>, Span),
     IndexAssign(Box<Expr>, Box<Expr>, Box<Expr>, Span),
+
+    Pipe(Box<Expr>, Box<Expr>, Span),
+    Ampersand(Box<Expr>, Box<Expr>, Span),
+    Caret(Box<Expr>, Box<Expr>, Span),
+    Shl(Box<Expr>, Box<Expr>, Span),
+    Shr(Box<Expr>, Box<Expr>, Span),
 }
 
 impl Expr {
@@ -239,6 +255,11 @@ impl Expr {
             | Expr::NotEqual(_, _, s)
             | Expr::And(_, _, s)
             | Expr::Or(_, _, s) => s.clone(),
+            Expr::Pipe(_, _, s) => s.clone(),
+            Expr::Ampersand(_, _, s) => s.clone(),
+            Expr::Caret(_, _, s) => s.clone(),
+            Expr::Shl(_, _, s) => s.clone(),
+            Expr::Shr(_, _, s) => s.clone(),
             Expr::Neg(_, s) | Expr::Not(_, s) => s.clone(),
             Expr::Let(_, _, _, s) => s.clone(),
             Expr::Block(_, s) => s.clone(),
@@ -270,6 +291,7 @@ pub enum TypedExpr {
     Bool(bool, Span),
     String(String, Span),
 
+    // mul
     Add(Box<TypedExpr>, Box<TypedExpr>, Type, Span),
     Sub(Box<TypedExpr>, Box<TypedExpr>, Type, Span),
     Mul(Box<TypedExpr>, Box<TypedExpr>, Type, Span),
@@ -278,6 +300,7 @@ pub enum TypedExpr {
     Neg(Box<TypedExpr>, Type, Span),
     Not(Box<TypedExpr>, Span),
 
+    // cmp
     GreaterThan(Box<TypedExpr>, Box<TypedExpr>, Span),
     LessThan(Box<TypedExpr>, Box<TypedExpr>, Span),
     GreaterEqual(Box<TypedExpr>, Box<TypedExpr>, Span),
@@ -286,6 +309,13 @@ pub enum TypedExpr {
     NotEqual(Box<TypedExpr>, Box<TypedExpr>, Span),
     And(Box<TypedExpr>, Box<TypedExpr>, Span),
     Or(Box<TypedExpr>, Box<TypedExpr>, Span),
+
+    // Bitwise
+    Pipe(Box<TypedExpr>, Box<TypedExpr>, Type, Span),
+    Ampersand(Box<TypedExpr>, Box<TypedExpr>, Type, Span),
+    Caret(Box<TypedExpr>, Box<TypedExpr>, Type, Span),
+    Shl(Box<TypedExpr>, Box<TypedExpr>, Type, Span),
+    Shr(Box<TypedExpr>, Box<TypedExpr>, Type, Span),
 
     Let(String, bool, Box<TypedExpr>, Type, Span),
     Block(Vec<TypedExpr>, Type, Span),
@@ -316,6 +346,11 @@ impl TypedExpr {
             | TypedExpr::Mul(_, _, ty, _)
             | TypedExpr::Div(_, _, ty, _)
             | TypedExpr::Mod(_, _, ty, _)
+            | TypedExpr::Pipe(_, _, ty, _)
+            | TypedExpr::Ampersand(_, _, ty, _)
+            | TypedExpr::Caret(_, _, ty, _)
+            | TypedExpr::Shl(_, _, ty, _)
+            | TypedExpr::Shr(_, _, ty, _)
             | TypedExpr::Neg(_, ty, _) => *ty,
 
             TypedExpr::Bool(..)
@@ -361,6 +396,11 @@ impl TypedExpr {
             | TypedExpr::Mul(_, _, _, s)
             | TypedExpr::Div(_, _, _, s)
             | TypedExpr::Mod(_, _, _, s)
+            | TypedExpr::Ampersand(_, _, _, s)
+            | TypedExpr::Pipe(_, _, _, s)
+            | TypedExpr::Caret(_, _, _, s)
+            | TypedExpr::Shl(_, _, _, s)
+            | TypedExpr::Shr(_, _, _, s)
             | TypedExpr::GreaterThan(_, _, s)
             | TypedExpr::LessThan(_, _, s)
             | TypedExpr::GreaterEqual(_, _, s)
@@ -416,5 +456,3 @@ pub struct TypedFuncDecl {
     pub return_type: Type,
     pub body: Vec<TypedExpr>,
 }
-
-
