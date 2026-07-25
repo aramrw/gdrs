@@ -162,6 +162,10 @@ pub enum Token {
     Extern,
     #[token("unsafe")]
     Unsafe,
+    #[token("match")]
+    Match,
+    #[token("=>")]
+    FatArrow,
     #[token("$")]
     Dollar,
 
@@ -303,6 +307,24 @@ pub enum Expr {
     Shr(Box<Expr>, Box<Expr>, Span),
 
     EnumConstruct(String, String, Vec<Expr>, Span),
+    Match(Box<Expr>, Vec<MatchArm>, Span),
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub variant_name: String,
+    pub bindings: Vec<String>,
+    pub body: Vec<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct TypedMatchArm {
+    pub variant_name: String,
+    pub tag: i64,
+    pub bindings: Vec<(String, Type)>,
+    pub body: Vec<TypedExpr>,
+    pub span: Span,
 }
 
 impl Expr {
@@ -349,6 +371,7 @@ impl Expr {
             Expr::IndexAccess(_, _, s) => s.clone(),
             Expr::IndexAssign(_, _, _, s) => s.clone(),
             Expr::EnumConstruct(_, _, _, s) => s.clone(),
+            Expr::Match(_, _, s) => s.clone(),
         }
     }
 }
@@ -412,6 +435,7 @@ pub enum TypedExpr {
     EnumConstruct(String, String, usize, Vec<TypedExpr>, Type, Span),
     CoerceToDyn(Box<TypedExpr>, &'static str, Span),
     DynCall(Box<TypedExpr>, String, Vec<TypedExpr>, Type, Span),
+    Match(Box<TypedExpr>, Vec<TypedMatchArm>, Type, Span),
 }
 
 impl TypedExpr {
@@ -453,7 +477,8 @@ impl TypedExpr {
             | TypedExpr::FieldAccess(_, _, ty, _)
             | TypedExpr::ArrayInit(_, ty, _)
             | TypedExpr::IndexAccess(_, _, ty, _)
-            | TypedExpr::EnumConstruct(_, _, _, _, ty, _) => *ty,
+            | TypedExpr::EnumConstruct(_, _, _, _, ty, _)
+            | TypedExpr::Match(_, _, ty, _) => *ty,
             | TypedExpr::DynCall(_, _, _, ty, _) => *ty,
             TypedExpr::CoerceToDyn(_, trait_name, _) => Type::DynTrait(trait_name),
             TypedExpr::Assign(..)
@@ -511,6 +536,7 @@ impl TypedExpr {
             TypedExpr::IndexAccess(_, _, _, s) => s.clone(),
             TypedExpr::IndexAssign(_, _, _, s) => s.clone(),
             TypedExpr::EnumConstruct(_, _, _, _, _, s) => s.clone(),
+            TypedExpr::Match(_, _, _, s) => s.clone(),
         }
     }
 }

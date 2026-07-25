@@ -1,18 +1,33 @@
-// Positive test: wrapping extern C calls in unsafe block
-
 extern "C":
-	fn puts(s: str) -> i64
-	fn labs(x: i64) -> i64
-	fn system(cmd: str) -> i64
+	// RTLD_GLOBAL (0x8) | RTLD_LAZY (0x1) = 9 on macOS
+	fn dlopen(filename: str, flags: i32) -> i64 
+
+	// Raylib C signatures
+	fn InitWindow(width: i32, height: i32, title: str)
+	fn WindowShouldClose() -> bool
+	fn BeginDrawing()
+	fn ClearBackground(color_hex: i64)
+	fn DrawCircle(centerX: i32, centerY: i32, radius: f32, color_hex: i64)
+	fn EndDrawing()
+	fn CloseWindow()
 
 fn main():
-	log!("=== Testing GDRS unsafe: Block Encapsulation ===")
-
 	unsafe:
-		puts("1. Hello from native C libc puts inside unsafe block!")
+		// 1. Tell macOS to load Raylib into process memory
+		let handle = dlopen("/opt/homebrew/lib/libraylib.dylib", 9)
+		if handle == 0:
+			log!("Failed to load Raylib! Make sure brew install raylib is run.")
+			return
 
-		let abs_val = labs(0 - 777)
-		log!("2. C libc labs(-777) return value inside unsafe:", abs_val)
+		log!("Raylib loaded successfully! Opening window...")
 
-		log!("3. Launching macOS Calculator app via C FFI inside unsafe:")
-		system("open -a Calculator")
+		// 2. Drive Raylib directly from gdrs!
+		InitWindow(800, 600, "GDRS + Raylib Native Window!")
+
+		while !WindowShouldClose():
+			BeginDrawing()
+			ClearBackground(0xFFFFFFFF) // White
+			DrawCircle(400, 300, 50.0, 0xFF0000FF) // Red circle
+			EndDrawing()
+
+		CloseWindow()

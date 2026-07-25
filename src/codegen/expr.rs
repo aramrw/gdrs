@@ -448,6 +448,59 @@ pub fn compile_expr(
             builder.ins().iconst(types::I64, 0)
         }
 
+        TypedExpr::Match(target, arms, _, _) => {
+            use cranelift_codegen::ir::condcodes::IntCC;
+
+            let target_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
+            let tag_val = builder.ins().load(types::I64, MemFlags::new(), target_ptr, 0);
+
+            let exit_block = builder.create_block();
+
+            for arm in arms {
+                let arm_block = builder.create_block();
+                let next_check_block = builder.create_block();
+
+                if arm.tag == -1 {
+                    builder.ins().jump(arm_block, &[]);
+                } else {
+                    let expected_tag = builder.ins().iconst(types::I64, arm.tag);
+                    let is_match = builder.ins().icmp(IntCC::Equal, tag_val, expected_tag);
+                    builder.ins().brif(is_match, arm_block, &[], next_check_block, &[]);
+                }
+
+                // Compile Arm Block
+                builder.switch_to_block(arm_block);
+                builder.seal_block(arm_block);
+
+                for (idx, (b_name, _b_ty)) in arm.bindings.iter().enumerate() {
+                    let offset = ((idx + 1) * 8) as i32;
+                    let payload_val = builder.ins().load(types::I64, MemFlags::new(), target_ptr, offset);
+                    let var = cranelift_frontend::Variable::from_u32(*var_counter as u32);
+                    *var_counter += 1;
+                    builder.declare_var(var, types::I64);
+                    builder.def_var(var, payload_val);
+                    vars.insert(b_name.clone(), var);
+                }
+
+                for stmt in &arm.body {
+                    compile_expr(builder, stmt, vars, var_counter, module, struct_layouts);
+                }
+
+                builder.ins().jump(exit_block, &[]);
+
+                // Switch to Next Check Block
+                builder.switch_to_block(next_check_block);
+                builder.seal_block(next_check_block);
+            }
+
+            builder.ins().jump(exit_block, &[]);
+
+            builder.switch_to_block(exit_block);
+            builder.seal_block(exit_block);
+
+            builder.ins().iconst(types::I64, 0)
+        }
+
         TypedExpr::While(cond, body, _) => {
             let header_block = builder.create_block();
             let body_block = builder.create_block();

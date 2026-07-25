@@ -29,6 +29,34 @@ pub fn type_check_expr<'a>(
         Expr::Ident(name, span) => {
             if let Some(info) = scopes.lookup(name) {
                 Some(TypedExpr::Ident(name.clone(), info.ty, span.clone()))
+            } else if let Some((enum_part, variant_part)) = name.split_once("::") {
+                let normalized_enum = enum_part.replace("::", "_");
+                if let Some((mangled_enum, v_map)) = type_ctx.enum_map.get(&normalized_enum) {
+                    if let Some((tag, _p_types)) = v_map.get(variant_part) {
+                        return Some(TypedExpr::EnumConstruct(
+                            mangled_enum.to_string(),
+                            variant_part.to_string(),
+                            *tag as usize,
+                            Vec::new(),
+                            Type::Enum(mangled_enum),
+                            span.clone(),
+                        ));
+                    }
+                }
+                let normalized = name.replace("::", "_");
+                if type_ctx.struct_map.contains_key(&normalized) {
+                    Some(TypedExpr::Ident(name.clone(), Type::Obj(intern_str(&normalized)), span.clone()))
+                } else if type_ctx.enum_map.contains_key(&normalized) {
+                    Some(TypedExpr::Ident(name.clone(), Type::Enum(intern_str(&normalized)), span.clone()))
+                } else {
+                    errors.push(SemanticError {
+                        message: format!("Undefined variable '{name}'"),
+                        label: "Variable does not exist in this scope".to_string(),
+                        help: None,
+                        span: span.clone(),
+                    });
+                    None
+                }
             } else {
                 let normalized = name.replace("::", "_");
                 if type_ctx.struct_map.contains_key(&normalized) {
@@ -507,6 +535,77 @@ pub fn type_check_expr<'a>(
             Some(TypedExpr::Unsafe(typed_stmts, block_ty, span.clone()))
         }
 
+        Expr::Match(target_expr, arms, span) => {
+            let t_target = type_check_expr(scopes, errors, type_ctx, target_expr)?;
+            let enum_name = match t_target.ty() {
+                Type::Enum(name) => name,
+                other => {
+                    errors.push(SemanticError {
+                        message: format!("`match` target must be an `enum`, found `{:?}`", other),
+                        label: "Expected enum type".into(),
+                        help: None,
+                        span: target_expr.span().clone(),
+                    });
+                    return None;
+                }
+            };
+
+            let variant_info = type_ctx.enum_map.get(enum_name).cloned();
+            let mut typed_arms = Vec::new();
+            let mut arm_types = Vec::new();
+
+            for arm in arms {
+                scopes.push_scope();
+                let mut typed_bindings = Vec::new();
+                let tag = if arm.variant_name == "_" {
+                    -1
+                } else {
+                    let short_v_name = arm.variant_name.split("::").last().unwrap_or(&arm.variant_name);
+                    if let Some((_, v_map)) = &variant_info {
+                        if let Some((v_tag, p_types)) = v_map.get(short_v_name) {
+                            for (b_name, p_ty) in arm.bindings.iter().zip(p_types.iter()) {
+                                scopes.declare(b_name.clone(), false, *p_ty);
+                                typed_bindings.push((b_name.clone(), *p_ty));
+                            }
+                            *v_tag
+                        } else {
+                            errors.push(SemanticError {
+                                message: format!("Unknown variant `{}` for enum `{}`", arm.variant_name, enum_name),
+                                label: "Unknown variant".into(),
+                                help: None,
+                                span: arm.span.clone(),
+                            });
+                            -1
+                        }
+                    } else {
+                        -1
+                    }
+                };
+
+                let mut typed_arm_stmts = Vec::new();
+                for stmt in &arm.body {
+                    if let Some(t_stmt) = type_check_expr(scopes, errors, type_ctx, stmt) {
+                        typed_arm_stmts.push(t_stmt);
+                    }
+                }
+                scopes.pop_scope();
+
+                let arm_ty = typed_arm_stmts.last().map(|s| s.ty()).unwrap_or(Type::Unit);
+                arm_types.push(arm_ty);
+
+                typed_arms.push(crate::ast::TypedMatchArm {
+                    variant_name: arm.variant_name.clone(),
+                    tag,
+                    bindings: typed_bindings,
+                    body: typed_arm_stmts,
+                    span: arm.span.clone(),
+                });
+            }
+
+            let match_ty = arm_types.first().cloned().unwrap_or(Type::Unit);
+            Some(TypedExpr::Match(Box::new(t_target), typed_arms, match_ty, span.clone()))
+        }
+
         Expr::While(cond, body, span) => {
             let t_cond = type_check_expr(scopes, errors, type_ctx, cond)?;
             let t_body = type_check_expr(scopes, errors, type_ctx, body)?;
@@ -612,13 +711,33 @@ pub fn type_check_expr<'a>(
         }
 
         Expr::Call(raw_name, args, span) => {
-            let name = raw_name.replace("::", "_");
             let mut typed_args = Vec::new();
             for arg in args {
                 if let Some(t_arg) = type_check_expr(scopes, errors, type_ctx, arg) {
                     typed_args.push(t_arg);
                 }
             }
+
+            let split_sep = if raw_name.contains("::") { Some("::") } else if raw_name.contains('.') { Some(".") } else { None };
+            if let Some(sep) = split_sep {
+                if let Some((target_or_var, method_name)) = raw_name.split_once(sep) {
+                    let normalized_enum = target_or_var.replace("::", "_");
+                    if let Some((static_enum_name, variants)) = type_ctx.enum_map.get(&normalized_enum) {
+                        if let Some((disc, _)) = variants.get(method_name) {
+                            return Some(TypedExpr::EnumConstruct(
+                                static_enum_name.to_string(),
+                                method_name.to_string(),
+                                *disc as usize,
+                                typed_args,
+                                Type::Enum(static_enum_name),
+                                span.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let name = raw_name.replace("::", "_");
             if name == "push_str" || name == "push" || name == "pop" {
                 if !typed_args.is_empty() {
                     if let TypedExpr::Ident(var_name, _, _) = &typed_args[0] {
@@ -637,21 +756,10 @@ pub fn type_check_expr<'a>(
                 return Some(TypedExpr::MacroCall(name.clone(), typed_args, span.clone()));
             }
             let mut resolved_name = name.clone();
-            if let Some((target_or_var, method_name)) = name.split_once('.') {
-                if let Some((static_enum_name, variants)) = type_ctx.enum_map.get(target_or_var) {
-                    if let Some((disc, _)) = variants.get(method_name) {
-                        return Some(TypedExpr::EnumConstruct(
-                            target_or_var.to_string(),
-                            method_name.to_string(),
-                            *disc as usize,
-                            typed_args,
-                            Type::Enum(static_enum_name),
-                            span.clone(),
-                        ));
-                    }
-                }
-
-                let mangled = format!("{}_{}", target_or_var, method_name);
+            let split_sep = if name.contains("::") { Some("::") } else if name.contains('.') { Some(".") } else { None };
+            if let Some(sep) = split_sep {
+                if let Some((target_or_var, method_name)) = name.split_once(sep) {
+                    let mangled = format!("{}_{}", target_or_var, method_name);
                 if method_name == "len" || method_name == "push" || method_name == "pop" || method_name == "push_str" {
                     if let Some(target_info) = scopes.lookup(target_or_var) {
                         if (method_name == "push" || method_name == "push_str" || method_name == "pop") && !target_info.is_mutable {
@@ -716,6 +824,7 @@ pub fn type_check_expr<'a>(
                             }
                         }
                         _ => {}
+                    }
                     }
                 }
             } else if !type_ctx.fn_map.contains_key(&name) && !typed_args.is_empty() {

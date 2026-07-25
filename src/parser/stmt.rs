@@ -182,7 +182,7 @@ pub fn stmt_parser<'a>(
 
 
 
-        let call_stmt = path
+        let call_stmt = path.clone()
             .then(
                 math.clone()
                     .separated_by(just(Token::Comma))
@@ -201,6 +201,48 @@ pub fn stmt_parser<'a>(
                 other => Expr::Unsafe(vec![other], span),
             });
 
+        let arm_pattern = select! { Token::Ident(s) if s == "_" => s }
+            .then(empty().to(Vec::new()))
+            .or(
+                path.clone().then(
+                    select! { Token::Ident(s) => s }
+                        .separated_by(just(Token::Comma))
+                        .allow_trailing()
+                        .delimited_by(just(Token::LParen), just(Token::RParen))
+                        .or_not()
+                        .map(|opt| opt.unwrap_or_default()),
+                )
+            );
+
+        let match_arm = arm_pattern
+            .then_ignore(just(Token::FatArrow))
+            .then_ignore(just(Token::Newline).or_not())
+            .then(block.clone())
+            .map_with_span(|((variant_name, bindings), body_expr), span| {
+                let body = match body_expr {
+                    Expr::Block(stmts, _) => stmts,
+                    other => vec![other],
+                };
+                crate::ast::MatchArm {
+                    variant_name,
+                    bindings,
+                    body,
+                    span,
+                }
+            });
+
+        let match_stmt = just(Token::Match)
+            .ignore_then(math.clone())
+            .then_ignore(just(Token::Colon))
+            .then_ignore(just(Token::Newline).or_not())
+            .then(
+                match_arm
+                    .repeated()
+                    .at_least(1)
+                    .delimited_by(just(Token::Indent), just(Token::Dedent)),
+            )
+            .map_with_span(|(target, arms), span| Expr::Match(Box::new(target), arms, span));
+
         just(Token::Newline)
             .repeated()
             .ignore_then(
@@ -210,6 +252,7 @@ pub fn stmt_parser<'a>(
                     .or(assign_stmt)
                     .or(return_stmt)
                     .or(unsafe_stmt)
+                    .or(match_stmt)
                     .or(if_stmt)
                     .or(while_stmt)
                     .or(macro_call)

@@ -1,0 +1,35 @@
+// Aozora Bunko Downloader & HTML Tag Stripper
+
+extern "C":
+	fn system(cmd: str) -> i64
+	fn fopen(path: str, mode: str) -> i64
+	fn fread(buf: i64, size: i64, count: i64, stream: i64) -> i64
+	fn fclose(stream: i64) -> i64
+	fn malloc(size: i64) -> i64
+	fn free(ptr: i64)
+	fn puts(buf: i64) -> i64
+
+fn main():
+	unsafe:
+		// 1. Download using valid URL and -sSLf flags
+		log!("1. Downloading Aozora Bunko HTML page...")
+		system("curl -sSLf https://www.aozora.gr.jp/cards/000035/files/1567_14913.html -o book.html")
+
+		// 2. Open file with libc
+		let fp = fopen("book.html", "r")
+		if fp == 0:
+			log!("Failed to open book.html")
+			return
+
+		// 3. Read 4KB chunk into heap memory
+		let buf = malloc(4096)
+		let bytes_read = fread(buf, 1, 4095, fp)
+		fclose(fp)
+
+		log!("2. Read bytes into memory:", bytes_read)
+
+		// 4. Print raw buffer via C puts
+		log!("3. Outputting fetched content:")
+		puts(buf)
+
+		free(buf)
