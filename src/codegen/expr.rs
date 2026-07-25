@@ -16,6 +16,91 @@ use cranelift_module::{Linkage, Module};
 use crate::ast::{Type, TypedExpr};
 use crate::sanal::StructLayout;
 
+/// True for any floating-point Type variant.
+#[inline]
+fn is_float_ty(ty: &Type) -> bool {
+    matches!(ty, Type::Float | Type::F32)
+}
+
+/// True for any integer Type variant.
+#[inline]
+fn is_int_ty(ty: &Type) -> bool {
+    matches!(ty, Type::Int | Type::I32)
+}
+
+/// Map a gdrs Type to the correct Cranelift scalar type.
+#[inline]
+pub fn cranelift_type_of(ty: &Type) -> cranelift_codegen::ir::Type {
+    match ty {
+        Type::I32 => types::I32,
+        Type::Int => types::I64,
+        Type::F32 => types::F32,
+        Type::Float => types::F64,
+        Type::Bool => types::I8,
+        _ => types::I64, // pointers / heap handles
+    }
+}
+
+/// Widen two operand Values so they share the same Cranelift type before
+/// emitting a binary instruction. Follows Rust promotion rules:
+///   i32 + i64  → both i64
+///   f32 + f64  → both f64
+///   int + float → both float (using the wider float)
+fn coerce_operands(
+    builder: &mut FunctionBuilder,
+    mut lhs: Value,
+    mut rhs: Value,
+) -> (Value, Value) {
+    let lt = builder.func.dfg.value_type(lhs);
+    let rt = builder.func.dfg.value_type(rhs);
+    if lt == rt {
+        return (lhs, rhs);
+    }
+    match (lt, rt) {
+        // int widening
+        (types::I32, types::I64) => {
+            lhs = builder.ins().sextend(types::I64, lhs);
+        }
+        (types::I64, types::I32) => {
+            rhs = builder.ins().sextend(types::I64, rhs);
+        }
+        // float widening
+        (types::F32, types::F64) => {
+            lhs = builder.ins().fpromote(types::F64, lhs);
+        }
+        (types::F64, types::F32) => {
+            rhs = builder.ins().fpromote(types::F64, rhs);
+        }
+        // int-to-float promotion
+        (types::I32, types::F32) => {
+            lhs = builder.ins().fcvt_from_sint(types::F32, lhs);
+        }
+        (types::F32, types::I32) => {
+            rhs = builder.ins().fcvt_from_sint(types::F32, rhs);
+        }
+        (types::I32, types::F64) => {
+            lhs = builder.ins().fcvt_from_sint(types::F64, lhs);
+        }
+        (types::F64, types::I32) => {
+            rhs = builder.ins().fcvt_from_sint(types::F64, rhs);
+        }
+        (types::I64, types::F64) => {
+            lhs = builder.ins().fcvt_from_sint(types::F64, lhs);
+        }
+        (types::F64, types::I64) => {
+            rhs = builder.ins().fcvt_from_sint(types::F64, rhs);
+        }
+        (types::I64, types::F32) => {
+            lhs = builder.ins().fcvt_from_sint(types::F32, lhs);
+        }
+        (types::F32, types::I64) => {
+            rhs = builder.ins().fcvt_from_sint(types::F32, rhs);
+        }
+        _ => {}
+    }
+    (lhs, rhs)
+}
+
 /// Recursively compiles a `TypedExpr` into a Cranelift IR `Value`.
 pub fn compile_expr<M: Module>(
     builder: &mut FunctionBuilder,
@@ -26,17 +111,25 @@ pub fn compile_expr<M: Module>(
     struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
     match expr {
-        // Integer literal -> Cranelift I64 constant instruction
-        TypedExpr::Int(n, _) => builder.ins().iconst(types::I64, *n),
+        // Integer literal — emits I32 if fits, I64 if the value exceeds i32 range.
+        // The Let codegen widens I32 to I64 when needed via sextend.
+        TypedExpr::Int(n, _) => {
+            if *n >= i32::MIN as i64 && *n <= i32::MAX as i64 {
+                builder.ins().iconst(types::I32, *n)
+            } else {
+                builder.ins().iconst(types::I64, *n)
+            }
+        }
 
-        // Float literal -> Cranelift F64 constant instruction
-        TypedExpr::Float(f, _) => builder.ins().f64const(*f),
+        // Float literal — emits F32 by default (promoted by Let codegen if needed)
+        TypedExpr::Float(f, _) => builder.ins().f32const(*f as f32),
 
         // Addition -> Cranelift iadd / fadd instruction
         TypedExpr::Add(lhs, rhs, ty, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
-            if *ty == Type::Float {
+            let (left, right) = coerce_operands(builder, left, right);
+            if is_float_ty(ty) {
                 builder.ins().fadd(left, right)
             } else {
                 builder.ins().iadd(left, right)
@@ -47,7 +140,8 @@ pub fn compile_expr<M: Module>(
         TypedExpr::Sub(lhs, rhs, ty, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
-            if *ty == Type::Float {
+            let (left, right) = coerce_operands(builder, left, right);
+            if is_float_ty(ty) {
                 builder.ins().fsub(left, right)
             } else {
                 builder.ins().isub(left, right)
@@ -58,7 +152,8 @@ pub fn compile_expr<M: Module>(
         TypedExpr::Mul(lhs, rhs, ty, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
-            if *ty == Type::Float {
+            let (left, right) = coerce_operands(builder, left, right);
+            if is_float_ty(ty) {
                 builder.ins().fmul(left, right)
             } else {
                 builder.ins().imul(left, right)
@@ -69,7 +164,8 @@ pub fn compile_expr<M: Module>(
         TypedExpr::Div(lhs, rhs, ty, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
-            if *ty == Type::Float {
+            let (left, right) = coerce_operands(builder, left, right);
+            if is_float_ty(ty) {
                 builder.ins().fdiv(left, right)
             } else {
                 builder.ins().sdiv(left, right)
@@ -79,30 +175,35 @@ pub fn compile_expr<M: Module>(
         TypedExpr::Pipe(lhs, rhs, _, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+            let (left, right) = coerce_operands(builder, left, right);
             builder.ins().bor(left, right)
         }
 
         TypedExpr::Ampersand(lhs, rhs, _, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+            let (left, right) = coerce_operands(builder, left, right);
             builder.ins().band(left, right)
         }
 
         TypedExpr::Caret(lhs, rhs, _, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+            let (left, right) = coerce_operands(builder, left, right);
             builder.ins().bxor(left, right)
         }
 
         TypedExpr::Shr(lhs, rhs, _, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+            let (left, right) = coerce_operands(builder, left, right);
             builder.ins().sshr(left, right)
         }
 
         TypedExpr::Shl(lhs, rhs, _, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+            let (left, right) = coerce_operands(builder, left, right);
             builder.ins().ishl(left, right)
         }
 
@@ -110,7 +211,8 @@ pub fn compile_expr<M: Module>(
         TypedExpr::Mod(lhs, rhs, ty, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
-            if *ty == Type::Float {
+            let (left, right) = coerce_operands(builder, left, right);
+            if is_float_ty(ty) {
                 let div = builder.ins().fdiv(left, right);
                 let flr = builder.ins().floor(div);
                 let mul = builder.ins().fmul(flr, right);
@@ -120,17 +222,17 @@ pub fn compile_expr<M: Module>(
             }
         }
 
-        // Unary Negation -> Cranelift ineg / fneg instruction
+        // Unary Negation
         TypedExpr::Neg(val, ty, _) => {
             let inner = compile_expr(builder, val, vars, var_counter, module, struct_layouts);
-            if *ty == Type::Float {
+            if is_float_ty(ty) {
                 builder.ins().fneg(inner)
             } else {
                 builder.ins().ineg(inner)
             }
         }
 
-        // Logical NOT -> Cranelift icmp_imm(Equal, val, 0)
+        // Logical NOT
         TypedExpr::Not(val, _) => {
             let inner = compile_expr(builder, val, vars, var_counter, module, struct_layouts);
             let cmp = builder.ins().icmp_imm(IntCC::Equal, inner, 0);
@@ -141,7 +243,8 @@ pub fn compile_expr<M: Module>(
         TypedExpr::GreaterEqual(lhs, rhs, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
-            let cmp = if lhs.ty() == Type::Float {
+            let (left, right) = coerce_operands(builder, left, right);
+            let cmp = if is_float_ty(&lhs.ty()) {
                 builder.ins().fcmp(FloatCC::GreaterThanOrEqual, left, right)
             } else {
                 builder
@@ -155,7 +258,8 @@ pub fn compile_expr<M: Module>(
         TypedExpr::LessEqual(lhs, rhs, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
-            let cmp = if lhs.ty() == Type::Float {
+            let (left, right) = coerce_operands(builder, left, right);
+            let cmp = if is_float_ty(&lhs.ty()) {
                 builder.ins().fcmp(FloatCC::LessThanOrEqual, left, right)
             } else {
                 builder
@@ -177,10 +281,10 @@ pub fn compile_expr<M: Module>(
                     .load(types::I64, MemFlags::new(), right_raw, 0);
                 (l_tag, r_tag)
             } else {
-                (left_raw, right_raw)
+                coerce_operands(builder, left_raw, right_raw)
             };
 
-            let cmp = if lhs.ty() == Type::Float {
+            let cmp = if is_float_ty(&lhs.ty()) {
                 builder.ins().fcmp(FloatCC::NotEqual, left, right)
             } else {
                 builder.ins().icmp(IntCC::NotEqual, left, right)
@@ -204,59 +308,32 @@ pub fn compile_expr<M: Module>(
 
         // Return statement
         TypedExpr::Return(opt_expr, _) => {
-            let ret_val = match opt_expr {
-                Some(e) => compile_expr(builder, e, vars, var_counter, module, struct_layouts),
-                None => builder.ins().iconst(types::I64, 0),
-            };
-            builder.ins().return_(&[ret_val]);
-
+            if let Some(e) = opt_expr {
+                let ret_val = compile_expr(builder, e, vars, var_counter, module, struct_layouts);
+                builder.ins().return_(&[ret_val]);
+            } else {
+                // Bare `return` — void return (no value)
+                builder.ins().return_(&[]);
+            }
+            // Unreachable dead block to satisfy Cranelift's "every block must be filled" invariant
             let dead_block = builder.create_block();
             builder.switch_to_block(dead_block);
             builder.seal_block(dead_block);
 
-            ret_val
-        }
-
-        // If-Else Expression / Statement
-        TypedExpr::IfElse(cond, then_b, else_b, ty, _) => {
-            let then_block = builder.create_block();
-            let else_block = builder.create_block();
-            let exit_block = builder.create_block();
-
-            let cranelift_ty = match ty {
-                Type::Float => types::F64,
-                _ => types::I64,
-            };
-            builder.append_block_param(exit_block, cranelift_ty);
-
-            let cond_val = compile_expr(builder, cond, vars, var_counter, module, struct_layouts);
+            // Emit a tombstone value so the block has a usable result, then trap to fill it
+            let tombstone = builder.ins().iconst(types::I64, 0);
             builder
                 .ins()
-                .brif(cond_val, then_block, &[], else_block, &[]);
-
-            // THEN
-            builder.switch_to_block(then_block);
-            builder.seal_block(then_block);
-            let then_val = compile_expr(builder, then_b, vars, var_counter, module, struct_layouts);
-            builder.ins().jump(exit_block, &[then_val]);
-
-            // ELSE
-            builder.switch_to_block(else_block);
-            builder.seal_block(else_block);
-            let else_val = compile_expr(builder, else_b, vars, var_counter, module, struct_layouts);
-            builder.ins().jump(exit_block, &[else_val]);
-
-            // EXIT
-            builder.switch_to_block(exit_block);
-            builder.seal_block(exit_block);
-            builder.block_params(exit_block)[0]
+                .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+            tombstone
         }
 
         // Greater Than Comparison (>)
         TypedExpr::GreaterThan(lhs, rhs, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
-            let cmp = if lhs.ty() == Type::Float {
+            let (left, right) = coerce_operands(builder, left, right);
+            let cmp = if is_float_ty(&lhs.ty()) {
                 builder.ins().fcmp(FloatCC::GreaterThan, left, right)
             } else {
                 builder.ins().icmp(IntCC::SignedGreaterThan, left, right)
@@ -268,7 +345,8 @@ pub fn compile_expr<M: Module>(
         TypedExpr::LessThan(lhs, rhs, _) => {
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
-            let cmp = if lhs.ty() == Type::Float {
+            let (left, right) = coerce_operands(builder, left, right);
+            let cmp = if is_float_ty(&lhs.ty()) {
                 builder.ins().fcmp(FloatCC::LessThan, left, right)
             } else {
                 builder.ins().icmp(IntCC::SignedLessThan, left, right)
@@ -287,10 +365,10 @@ pub fn compile_expr<M: Module>(
                     .load(types::I64, MemFlags::new(), right_raw, 0);
                 (l_tag, r_tag)
             } else {
-                (left_raw, right_raw)
+                coerce_operands(builder, left_raw, right_raw)
             };
 
-            let cmp = if lhs.ty() == Type::Float {
+            let cmp = if is_float_ty(&lhs.ty()) {
                 builder.ins().fcmp(FloatCC::Equal, left, right)
             } else {
                 builder.ins().icmp(IntCC::Equal, left, right)
@@ -305,26 +383,30 @@ pub fn compile_expr<M: Module>(
             let var = Variable::from_u32(*var_counter as u32);
             *var_counter += 1;
 
-            // 1. Map gdrs Type to the precise Cranelift type
-            let cranelift_ty = match ty {
-                Type::I32 => types::I32,
-                Type::Int => types::I64,
-                Type::F32 => types::F32,
-                Type::Float => types::F64,
-                Type::Bool => types::I8,
-                // All heap/stack compound pointers (Obj, Str, String, Slice, Vec, Arc, Rc) are 64-bit addresses
-                _ => types::I64,
-            };
+            // Map gdrs Type to the precise Cranelift type
+            let cranelift_ty = cranelift_type_of(ty);
 
             builder.declare_var(var, cranelift_ty);
 
-            // 2. Coerce primitive scalar values if compile_expr returned an I64/F64 literal
+            // Coerce: widen or convert the value if the literal type != declared type
             let val_ty = builder.func.dfg.value_type(val);
             if val_ty != cranelift_ty {
                 val = match (val_ty, cranelift_ty) {
+                    // i32 literal widened to i64 variable
+                    (types::I32, types::I64) => builder.ins().sextend(types::I64, val),
+                    // i64 narrowed to i32 variable (explicit annotation)
                     (types::I64, types::I32) => builder.ins().ireduce(types::I32, val),
+                    // i32 int to f32
+                    (types::I32, types::F32) => builder.ins().fcvt_from_sint(types::F32, val),
+                    // i32 int to f64
+                    (types::I32, types::F64) => builder.ins().fcvt_from_sint(types::F64, val),
+                    // i64 int to f32
                     (types::I64, types::F32) => builder.ins().fcvt_from_sint(types::F32, val),
+                    // i64 int to f64
                     (types::I64, types::F64) => builder.ins().fcvt_from_sint(types::F64, val),
+                    // f32 widened to f64
+                    (types::F32, types::F64) => builder.ins().fpromote(types::F64, val),
+                    // f64 demoted to f32 (explicit annotation)
                     (types::F64, types::F32) => builder.ins().fdemote(types::F32, val),
                     _ => val,
                 };
@@ -510,6 +592,7 @@ pub fn compile_expr<M: Module>(
         }
 
         // Conditional If Statement
+        // If Statement (no else)
         TypedExpr::If(cond, body, _) => {
             let then_block = builder.create_block();
             let exit_block = builder.create_block();
@@ -519,7 +602,7 @@ pub fn compile_expr<M: Module>(
                 .ins()
                 .brif(cond_val, then_block, &[], exit_block, &[]);
 
-            // 1. THEN BLOCK
+            // THEN BLOCK
             builder.switch_to_block(then_block);
             builder.seal_block(then_block);
             compile_expr(builder, body, vars, var_counter, module, struct_layouts);
@@ -527,13 +610,68 @@ pub fn compile_expr<M: Module>(
                 builder.ins().jump(exit_block, &[]);
             }
 
-            // 2. EXIT BLOCK
+            // EXIT BLOCK
             builder.switch_to_block(exit_block);
             builder.seal_block(exit_block);
 
             builder.ins().iconst(types::I64, 0)
         }
 
+        // If-Else Expression / Statement
+        TypedExpr::IfElse(cond, then_b, else_b, ty, _) => {
+            let then_block = builder.create_block();
+            let else_block = builder.create_block();
+            let exit_block = builder.create_block();
+
+            let is_unit = *ty == Type::Unit;
+            let cranelift_ty = cranelift_type_of(ty);
+
+            // Only expect a block parameter if this expression yields a non-unit value
+            if !is_unit {
+                builder.append_block_param(exit_block, cranelift_ty);
+            }
+
+            let cond_val = compile_expr(builder, cond, vars, var_counter, module, struct_layouts);
+            builder
+                .ins()
+                .brif(cond_val, then_block, &[], else_block, &[]);
+
+            // THEN
+            builder.switch_to_block(then_block);
+            builder.seal_block(then_block);
+            let then_val = compile_expr(builder, then_b, vars, var_counter, module, struct_layouts);
+            if !builder.is_unreachable() {
+                if is_unit {
+                    builder.ins().jump(exit_block, &[]);
+                } else {
+                    let coerced = coerce_val(builder, then_val, cranelift_ty);
+                    builder.ins().jump(exit_block, &[coerced]);
+                }
+            }
+
+            // ELSE
+            builder.switch_to_block(else_block);
+            builder.seal_block(else_block);
+            let else_val = compile_expr(builder, else_b, vars, var_counter, module, struct_layouts);
+            if !builder.is_unreachable() {
+                if is_unit {
+                    builder.ins().jump(exit_block, &[]);
+                } else {
+                    let coerced = coerce_val(builder, else_val, cranelift_ty);
+                    builder.ins().jump(exit_block, &[coerced]);
+                }
+            }
+
+            // EXIT
+            builder.switch_to_block(exit_block);
+            builder.seal_block(exit_block);
+
+            if is_unit {
+                builder.ins().iconst(types::I64, 0)
+            } else {
+                builder.block_params(exit_block)[0]
+            }
+        }
         TypedExpr::Match(target, arms, _, _) => {
             use cranelift_codegen::ir::condcodes::IntCC;
 
@@ -685,20 +823,36 @@ pub fn compile_expr<M: Module>(
                 };
 
                 let val_ty = builder.func.dfg.value_type(compiled_arg);
-                if param_ty == types::F32 && val_ty == types::F64 {
-                    compiled_arg = builder.ins().fdemote(types::F32, compiled_arg);
-                } else if param_ty == types::I32 && val_ty == types::I64 {
-                    compiled_arg = builder.ins().ireduce(types::I32, compiled_arg);
+                if val_ty != param_ty {
+                    compiled_arg = match (val_ty, param_ty) {
+                        (types::I32, types::I64) => builder.ins().sextend(types::I64, compiled_arg),
+                        (types::I64, types::I32) => builder.ins().ireduce(types::I32, compiled_arg),
+                        (types::I32, types::F32) => {
+                            builder.ins().fcvt_from_sint(types::F32, compiled_arg)
+                        }
+                        (types::I32, types::F64) => {
+                            builder.ins().fcvt_from_sint(types::F64, compiled_arg)
+                        }
+                        (types::I64, types::F32) => {
+                            builder.ins().fcvt_from_sint(types::F32, compiled_arg)
+                        }
+                        (types::I64, types::F64) => {
+                            builder.ins().fcvt_from_sint(types::F64, compiled_arg)
+                        }
+                        (types::F32, types::F64) => {
+                            builder.ins().fpromote(types::F64, compiled_arg)
+                        }
+                        (types::F64, types::F32) => builder.ins().fdemote(types::F32, compiled_arg),
+                        (types::I8, t) if t.is_int() => builder.ins().sextend(t, compiled_arg),
+                        _ => compiled_arg,
+                    };
                 }
 
                 compiled_args.push(compiled_arg);
                 sig.params.push(AbiParam::new(param_ty));
             }
 
-            let ret_cranelift_ty = match ret_ty {
-                Type::Float => types::F64,
-                _ => types::I64,
-            };
+            let ret_cranelift_ty = cranelift_type_of(ret_ty);
             if *ret_ty != Type::Unit {
                 sig.returns.push(AbiParam::new(ret_cranelift_ty));
             }
@@ -806,10 +960,7 @@ pub fn compile_expr<M: Module>(
                 }
             }
 
-            let field_cranelift_ty = match field_ty {
-                Type::Float => types::F64,
-                _ => types::I64,
-            };
+            let field_cranelift_ty = cranelift_type_of(field_ty);
 
             builder
                 .ins()
@@ -869,10 +1020,7 @@ pub fn compile_expr<M: Module>(
             let offset = builder.ins().imul(idx_val, elem_size);
             let elem_addr = builder.ins().iadd(buffer_ptr, offset);
 
-            let cranelift_ty = match elem_ty {
-                Type::Float => types::F64,
-                _ => types::I64,
-            };
+            let cranelift_ty = cranelift_type_of(elem_ty);
 
             builder
                 .ins()
@@ -926,19 +1074,23 @@ pub fn compile_expr<M: Module>(
 
         TypedExpr::CastF32(inner, _) => {
             let val = compile_expr(builder, inner, vars, var_counter, module, struct_layouts);
-            if inner.ty() == Type::Float {
-                builder.ins().fdemote(types::F32, val)
-            } else {
-                val
+            let val_ty = builder.func.dfg.value_type(val);
+            match val_ty {
+                t if t == types::F64 => builder.ins().fdemote(types::F32, val),
+                t if t == types::I64 => builder.ins().fcvt_from_sint(types::F32, val),
+                t if t == types::I32 => builder.ins().fcvt_from_sint(types::F32, val),
+                _ => val, // already F32
             }
         }
 
         TypedExpr::CastI32(inner, _) => {
             let val = compile_expr(builder, inner, vars, var_counter, module, struct_layouts);
-            if inner.ty() == Type::Int {
-                builder.ins().ireduce(types::I32, val)
-            } else {
-                val
+            let val_ty = builder.func.dfg.value_type(val);
+            match val_ty {
+                t if t == types::I64 => builder.ins().ireduce(types::I32, val),
+                t if t == types::F32 => builder.ins().fcvt_to_sint(types::I32, val),
+                t if t == types::F64 => builder.ins().fcvt_to_sint(types::I32, val),
+                _ => val, // already I32
             }
         }
 
@@ -1118,5 +1270,23 @@ pub fn compile_expr<M: Module>(
                 builder.ins().iconst(types::I64, 0)
             }
         }
+    }
+}
+
+/// Helper to coerce Cranelift SSA values to match target block parameter types
+fn coerce_val(
+    builder: &mut cranelift_frontend::FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    target_ty: cranelift_codegen::ir::Type,
+) -> cranelift_codegen::ir::Value {
+    let val_ty = builder.func.dfg.value_type(val);
+    if val_ty == target_ty {
+        val
+    } else if val_ty == types::I32 && target_ty == types::I64 {
+        builder.ins().sextend(types::I64, val)
+    } else if val_ty == types::I64 && target_ty == types::I32 {
+        builder.ins().ireduce(types::I32, val)
+    } else {
+        val
     }
 }

@@ -386,12 +386,22 @@ pub fn compile_macro_call<M: Module>(
                 let type_tag_val = builder.ins().iconst(types::I64, type_tag);
                 let raw_val = compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
 
-                let value_bits = if arg.ty() == Type::Float {
-                    builder.ins().bitcast(types::I64, MemFlags::new(), raw_val)
-                } else if (arg.ty() == Type::Str || arg.ty() == Type::String) && !matches!(arg, TypedExpr::String(..)) {
-                    builder.ins().load(types::I64, MemFlags::new(), raw_val, 0)
-                } else {
-                    raw_val
+                let value_bits = {
+                    let raw_ty = builder.func.dfg.value_type(raw_val);
+                    if (arg.ty() == Type::Str || arg.ty() == Type::String) && !matches!(arg, TypedExpr::String(..)) {
+                        // Str/String are stack pointers — load the char* from offset 0
+                        builder.ins().load(types::I64, MemFlags::new(), raw_val, 0)
+                    } else if raw_ty == types::F64 {
+                        builder.ins().bitcast(types::I64, MemFlags::new(), raw_val)
+                    } else if raw_ty == types::F32 {
+                        // promote f32 -> f64 then bitcast to i64 for ABI
+                        let promoted = builder.ins().fpromote(types::F64, raw_val);
+                        builder.ins().bitcast(types::I64, MemFlags::new(), promoted)
+                    } else if raw_ty == types::I32 || raw_ty == types::I8 {
+                        builder.ins().sextend(types::I64, raw_val)
+                    } else {
+                        raw_val // already I64
+                    }
                 };
 
                 let mut sig = module.make_signature();

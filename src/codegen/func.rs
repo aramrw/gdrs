@@ -11,7 +11,7 @@ use cranelift_jit::JITModule;
 use cranelift_module::{Linkage, Module};
 
 use crate::ast::{Type, TypedFuncDecl};
-use crate::codegen::expr::compile_expr;
+use crate::codegen::expr::{compile_expr, cranelift_type_of};
 use crate::sanal::StructLayout;
 
 /// Compiles a single function declaration to native machine code in the Module.
@@ -27,23 +27,15 @@ pub fn compile_func<M: Module>(
 
     // Add parameter signatures to Cranelift function
     for param in &func.params {
-        let param_ty = match param.ty {
-            Type::Float => types::F64,
-            Type::F32 => types::F32,
-            _ => types::I64,
-        };
+        let param_ty = cranelift_type_of(&param.ty);
         ctx.func.signature.params.push(AbiParam::new(param_ty));
     }
 
+    let ret_cranelift_ty = cranelift_type_of(&func.return_type);
     match func.return_type {
-        Type::Float => {
-            ctx.func.signature.returns.push(AbiParam::new(types::F64));
-        }
-        Type::F32 => {
-            ctx.func.signature.returns.push(AbiParam::new(types::F32));
-        }
+        Type::Unit => {}
         _ => {
-            ctx.func.signature.returns.push(AbiParam::new(types::I64));
+            ctx.func.signature.returns.push(AbiParam::new(ret_cranelift_ty));
         }
     }
 
@@ -63,40 +55,73 @@ pub fn compile_func<M: Module>(
     for (i, param) in func.params.iter().enumerate() {
         let var = Variable::from_u32(var_counter as u32);
         var_counter += 1;
-        let param_ty = match param.ty {
-            Type::Float => types::F64,
-            _ => types::I64,
-        };
+        let param_ty = cranelift_type_of(&param.ty);
         builder.declare_var(var, param_ty);
         builder.def_var(var, block_params[i]);
         vars.insert(param.name.clone(), var);
     }
 
-    let ret_var = Variable::from_u32(var_counter as u32);
-    var_counter += 1;
+    let is_void = func.return_type == Type::Unit;
 
-    let ret_cranelift_ty = match func.return_type {
-        Type::Float => types::F64,
-        _ => types::I64,
+    // For non-void functions, declare a ret_var to accumulate the return value.
+    let ret_var = if !is_void {
+        let v = Variable::from_u32(var_counter as u32);
+        var_counter += 1;
+        builder.declare_var(v, ret_cranelift_ty);
+        let zero = match func.return_type {
+            Type::Float => builder.ins().f64const(0.0),
+            Type::F32 => builder.ins().f32const(0.0),
+            _ => builder.ins().iconst(ret_cranelift_ty, 0),
+        };
+        builder.def_var(v, zero);
+        Some(v)
+    } else {
+        None
     };
-    builder.declare_var(ret_var, ret_cranelift_ty);
-
-    let zero = match func.return_type {
-        Type::Float => builder.ins().f64const(0.0),
-        _ => builder.ins().iconst(types::I64, 0),
-    };
-    builder.def_var(ret_var, zero);
 
     for expr in &func.body {
         let val = compile_expr(&mut builder, expr, &mut vars, &mut var_counter, module, struct_layouts);
         if !builder.is_unreachable() {
-            builder.def_var(ret_var, val);
+            if let Some(ret_var) = ret_var {
+                // Coerce the returned body value to match the function's return type.
+                let val_ty = builder.func.dfg.value_type(val);
+                let coerced = if val_ty == ret_cranelift_ty {
+                    val
+                } else {
+                    match (val_ty, ret_cranelift_ty) {
+                        (types::I32, types::I64) => builder.ins().sextend(types::I64, val),
+                        (types::I64, types::I32) => builder.ins().ireduce(types::I32, val),
+                        (types::I32, types::F32) => builder.ins().fcvt_from_sint(types::F32, val),
+                        (types::I32, types::F64) => builder.ins().fcvt_from_sint(types::F64, val),
+                        (types::I64, types::F32) => builder.ins().fcvt_from_sint(types::F32, val),
+                        (types::I64, types::F64) => builder.ins().fcvt_from_sint(types::F64, val),
+                        (types::F32, types::F64) => builder.ins().fpromote(types::F64, val),
+                        (types::F64, types::F32) => builder.ins().fdemote(types::F32, val),
+                        (types::F32, types::I32) => builder.ins().fcvt_to_sint(types::I32, val),
+                        (types::F32, types::I64) => builder.ins().fcvt_to_sint(types::I64, val),
+                        (types::F64, types::I32) => builder.ins().fcvt_to_sint(types::I32, val),
+                        (types::F64, types::I64) => builder.ins().fcvt_to_sint(types::I64, val),
+                        _ if val_ty.is_int() && ret_cranelift_ty.is_int() && val_ty.bits() < ret_cranelift_ty.bits() => {
+                            builder.ins().sextend(ret_cranelift_ty, val)
+                        }
+                        _ if val_ty.is_int() && ret_cranelift_ty.is_int() && val_ty.bits() > ret_cranelift_ty.bits() => {
+                            builder.ins().ireduce(ret_cranelift_ty, val)
+                        }
+                        _ => val,
+                    }
+                };
+                builder.def_var(ret_var, coerced);
+            }
         }
     }
 
     if !builder.is_unreachable() {
-        let final_ret = builder.use_var(ret_var);
-        builder.ins().return_(&[final_ret]);
+        if let Some(ret_var) = ret_var {
+            let final_ret = builder.use_var(ret_var);
+            builder.ins().return_(&[final_ret]);
+        } else {
+            builder.ins().return_(&[]);
+        }
     }
     builder.finalize();
 

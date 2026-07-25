@@ -1,0 +1,24 @@
+fn main():
+	// Inferred types (Rust-like defaults)
+	let a = 42           // i32 (default)
+	let b = 3.14         // f32 (default)
+
+	// Explicit annotations
+	let c: i32 = 100
+	let d: i64 = 9000000000
+	let e: f32 = 1.5
+	let f: f64 = 2.718281828
+
+	log!("a (inferred i32):", a)
+	log!("b (inferred f32):", b)
+	log!("c (explicit i32):", c)
+	log!("d (explicit i64):", d)
+	log!("e (explicit f32):", e)
+	log!("f (explicit f64):", f)
+
+	// Arithmetic with typed values
+	let sum_i32: i32 = c + a
+	log!("sum i32:", sum_i32)
+
+	let sum_i64: i64 = d + 1
+	log!("sum i64:", sum_i64)

@@ -1,5 +1,5 @@
 extern "C":
-	fn dlopen(filename: str, flags: i32) -> i64 
+	fn dlopen(filename: str, flags: i32) -> i64
 
 	fn InitWindow(width: i32, height: i32, title: str)
 	fn WindowShouldClose() -> bool
@@ -8,10 +8,7 @@ extern "C":
 	fn DrawCircle(centerX: i32, centerY: i32, radius: f32, color_hex: i64)
 	fn EndDrawing()
 	fn CloseWindow()
-	
-	// New screen bound functions!
-	fn GetScreenWidth() -> i32
-	fn GetScreenHeight() -> i32
+	fn SetTargetFPS(fps: i32)
 
 fn main():
 	unsafe:
@@ -21,40 +18,40 @@ fn main():
 			return
 
 		InitWindow(800, 600, "GDRS Bouncing Circle!")
+		SetTargetFPS(60)
 
-		// Position and Velocity
-		let mut x: i32 = 400
-		let mut y: i32 = 300
-		let mut speed_x: i32 = 5
-		let mut speed_y: i32 = 5
-		let radius: i32 = 50
+		let mut x = 400
+		let mut y = 300
+		let mut speed_x = 5
+		let mut speed_y = 5
+		let radius = 50
 
 		while !WindowShouldClose():
-			// 1. Get current window bounds
-			// Why GetScreenWidth() returned 0
-			// In gdrs, when calling C FFI functions that return 32-bit values (-> i32), ensure your foreign function call codegen reads the 32-bit return register (e.g., w0 on ARM64 macOS) rather than expecting a 64-bit value or leaving high bits uninitialized.
-			let screen_w = GetScreenWidth()
-			let screen_h = GetScreenHeight()
+			let screen_w = 800
+			let screen_h = 600
 
-			// 2. Apply velocity
 			x += speed_x
 			y += speed_y
 
-			// 3. Collision detection (bounce off edges)
 			if x >= (screen_w - radius):
-				speed_x = -5
-			if x <= radius:
-				speed_x = 5
-				
-			if y >= (screen_h - radius):
-				speed_y = -5
-			if y <= radius:
-				speed_y = 5
+				x = screen_w - radius
+				speed_x = -speed_x
 
-			// 4. Draw
+			if x <= radius:
+				x = radius
+				speed_x = -speed_x
+
+			if y >= (screen_h - radius):
+				y = screen_h - radius
+				speed_y = -speed_y
+
+			if y <= radius:
+				y = radius
+				speed_y = -speed_y
+
 			BeginDrawing()
 			ClearBackground(2294467295)
-			DrawCircle(x, y, 50.0, 4278190335) // Red circle
+			DrawCircle(x, y, 50.0, 4278190335)
 			EndDrawing()
 
 		CloseWindow()

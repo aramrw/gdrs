@@ -23,7 +23,10 @@ pub fn type_check_expr<'a>(
     expr: &Expr,
 ) -> Option<TypedExpr> {
     match expr {
+        // Integer literals default to I32 (like Rust). When assigned to an i64 variable,
+        // the Let codegen widens it automatically via sextend.
         Expr::Int(n, span) => Some(TypedExpr::Int(*n, span.clone())),
+        // Float literals default to F32. Widened to f64 in codegen if needed.
         Expr::Float(f, span) => Some(TypedExpr::Float(*f, span.clone())),
         Expr::Bool(b, span) => Some(TypedExpr::Bool(*b, span.clone())),
         Expr::String(s, span) => Some(TypedExpr::String(s.clone(), span.clone())),
@@ -110,12 +113,38 @@ pub fn type_check_expr<'a>(
             let inferred_ty = typed_val.ty();
 
             let final_ty = if let Some(annotated) = explicit_ty {
-                // 1. Explicit type provided (`let x: i32 = 400`)
-                // Optional: verify `annotated` matches `inferred_ty` here if desired
+                // Explicit annotation: validate compatibility with inferred RHS type.
+                // Numeric literals are untyped so we allow any numeric annotation against them.
+                let compatible = match (annotated, &inferred_ty) {
+                    // Any int annotation on an int literal
+                    (Type::I32 | Type::Int, Type::I32 | Type::Int) => true,
+                    // Any float annotation on a float literal
+                    (Type::F32 | Type::Float, Type::F32 | Type::Float) => true,
+                    // Int literal widened into float
+                    (Type::F32 | Type::Float, Type::I32 | Type::Int) => true,
+                    (a, b) => a == b,
+                };
+                if !compatible {
+                    errors.push(SemanticError {
+                        message: format!(
+                            "Cannot assign value of type `{inferred_ty:?}` to variable '{name}' declared as `{annotated:?}`"
+                        ),
+                        label: "Type mismatch in let binding".to_string(),
+                        help: None,
+                        span: span.clone(),
+                    });
+                }
                 annotated.clone()
             } else {
-                // 2. Inferred type (`let x = 400`) — apply your mutability rules
-                let mut ty = inferred_ty;
+                // Inferred: only default bare integer/float literals → i32/f32.
+                // Function calls, variables, etc. keep their actual return type.
+                let is_bare_int_literal = matches!(typed_val, TypedExpr::Int(..));
+                let is_bare_float_literal = matches!(typed_val, TypedExpr::Float(..));
+                let mut ty = match inferred_ty {
+                    Type::Int if is_bare_int_literal => Type::I32,
+                    Type::Float if is_bare_float_literal => Type::F32,
+                    other => other,
+                };
                 if *is_mutable {
                     if ty == Type::Str {
                         ty = Type::String;
@@ -164,13 +193,15 @@ pub fn type_check_expr<'a>(
 
                 let val_ty = typed_val.ty();
 
-                // Match exact types OR allow generic numeric literals to coerce into concrete types
+                // Match exact types OR allow numeric coercions (Rust-like)
                 let is_compatible = match (&info.ty, &val_ty) {
                     (a, b) if a == b => true,
-                    // Allow unconstrained integer literals (Type::Int) to assign into i32 / i64
-                    (Type::I32 | Type::Int, Type::Int) => true,
-                    // Allow unconstrained float literals (Type::Float) to assign into f32 / f64
-                    (Type::F32 | Type::Float, Type::Float) => true,
+                    // Int literal (I32) can assign into any integer slot
+                    (Type::I32 | Type::Int, Type::I32 | Type::Int) => true,
+                    // Float literal (F32) can assign into any float slot
+                    (Type::F32 | Type::Float, Type::F32 | Type::Float) => true,
+                    // Int literal into float slot (implicit widening)
+                    (Type::F32 | Type::Float, Type::I32 | Type::Int) => true,
                     _ => false,
                 };
 
@@ -325,7 +356,7 @@ pub fn type_check_expr<'a>(
             let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
             let ty = t_val.ty();
 
-            if ty != Type::Int && ty != Type::Float {
+            if !matches!(ty, Type::Int | Type::I32 | Type::Float | Type::F32) {
                 errors.push(SemanticError {
                     message: format!("Cannot negate non-numeric type `{:?}`", ty),
                     label: "Invalid negation".into(),
@@ -383,8 +414,8 @@ pub fn type_check_expr<'a>(
             let r_ty = t_rhs.ty();
 
             // Ensure both sides are numeric (Int or Float)
-            if !(l_ty == Type::Int || l_ty == Type::Float || l_ty == Type::I32)
-                || !(r_ty == Type::Int || r_ty == Type::Float || r_ty == Type::I32)
+            if !matches!(l_ty, Type::Int | Type::I32 | Type::Float | Type::F32)
+                || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32)
             {
                 errors.push(SemanticError {
                     message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '>='"),
@@ -397,7 +428,7 @@ pub fn type_check_expr<'a>(
                 });
             }
 
-            Some(TypedExpr::LessEqual(
+            Some(TypedExpr::GreaterEqual(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
                 span.clone(),
@@ -412,8 +443,8 @@ pub fn type_check_expr<'a>(
             let r_ty = t_rhs.ty();
 
             // Ensure both sides are numeric (Int or Float)
-            if !(l_ty == Type::Int || l_ty == Type::Float || l_ty == Type::I32)
-                || !(r_ty == Type::Int || r_ty == Type::Float || r_ty == Type::I32)
+            if !matches!(l_ty, Type::Int | Type::I32 | Type::Float | Type::F32)
+                || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32)
             {
                 errors.push(SemanticError {
                     message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '<='"),
@@ -440,14 +471,20 @@ pub fn type_check_expr<'a>(
             let l_ty = t_lhs.ty();
             let r_ty = t_rhs.ty();
 
-            if l_ty != r_ty {
+            // Numeric types are compatible for equality comparisons even if they
+            // differ in width (e.g. i32 variable == 0 literal which types as Int).
+            let numeric_compatible = matches!((l_ty, r_ty),
+                (Type::I32 | Type::Int, Type::I32 | Type::Int)
+                | (Type::F32 | Type::Float, Type::F32 | Type::Float)
+            );
+            if l_ty != r_ty && !numeric_compatible {
                 errors.push(SemanticError {
                     message: format!(
                         "Cannot compare distinct types `{l_ty:?}` and `{r_ty:?}` for equality"
                     ),
                     label: format!("Type mismatch: `{l_ty:?}` vs `{r_ty:?}`"),
                     help: Some(
-                        "Both operands must be the exact same type to check for equality".into(),
+                        "Both operands must be the same type to check for equality".into(),
                     ),
                     span: span.clone(),
                 });
@@ -467,14 +504,18 @@ pub fn type_check_expr<'a>(
             let l_ty = t_lhs.ty();
             let r_ty = t_rhs.ty();
 
-            if l_ty != r_ty {
+            let numeric_compatible = matches!((l_ty, r_ty),
+                (Type::I32 | Type::Int, Type::I32 | Type::Int)
+                | (Type::F32 | Type::Float, Type::F32 | Type::Float)
+            );
+            if l_ty != r_ty && !numeric_compatible {
                 errors.push(SemanticError {
                     message: format!(
                         "Cannot compare distinct types `{l_ty:?}` and `{r_ty:?}` for equality"
                     ),
                     label: format!("Type mismatch: `{l_ty:?}` vs `{r_ty:?}`"),
                     help: Some(
-                        "Both operands must be the exact same type to check for equality".into(),
+                        "Both operands must be the same type to check for equality".into(),
                     ),
                     span: span.clone(),
                 });
@@ -1559,6 +1600,18 @@ pub fn type_check_expr<'a>(
     }
 }
 
+/// Returns true for any integer type variant.
+#[inline]
+fn is_int(ty: Type) -> bool {
+    matches!(ty, Type::I32 | Type::Int)
+}
+
+/// Returns true for any float type variant.
+#[inline]
+fn is_float(ty: Type) -> bool {
+    matches!(ty, Type::F32 | Type::Float)
+}
+
 fn check_binary_op(
     op_name: &str,
     t_lhs: &TypedExpr,
@@ -1570,26 +1623,36 @@ fn check_binary_op(
     let l_ty = t_lhs.ty();
     let r_ty = t_rhs.ty();
 
+    // Promotion: the wider type wins.
+    // i32 + i64 -> i64;  f32 + f64 -> f64;  int + float -> float
     match (l_ty, r_ty) {
+        // Same-type integer
+        (Type::I32, Type::I32) => Type::I32,
         (Type::Int, Type::Int) => Type::Int,
+        // Mixed integer: widen to i64
+        (Type::I32, Type::Int) | (Type::Int, Type::I32) => Type::Int,
+        // Same-type float
+        (Type::F32, Type::F32) if allow_float => Type::F32,
         (Type::Float, Type::Float) if allow_float => Type::Float,
-        (Type::I32, Type::I32) if allow_float => Type::I32,
-        // implicit promotion to float
-        (Type::Int, Type::Float) | (Type::Float, Type::Int) if allow_float => Type::Float,
+        // Mixed float: widen to f64
+        (Type::F32, Type::Float) | (Type::Float, Type::F32) if allow_float => Type::Float,
+        // Int promoted into float
+        _ if allow_float && is_int(l_ty) && is_float(r_ty) => r_ty,
+        _ if allow_float && is_float(l_ty) && is_int(r_ty) => l_ty,
 
         // Invalid types for math/bitwise
         _ => {
             errors.push(SemanticError {
                 message: format!("Cannot perform '{op_name}' on types `{l_ty:?}` and `{r_ty:?}`"),
                 label: format!("Type mismatch: `{l_ty:?}` vs `{r_ty:?}`"),
-                help: if !allow_float && (l_ty == Type::Float || r_ty == Type::Float) {
+                help: if !allow_float && (is_float(l_ty) || is_float(r_ty)) {
                     Some("Bitwise operations can only be used on integers.".into())
                 } else {
-                    Some("Both operands must be numeric types.".into())
+                    Some("Both operands must be numeric types (i32, i64, f32, f64).".into())
                 },
                 span: span.clone(),
             });
-            Type::Int // Fallback error recovery type
+            Type::I32 // Fallback error recovery type
         }
     }
 }
