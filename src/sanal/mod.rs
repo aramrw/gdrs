@@ -151,18 +151,6 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
 
     all_functions.extend(program.functions.clone());
 
-    for ext in &program.externs {
-        for ef in &ext.functions {
-            all_functions.push(FuncDecl {
-                name: ef.name.clone(),
-                params: ef.params.clone(),
-                return_type: ef.return_type,
-                where_clause: None,
-                body: Vec::new(),
-            });
-        }
-    }
-
     // Populate default trait implementations for structs
     for t in &program.traits {
         for method in &t.methods {
@@ -226,9 +214,11 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
     }
 
     let mut extern_fn_names = std::collections::HashSet::new();
+    let mut extern_map = HashMap::new();
     for ext in &program.externs {
         for ef in &ext.functions {
             extern_fn_names.insert(ef.name.clone());
+            extern_map.insert(ef.name.clone(), resolve_type(ef.return_type, &enum_names));
         }
     }
 
@@ -237,6 +227,7 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
         struct_map: &struct_map,
         enum_map: &enum_map,
         extern_fn_names: &extern_fn_names,
+        extern_map: &extern_map,
         is_unsafe: false,
     };
 

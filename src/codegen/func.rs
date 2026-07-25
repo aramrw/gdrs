@@ -34,13 +34,9 @@ pub fn compile_func(
         ctx.func.signature.params.push(AbiParam::new(param_ty));
     }
 
-    // --- FIX 1: Handle Type::Unit for Void Returns ---
     match func.return_type {
         Type::Float => {
             ctx.func.signature.returns.push(AbiParam::new(types::F64));
-        }
-        Type::Unit => {
-            // Void return: signature.returns remains empty ([])
         }
         _ => {
             ctx.func.signature.returns.push(AbiParam::new(types::I64));
@@ -51,8 +47,8 @@ pub fn compile_func(
 
     // Entry basic block
     let entry_block = builder.create_block();
-    builder.append_block_params_for_function_params(entry_block);
     builder.switch_to_block(entry_block);
+    builder.append_block_params_for_function_params(entry_block);
     builder.seal_block(entry_block);
 
     let mut vars = HashMap::new();
@@ -75,38 +71,31 @@ pub fn compile_func(
     let ret_var = Variable::from_u32(var_counter as u32);
     var_counter += 1;
 
-    // Only declare and initialize ret_var if function actually returns a value
-    if func.return_type != Type::Unit {
-        let ret_cranelift_ty = match func.return_type {
-            Type::Float => types::F64,
-            _ => types::I64,
-        };
-        builder.declare_var(ret_var, ret_cranelift_ty);
+    let ret_cranelift_ty = match func.return_type {
+        Type::Float => types::F64,
+        _ => types::I64,
+    };
+    builder.declare_var(ret_var, ret_cranelift_ty);
 
-        let zero = match func.return_type {
-            Type::Float => builder.ins().f64const(0.0),
-            _ => builder.ins().iconst(types::I64, 0),
-        };
-        builder.def_var(ret_var, zero);
-    }
+    let zero = match func.return_type {
+        Type::Float => builder.ins().f64const(0.0),
+        _ => builder.ins().iconst(types::I64, 0),
+    };
+    builder.def_var(ret_var, zero);
 
     for expr in &func.body {
         let val = compile_expr(&mut builder, expr, &mut vars, &mut var_counter, module, struct_layouts);
-        if !builder.is_unreachable() && func.return_type != Type::Unit {
+        if !builder.is_unreachable() {
             builder.def_var(ret_var, val);
         }
     }
 
-    // --- FIX 2: Return empty slice for Type::Unit ---
     if !builder.is_unreachable() {
-        if func.return_type == Type::Unit {
-            builder.ins().return_(&[]);
-        } else {
-            let final_ret = builder.use_var(ret_var);
-            builder.ins().return_(&[final_ret]);
-        }
+        let final_ret = builder.use_var(ret_var);
+        builder.ins().return_(&[final_ret]);
     }
 
+    builder.seal_all_blocks();
     builder.finalize();
 
     // Declare & compile native function

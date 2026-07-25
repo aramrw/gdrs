@@ -10,6 +10,7 @@ pub struct TypeCtx<'a> {
     pub struct_map: &'a HashMap<String, StructLayout>,
     pub enum_map: &'a HashMap<String, (&'static str, HashMap<String, (i64, Vec<Type>)>)>,
     pub extern_fn_names: &'a std::collections::HashSet<String>,
+    pub extern_map: &'a HashMap<String, Type>,
     pub is_unsafe: bool,
 }
 
@@ -909,6 +910,8 @@ pub fn type_check_expr<'a>(
                     }
                 }
                 target_func.return_type
+            } else if let Some(ext_ret_ty) = type_ctx.extern_map.get(&resolved_name) {
+                *ext_ret_ty
             } else {
                 errors.push(SemanticError {
                     message: format!("Undefined function '{resolved_name}'"),

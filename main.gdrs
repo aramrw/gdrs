@@ -1,1 +1,33 @@
+extern "C":
+	// RTLD_GLOBAL (0x8) | RTLD_LAZY (0x1) = 9 on macOS
+	fn dlopen(filename: str, flags: i32) -> i64 
+
+	// Raylib C signatures
+	fn InitWindow(width: i32, height: i32, title: str)
+	fn WindowShouldClose() -> bool
+	fn BeginDrawing()
+	fn ClearBackground(color_hex: i64)
+	fn DrawCircle(centerX: i32, centerY: i32, radius: f32, color_hex: i64)
+	fn EndDrawing()
+	fn CloseWindow()
+
 fn main():
+	unsafe:
+		// 1. Tell macOS to load Raylib into process memory
+		let handle = dlopen("/opt/homebrew/lib/libraylib.dylib", 9)
+		if handle == 0:
+			log!("Failed to load Raylib! Make sure brew install raylib is run.")
+			return
+
+		log!("Raylib loaded successfully! Opening window...")
+
+		// 2. Drive Raylib directly from gdrs!
+		InitWindow(800, 600, "GDRS + Raylib Native Window!")
+
+		while !WindowShouldClose():
+			BeginDrawing()
+			ClearBackground(0xFFFFFFFF)
+			DrawCircle(400, 300, 50.0, 0xFF0000FF)
+			EndDrawing()
+
+		CloseWindow()

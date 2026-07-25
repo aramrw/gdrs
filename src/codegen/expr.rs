@@ -416,10 +416,23 @@ pub fn compile_expr(
             builder.use_var(*var)
         }
 
+        TypedExpr::Return(opt_expr, _) => {
+            let ret_val = if let Some(expr) = opt_expr {
+                compile_expr(builder, expr, vars, var_counter, module, struct_layouts)
+            } else {
+                builder.ins().iconst(types::I64, 0)
+            };
+            builder.ins().return_(&[ret_val]);
+            ret_val
+        }
+
         // Nested Block -> Evaluate statements in sequence
         TypedExpr::Block(stmts, _, _) | TypedExpr::Unsafe(stmts, _, _) => {
             let mut last = builder.ins().iconst(types::I64, 0);
             for stmt in stmts {
+                if builder.is_unreachable() {
+                    break;
+                }
                 last = compile_expr(builder, stmt, vars, var_counter, module, struct_layouts);
             }
             last
@@ -439,7 +452,9 @@ pub fn compile_expr(
             builder.switch_to_block(then_block);
             builder.seal_block(then_block);
             compile_expr(builder, body, vars, var_counter, module, struct_layouts);
-            builder.ins().jump(exit_block, &[]);
+            if !builder.is_unreachable() {
+                builder.ins().jump(exit_block, &[]);
+            }
 
             // 2. EXIT BLOCK
             builder.switch_to_block(exit_block);
@@ -486,7 +501,9 @@ pub fn compile_expr(
                     compile_expr(builder, stmt, vars, var_counter, module, struct_layouts);
                 }
 
-                builder.ins().jump(exit_block, &[]);
+                if !builder.is_unreachable() {
+                    builder.ins().jump(exit_block, &[]);
+                }
 
                 // Switch to Next Check Block
                 builder.switch_to_block(next_check_block);

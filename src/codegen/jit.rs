@@ -23,24 +23,31 @@ pub fn create_jit_module() -> JITModule {
 
     builder.symbol_lookup_fn(Box::new(|name| {
         let c_str = std::ffi::CString::new(name).ok()?;
-        let ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c_str.as_ptr()) };
-        let res = if ptr.is_null() {
+        let mut ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c_str.as_ptr()) };
+        if ptr.is_null() {
             let mangled = format!("_{}", name);
             if let Ok(c_mangled) = std::ffi::CString::new(mangled) {
-                let p2 = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c_mangled.as_ptr()) };
-                if !p2.is_null() {
-                    Some(p2 as *const u8)
-                } else {
-                    None
-                }
-            } else {
-                None
+                ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c_mangled.as_ptr()) };
             }
+        }
+        if ptr.is_null() {
+            for dylib_path in &["/opt/homebrew/lib/libraylib.dylib", "libraylib.dylib", "/usr/local/lib/libraylib.dylib"] {
+                if let Ok(c_path) = std::ffi::CString::new(*dylib_path) {
+                    unsafe {
+                        libc::dlopen(c_path.as_ptr(), 9);
+                    }
+                    ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c_str.as_ptr()) };
+                    if !ptr.is_null() {
+                        break;
+                    }
+                }
+            }
+        }
+        if ptr.is_null() {
+            None
         } else {
             Some(ptr as *const u8)
-        };
-        eprintln!("[JIT LOOKUP] {} -> {:?}", name, res);
-        res
+        }
     }));
 
     JITModule::new(builder)
