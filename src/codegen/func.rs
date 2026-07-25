@@ -37,8 +37,7 @@ pub fn compile_func(
     // Return type for our compiled function
     let ret_cranelift_ty = match func.return_type {
         Type::Float => types::F64,
-        Type::Int | Type::Bool | Type::Str | Type::String | Type::Obj(_) | Type::Enum(_) | Type::Array(_, _) | Type::Slice(_) | Type::Vec(_) => types::I64,
-        Type::Unit => types::I64,
+        _ => types::I64,
     };
     ctx.func.signature.returns.push(AbiParam::new(ret_cranelift_ty));
 

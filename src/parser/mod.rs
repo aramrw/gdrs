@@ -21,13 +21,24 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
             .then_ignore(just(Token::RBracket))
             .map(|t| Type::Vec(intern_type(t)));
 
+        let generic_type = just(Token::Dollar)
+            .ignore_then(select! { Token::Ident(s) => s })
+            .map(|s| Type::Generic(intern_str(&s)));
+
+        let dyn_type = just(Token::Dyn)
+            .ignore_then(select! { Token::Ident(s) => s })
+            .map(|s| Type::DynTrait(intern_str(&s)));
+
         select! {
             Token::TypeInt => Type::Int,
             Token::TypeFloat => Type::Float,
             Token::TypeBool => Type::Bool,
+            Token::TypeStr => Type::Str,
             Token::TypeString => Type::String,
             Token::Ident(s) => Type::Obj(intern_str(&s)),
         }
+        .or(generic_type)
+        .or(dyn_type)
         .or(array_type)
     });
 
@@ -49,13 +60,28 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
             .map_with_span(|(name, ty), span| Param { name, is_mutable: false, ty, span }),
     );
 
-    // Function signature: fn name(params) -> return_type:
+    let where_clause = just(Token::Where)
+        .ignore_then(select! { Token::Ident(s) => s })
+        .then_ignore(just(Token::Colon))
+        .then(
+            select! { Token::Ident(s) => s }
+                .separated_by(just(Token::Plus))
+                .at_least(1),
+        )
+        .map_with_span(|(target_param, bounds), span| WhereClause {
+            target_param,
+            bounds,
+            span,
+        });
+
+    // Function signature: fn name(params) -> return_type where T: Bounds:
     let function = just(Token::Fn)
         .ignore_then(select! { Token::Ident(s) => s })
         .then_ignore(just(Token::LParen))
-        .then(param.separated_by(just(Token::Comma)).allow_trailing())
+        .then(param.clone().separated_by(just(Token::Comma)).allow_trailing())
         .then_ignore(just(Token::RParen))
         .then(just(Token::Arrow).ignore_then(type_parser.clone()).or_not())
+        .then(where_clause.clone().or_not())
         .then_ignore(just(Token::Colon))
         .then_ignore(just(Token::Newline).or_not())
         .then(
@@ -63,12 +89,58 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
                 .at_least(1)
                 .delimited_by(just(Token::Indent), just(Token::Dedent)),
         )
-        .map(|(((name, params), opt_ret), body)| FuncDecl {
+        .map_with_span(
+            |((((name, params), opt_ret), where_clause), body), _| FuncDecl {
+                name,
+                params,
+                return_type: opt_ret.unwrap_or(Type::Unit),
+                where_clause,
+                body,
+            },
+        );
+
+    let func_sig = just(Token::Fn)
+        .ignore_then(select! { Token::Ident(s) => s })
+        .then_ignore(just(Token::LParen))
+        .then(param.clone().separated_by(just(Token::Comma)).allow_trailing())
+        .then_ignore(just(Token::RParen))
+        .then(just(Token::Arrow).ignore_then(type_parser.clone()).or_not())
+        .then(where_clause.or_not())
+        .then_ignore(just(Token::Newline).or_not())
+        .map_with_span(|(((name, params), opt_ret), where_clause), _| FuncDecl {
             name,
             params,
             return_type: opt_ret.unwrap_or(Type::Unit),
-            body,
+            where_clause,
+            body: Vec::new(),
         });
+
+    let trait_decl = just(Token::Trait)
+        .ignore_then(select! { Token::Ident(s) => s })
+        .then_ignore(just(Token::Colon))
+        .then_ignore(just(Token::Newline).or_not())
+        .then(
+            func_sig
+                .repeated()
+                .at_least(1)
+                .delimited_by(just(Token::Indent), just(Token::Dedent)),
+        )
+        .map_with_span(|(name, methods), span| TraitDecl {
+            name,
+            methods,
+            span,
+        });
+
+    let trait_alias_decl = just(Token::TypeKw)
+        .ignore_then(select! { Token::Ident(s) => s })
+        .then_ignore(just(Token::Assign))
+        .then(
+            select! { Token::Ident(s) => s }
+                .separated_by(just(Token::Plus))
+                .at_least(1),
+        )
+        .then_ignore(just(Token::Newline).or_not())
+        .map_with_span(|(name, traits), span| TraitAliasDecl { name, traits, span });
 
     let field_decl = select! { Token::Ident(name) => name }
         .then_ignore(just(Token::Colon))
@@ -152,6 +224,8 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
             mod_decl
                 .map(Item::Mod)
                 .or(use_decl.map(Item::Use))
+                .or(trait_decl.map(Item::Trait))
+                .or(trait_alias_decl.map(Item::TraitAlias))
                 .or(function.map(Item::Func))
                 .or(obj_decl.map(Item::Struct))
                 .or(enum_decl.map(Item::Enum))
@@ -162,6 +236,8 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
     item.repeated().then_ignore(end()).map(|items| {
         let mut mods = Vec::new();
         let mut uses = Vec::new();
+        let mut traits = Vec::new();
+        let mut trait_aliases = Vec::new();
         let mut structs = Vec::new();
         let mut enums = Vec::new();
         let mut impls = Vec::new();
@@ -170,6 +246,8 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
             match item {
                 Item::Mod(m) => mods.push(m),
                 Item::Use(u) => uses.push(u),
+                Item::Trait(t) => traits.push(t),
+                Item::TraitAlias(ta) => trait_aliases.push(ta),
                 Item::Func(f) => functions.push(f),
                 Item::Struct(s) => structs.push(s),
                 Item::Enum(e) => enums.push(e),
@@ -179,6 +257,8 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         Program {
             mods,
             uses,
+            traits,
+            trait_aliases,
             structs,
             enums,
             impls,
@@ -190,6 +270,8 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
 enum Item {
     Mod(ModDecl),
     Use(UseDecl),
+    Trait(TraitDecl),
+    TraitAlias(TraitAliasDecl),
     Func(FuncDecl),
     Struct(StructDecl),
     Enum(EnumDecl),

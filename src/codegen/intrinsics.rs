@@ -183,7 +183,7 @@ pub fn compile_macro_call(
                     Type::Bool => 1,
                     Type::Str | Type::String => 2,
                     Type::Float => 3,
-                    Type::Unit | Type::Obj(_) | Type::Enum(_) | Type::Array(_, _) | Type::Slice(_) | Type::Vec(_) => 0,
+                    Type::Unit | Type::Obj(_) | Type::Enum(_) | Type::Array(_, _) | Type::Slice(_) | Type::Vec(_) | Type::Generic(_) | Type::DynTrait(_) => 0,
                 };
 
                 let type_tag_val = builder.ins().iconst(types::I64, type_tag);
@@ -226,6 +226,8 @@ pub fn compile_macro_call(
                     Type::Array(_, _) => "Array",
                     Type::Slice(_) => "Slice",
                     Type::Vec(_) => "Vec",
+                    Type::Generic(name) => name,
+                    Type::DynTrait(name) => name,
                 };
 
                 let ptr_val = compile_string_constant(builder, type_name, var_counter, module);

@@ -14,6 +14,8 @@ pub fn load_program(entry_file: &Path) -> Result<Program, String> {
     let mut merged_program = Program {
         mods: Vec::new(),
         uses: Vec::new(),
+        traits: Vec::new(),
+        trait_aliases: Vec::new(),
         structs: Vec::new(),
         enums: Vec::new(),
         impls: Vec::new(),
@@ -120,6 +122,20 @@ fn load_file_recursive(
     }
     for e in &program.enums {
         local_types.insert(e.name.clone());
+    }
+
+    for mut t in program.traits {
+        if !prefix_str.is_empty() {
+            t.name = format!("{}{}", prefix_str, t.name);
+        }
+        merged_program.traits.push(t);
+    }
+
+    for mut ta in program.trait_aliases {
+        if !prefix_str.is_empty() {
+            ta.name = format!("{}{}", prefix_str, ta.name);
+        }
+        merged_program.trait_aliases.push(ta);
     }
 
     // Mangle and push structs

@@ -128,6 +128,8 @@ pub enum Token {
     TypeBool,
     #[token("string")]
     TypeString,
+    #[token("str")]
+    TypeStr,
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*!", |lex| lex.slice()[..lex.slice().len() - 1].to_string())]
     MacroIdent(String),
 
@@ -148,6 +150,16 @@ pub enum Token {
     Mod,
     #[token("use")]
     Use,
+    #[token("trait")]
+    Trait,
+    #[token("where")]
+    Where,
+    #[token("type")]
+    TypeKw,
+    #[token("dyn")]
+    Dyn,
+    #[token("$")]
+    Dollar,
 
     #[token(".")]
     Dot,
@@ -165,9 +177,23 @@ pub enum Type {
     Unit,
     Obj(&'static str),
     Enum(&'static str),
+    Generic(&'static str),
+    DynTrait(&'static str),
     Array(&'static Type, usize),
     Slice(&'static Type),
     Vec(&'static Type),
+}
+
+impl Type {
+    pub fn name_or_default(&self) -> &'static str {
+        match self {
+            Type::Obj(name) => name,
+            Type::Enum(name) => name,
+            Type::Generic(name) => name,
+            Type::DynTrait(name) => name,
+            _ => "unknown",
+        }
+    }
 }
 
 pub fn intern_type(ty: Type) -> &'static Type {
@@ -377,6 +403,8 @@ pub enum TypedExpr {
     IndexAssign(Box<TypedExpr>, Box<TypedExpr>, Box<TypedExpr>, Span),
 
     EnumConstruct(String, String, usize, Vec<TypedExpr>, Type, Span),
+    CoerceToDyn(Box<TypedExpr>, &'static str, Span),
+    DynCall(Box<TypedExpr>, String, Vec<TypedExpr>, Type, Span),
 }
 
 impl TypedExpr {
@@ -418,6 +446,8 @@ impl TypedExpr {
             | TypedExpr::ArrayInit(_, ty, _)
             | TypedExpr::IndexAccess(_, _, ty, _)
             | TypedExpr::EnumConstruct(_, _, _, _, ty, _) => *ty,
+            | TypedExpr::DynCall(_, _, _, ty, _) => *ty,
+            TypedExpr::CoerceToDyn(_, trait_name, _) => Type::DynTrait(trait_name),
             TypedExpr::Assign(..)
             | TypedExpr::While(..)
             | TypedExpr::If(..)
@@ -464,6 +494,8 @@ impl TypedExpr {
             TypedExpr::MacroCall(_, _, s) => s.clone(),
             TypedExpr::Call(_, _, _, s) => s.clone(),
             TypedExpr::ObjInit(_, _, _, s) => s.clone(),
+            TypedExpr::CoerceToDyn(_, _, s) => s.clone(),
+            TypedExpr::DynCall(_, _, _, _, s) => s.clone(),
             TypedExpr::FieldAccess(_, _, _, s) => s.clone(),
             TypedExpr::FieldAssign(_, _, _, s) => s.clone(),
             TypedExpr::ArrayInit(_, _, s) => s.clone(),
@@ -487,10 +519,33 @@ pub struct UseDecl {
     pub span: Span,
 }
 
+#[derive(Debug, Clone)]
+pub struct TraitDecl {
+    pub name: String,
+    pub methods: Vec<FuncDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraitAliasDecl {
+    pub name: String,
+    pub traits: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct WhereClause {
+    pub target_param: String,
+    pub bounds: Vec<String>,
+    pub span: Span,
+}
+
 #[derive(Debug)]
 pub struct Program {
     pub mods: Vec<ModDecl>,
     pub uses: Vec<UseDecl>,
+    pub traits: Vec<TraitDecl>,
+    pub trait_aliases: Vec<TraitAliasDecl>,
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
     pub impls: Vec<ImplDecl>,
@@ -502,11 +557,14 @@ pub struct FuncDecl {
     pub name: String,
     pub params: Vec<Param>,
     pub return_type: Type,
+    pub where_clause: Option<WhereClause>,
     pub body: Vec<Expr>, // The indented block of code
 }
 
 #[derive(Debug)]
 pub struct TypedProgram {
+    pub traits: Vec<TraitDecl>,
+    pub trait_aliases: Vec<TraitAliasDecl>,
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
     pub impls: Vec<ImplDecl>,
@@ -518,5 +576,6 @@ pub struct TypedFuncDecl {
     pub name: String,
     pub params: Vec<Param>,
     pub return_type: Type,
+    pub where_clause: Option<WhereClause>,
     pub body: Vec<TypedExpr>,
 }

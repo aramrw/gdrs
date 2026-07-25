@@ -659,27 +659,59 @@ pub fn type_check_expr<'a>(
                 if type_ctx.fn_map.contains_key(&mangled) {
                     resolved_name = mangled;
                 } else if let Some(var_info) = scopes.lookup(target_or_var) {
-                    let type_name = match var_info.ty {
-                        Type::Obj(n) => Some(n),
-                        Type::Enum(n) => Some(n),
-                        _ => None,
-                    };
-                    if let Some(tn) = type_name {
-                        let var_mangled = format!("{}_{}", tn, method_name);
-                        if type_ctx.fn_map.contains_key(&var_mangled) {
-                            resolved_name = var_mangled;
-                            if let Some(target_expr) = type_check_expr(
-                                scopes,
-                                errors,
-                                type_ctx,
-                                &Expr::Ident(target_or_var.to_string(), span.clone()),
-                            ) {
-                                typed_args.insert(0, target_expr);
+                    match var_info.ty {
+                        Type::DynTrait(trait_name) => {
+                            let target_expr = Expr::Ident(target_or_var.to_string(), span.clone());
+                            if let Some(t_target) = type_check_expr(scopes, errors, type_ctx, &target_expr) {
+                                return Some(TypedExpr::DynCall(
+                                    Box::new(t_target),
+                                    method_name.to_string(),
+                                    typed_args,
+                                    Type::Bool,
+                                    span.clone(),
+                                ));
                             }
                         }
+                        Type::Generic(_g_name) => {
+                            let target_expr = Expr::Ident(target_or_var.to_string(), span.clone());
+                            if let Some(t_target) = type_check_expr(scopes, errors, type_ctx, &target_expr) {
+                                typed_args.insert(0, t_target);
+                                return Some(TypedExpr::Call(
+                                    method_name.to_string(),
+                                    typed_args,
+                                    Type::Bool,
+                                    span.clone(),
+                                ));
+                            }
+                        }
+                        Type::Obj(tn) | Type::Enum(tn) => {
+                            let var_mangled = format!("{}_{}", tn, method_name);
+                            if type_ctx.fn_map.contains_key(&var_mangled) {
+                                resolved_name = var_mangled;
+                                if let Some(target_expr) = type_check_expr(
+                                    scopes,
+                                    errors,
+                                    type_ctx,
+                                    &Expr::Ident(target_or_var.to_string(), span.clone()),
+                                ) {
+                                    typed_args.insert(0, target_expr);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             } else if !type_ctx.fn_map.contains_key(&name) && !typed_args.is_empty() {
+                if let Type::DynTrait(_trait_name) = typed_args[0].ty() {
+                    let receiver = typed_args.remove(0);
+                    return Some(TypedExpr::DynCall(
+                        Box::new(receiver),
+                        name.to_string(),
+                        typed_args,
+                        Type::Bool,
+                        span.clone(),
+                    ));
+                }
                 if let TypedExpr::Ident(target_name, _, _) = &typed_args[0] {
                     let normalized_target = target_name.replace("::", "_");
                     let mangled = format!("{}_{}", normalized_target, name);
@@ -699,8 +731,23 @@ pub fn type_check_expr<'a>(
                     };
                     if let Some(tn) = type_name {
                         let mangled = format!("{}_{}", tn, name);
+                        let mono_mangled = format!("{}_{}", name, tn);
                         if type_ctx.fn_map.contains_key(&mangled) {
                             resolved_name = mangled;
+                        } else if type_ctx.fn_map.contains_key(&mono_mangled) {
+                            resolved_name = mono_mangled;
+                        }
+                    }
+                }
+            }
+
+            if let Some(target_func) = type_ctx.fn_map.get(&resolved_name) {
+                if target_func.where_clause.is_some() || target_func.params.iter().any(|p| matches!(p.ty, Type::Generic(_))) {
+                    if !typed_args.is_empty() {
+                        let tn = typed_args[0].ty().name_or_default();
+                        let mono_mangled = format!("{}_{}", resolved_name, tn);
+                        if type_ctx.fn_map.contains_key(&mono_mangled) {
+                            resolved_name = mono_mangled;
                         }
                     }
                 }
@@ -718,6 +765,13 @@ pub fn type_check_expr<'a>(
                         help: None,
                         span: span.clone(),
                     });
+                }
+                if target_func.params.len() == typed_args.len() {
+                    for (param, arg) in target_func.params.iter().zip(typed_args.iter_mut()) {
+                        if let Type::DynTrait(t_name) = param.ty {
+                            *arg = TypedExpr::CoerceToDyn(Box::new(arg.clone()), t_name, span.clone());
+                        }
+                    }
                 }
                 target_func.return_type
             } else {

@@ -31,6 +31,7 @@ fn main() {
             Err(errors) => {
                 let fstring = std::fs::read_to_string(&src).unwrap_or_default();
                 crate::diagnostics::print_semantic_errors(&src, &fstring, errors);
+                std::process::exit(1);
             }
         }
     }

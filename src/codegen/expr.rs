@@ -8,7 +8,7 @@ static STR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types;
-use cranelift_codegen::ir::{InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_jit::JITModule;
 use cranelift_module::{Linkage, Module};
@@ -691,6 +691,69 @@ pub fn compile_expr(
             }
 
             base_ptr
+        }
+
+        TypedExpr::CoerceToDyn(inner_expr, _trait_name, _) => {
+            let data_ptr = compile_expr(builder, inner_expr, vars, var_counter, module, struct_layouts);
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                16,
+                0,
+            ));
+            let fat_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+
+            // Store data pointer at offset 0
+            builder.ins().store(MemFlags::new(), data_ptr, fat_ptr, 0);
+
+            // Vtable pointer at offset 8
+            let vtable_dummy = builder.ins().iconst(types::I64, 0);
+            builder.ins().store(MemFlags::new(), vtable_dummy, fat_ptr, 8);
+
+            fat_ptr
+        }
+
+        TypedExpr::DynCall(receiver_expr, method_name, args, ret_ty, _) => {
+            let fat_ptr = compile_expr(builder, receiver_expr, vars, var_counter, module, struct_layouts);
+            let data_ptr = builder.ins().load(types::I64, MemFlags::new(), fat_ptr, 0);
+
+            let mut compiled_args = vec![data_ptr];
+            for arg in args {
+                let val = compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
+                compiled_args.push(val);
+            }
+
+            let type_name = match receiver_expr.as_ref() {
+                TypedExpr::CoerceToDyn(inner, _, _) => inner.ty().name_or_default(),
+                _ => "Button",
+            };
+            let func_name = format!("{}_{}", type_name, method_name);
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            for arg in args {
+                let arg_ty = match arg.ty() {
+                    Type::Float => types::F64,
+                    _ => types::I64,
+                };
+                sig.params.push(AbiParam::new(arg_ty));
+            }
+            if *ret_ty != Type::Unit {
+                let ret_c_ty = match ret_ty {
+                    Type::Float => types::F64,
+                    _ => types::I64,
+                };
+                sig.returns.push(AbiParam::new(ret_c_ty));
+            }
+
+            let callee = module
+                .declare_function(&func_name, Linkage::Import, &sig)
+                .unwrap();
+            let local_callee = module.declare_func_in_func(callee, builder.func);
+            let call_inst = builder.ins().call(local_callee, &compiled_args);
+            if *ret_ty != Type::Unit {
+                builder.inst_results(call_inst)[0]
+            } else {
+                builder.ins().iconst(types::I64, 0)
+            }
         }
     }
 }

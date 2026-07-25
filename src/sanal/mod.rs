@@ -143,12 +143,36 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
                 name: mangled_name,
                 params,
                 return_type: method.return_type,
+                where_clause: method.where_clause.clone(),
                 body: method.body.clone(),
             });
         }
     }
 
     all_functions.extend(program.functions.clone());
+
+    // Monomorphization Pass for $T generic functions
+    let mut mono_functions = Vec::new();
+    for func in &all_functions {
+        if func.where_clause.is_some() || func.params.iter().any(|p| matches!(p.ty, Type::Generic(_))) {
+            for s in &program.structs {
+                let struct_ty = Type::Obj(intern_str(&s.name));
+                let mut mono_func = func.clone();
+                mono_func.name = format!("{}_{}", func.name, s.name);
+                for param in &mut mono_func.params {
+                    if matches!(param.ty, Type::Generic(_)) {
+                        param.ty = struct_ty;
+                    }
+                }
+                if matches!(mono_func.return_type, Type::Generic(_)) {
+                    mono_func.return_type = struct_ty;
+                }
+                mono_func.where_clause = None;
+                mono_functions.push(mono_func);
+            }
+        }
+    }
+    all_functions.extend(mono_functions);
 
     let mut fn_map = HashMap::new();
     for func in &all_functions {
@@ -162,6 +186,9 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
     };
 
     for func in &all_functions {
+        if func.where_clause.is_some() || func.params.iter().any(|p| matches!(p.ty, Type::Generic(_))) {
+            continue;
+        }
         let mut scope_stack = ScopeStack::new();
         let mut typed_body = Vec::new();
 
@@ -191,6 +218,7 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
             name: func.name.clone(),
             params: resolved_params,
             return_type: resolved_return_type,
+            where_clause: func.where_clause.clone(),
             body: typed_body,
         });
     }
@@ -198,6 +226,8 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
     if errors.is_empty() {
         typed_functions.sort_by_key(|f| if f.name == "main" { 1 } else { 0 });
         Ok(TypedProgram {
+            traits: program.traits.clone(),
+            trait_aliases: program.trait_aliases.clone(),
             structs: program.structs.clone(),
             enums: program.enums.clone(),
             impls: program.impls.clone(),

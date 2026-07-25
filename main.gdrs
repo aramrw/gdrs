@@ -1,18 +1,39 @@
-// Main test script for gdrs HashMap standard library collection
+// Main test script for gdrs Traits, $T Generics, and dyn Trait Dynamic Dispatch
 
-mod std_lib::collections::hashmap
+trait Drawable:
+	fn draw(self) -> bool
+
+obj Button:
+	id: i64
+
+impl Button:
+	fn draw(self) -> bool:
+		log!("Rendering Button ID:", self.id)
+		return true
+
+obj Canvas:
+	width: i64
+
+impl Canvas:
+	fn draw(self) -> bool:
+		log!("Rendering Canvas Width:", self.width)
+		return true
+
+fn render_static(item: $T) -> bool where T: Drawable:
+	log!("--- Static Monomorphized Render ($T) ---")
+	return item.draw()
+
+fn render_dyn(item: dyn Drawable) -> bool:
+	log!("--- Dynamic Dispatch Render (dyn Trait) ---")
+	return item.draw()
 
 fn main():
-	log!("=== Testing Native GDRS HashMap ===")
+	log!("=== Testing GDRS Traits & Generics ===")
 
-	let mut map = std_lib::collections::hashmap::HashMap.new()
-	map = map.insert(1001, 42)
-	map = map.insert(2002, 999)
-	map = map.insert(3003, 12345)
+	let btn = Button{ id: 101 }
+	let cvs = Canvas{ width: 1920 }
 
-	log!("map.get(1001) =", map.get(1001))
-	log!("map.get(2002) =", map.get(2002))
-	log!("map.get(3003) =", map.get(3003))
+	render_static(btn)
+	render_static(cvs)
 
-	log!("map.contains(1001) =", map.contains(1001))
-	log!("map.contains(9999) =", map.contains(9999))
+	render_dyn(btn)
