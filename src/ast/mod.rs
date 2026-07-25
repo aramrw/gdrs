@@ -77,6 +77,7 @@ pub enum Token {
     Ident(String),
     #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().parse::<f64>().unwrap().to_bits())]
     Float(u64),
+    #[regex(r"0[xX][0-9a-fA-F]+", |lex| i64::from_str_radix(&lex.slice()[2..], 16).unwrap_or_else(|_| u64::from_str_radix(&lex.slice()[2..], 16).map(|u| u as i64).unwrap_or(0)))]
     #[regex("[0-9]+", |lex| lex.slice().parse::<i64>().unwrap())]
     Int(i64),
 
