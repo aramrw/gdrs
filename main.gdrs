@@ -1,0 +1,6 @@
+fn main():
+	log!("--- Command Line Arguments Test ---")
+	let count = arg_count!()
+	log!("Total Arguments Count:", count)
+
+	(0..count).iter().for_each(|i| log!("Arg:", arg_at!(i)))

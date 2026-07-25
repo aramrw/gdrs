@@ -19,6 +19,10 @@ pub enum Commands {
         /// Source file to run
         #[arg(value_parser = validate_gdrs_extension)]
         src: PathBuf,
+
+        /// Additional arguments passed to the gdrs script
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// AOT compile to a standalone native binary executable
     Build {

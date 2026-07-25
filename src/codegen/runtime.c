@@ -6,12 +6,24 @@
 #include <pthread.h>
 #include <stdatomic.h>
 
-extern int64_t gdrs_main(void);
+static int g_argc = 0;
+static char** g_argv = NULL;
 
 int main(int argc, char** argv) {
     setbuf(stdout, NULL);
+    g_argc = argc;
+    g_argv = argv;
     gdrs_main();
     return 0;
+}
+
+int64_t intrinsic_arg_count(void) {
+    return (int64_t)g_argc;
+}
+
+int64_t intrinsic_arg_at(int64_t idx) {
+    if (idx < 0 || idx >= g_argc || !g_argv) return 0;
+    return (int64_t)g_argv[idx];
 }
 
 // Print runtime output

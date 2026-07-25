@@ -285,7 +285,7 @@ fn rewrite_expr(expr: &mut Expr, local_types: &HashSet<String>, prefix: &str) {
             rewrite_expr(cond, local_types, prefix);
             rewrite_expr(body, local_types, prefix);
         }
-        Expr::Let(_, _, val, _) => rewrite_expr(val, local_types, prefix),
+        Expr::Let(_, _, _, val, _) => rewrite_expr(val, local_types, prefix),
         Expr::Assign(_, val, _) => rewrite_expr(val, local_types, prefix),
         Expr::Return(opt_expr, _) => {
             if let Some(e) = opt_expr {

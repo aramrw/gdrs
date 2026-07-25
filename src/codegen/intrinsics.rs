@@ -13,6 +13,30 @@ use crate::ast::{Type, TypedExpr};
 use crate::codegen::expr::compile_expr;
 use crate::sanal::StructLayout;
 
+use std::sync::Mutex;
+
+static JIT_ARGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub fn set_jit_args(args: Vec<String>) {
+    let mut guard = JIT_ARGS.lock().unwrap();
+    *guard = args;
+}
+
+pub extern "C" fn intrinsic_arg_count() -> i64 {
+    let guard = JIT_ARGS.lock().unwrap();
+    guard.len() as i64
+}
+
+pub extern "C" fn intrinsic_arg_at(idx: i64) -> *const std::os::raw::c_char {
+    let guard = JIT_ARGS.lock().unwrap();
+    if idx < 0 || (idx as usize) >= guard.len() {
+        return std::ptr::null();
+    }
+    let s = &guard[idx as usize];
+    let c_str = std::ffi::CString::new(s.as_str()).unwrap();
+    c_str.into_raw() as *const std::os::raw::c_char
+}
+
 /// Type Tag ABI:
 /// 0 = Int (i64)
 /// 1 = Bool (1 = true, 0 = false)
@@ -300,6 +324,31 @@ pub fn compile_macro_call<M: Module>(
     struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
     match name {
+        "arg_count" | "args_count" => {
+            let mut sig = module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let callee = module
+                .declare_function("intrinsic_arg_count", Linkage::Import, &sig)
+                .unwrap();
+            let local_callee = module.declare_func_in_func(callee, builder.func);
+            let call_inst = builder.ins().call(local_callee, &[]);
+            builder.inst_results(call_inst)[0]
+        }
+        "arg_at" | "args_at" => {
+            if args.is_empty() {
+                return builder.ins().iconst(types::I64, 0);
+            }
+            let idx_val = compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let callee = module
+                .declare_function("intrinsic_arg_at", Linkage::Import, &sig)
+                .unwrap();
+            let local_callee = module.declare_func_in_func(callee, builder.func);
+            let call_inst = builder.ins().call(local_callee, &[idx_val]);
+            builder.inst_results(call_inst)[0]
+        }
         "thread" | "spawn" => {
             if args.is_empty() {
                 return builder.ins().iconst(types::I64, 0);

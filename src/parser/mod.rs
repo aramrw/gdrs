@@ -42,7 +42,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
             .map(|t| Type::Arc(intern_type(t)));
 
         select! {
-            Token::TypeInt => Type::Int,
+            Token::TypeI64 => Type::Int,
             Token::TypeI32 => Type::I32,
             Token::TypeFloat => Type::Float,
             Token::TypeF32 => Type::F32,

@@ -1,4 +1,4 @@
-use crate::ast::{Expr, Span, Token};
+use crate::ast::{Expr, Span, Token, Type};
 use chumsky::prelude::*;
 
 // Helper type alias for your math AST variant constructors
@@ -11,10 +11,22 @@ pub fn stmt_parser<'a>(
         let let_stmt = just(Token::Let)
             .ignore_then(just(Token::Mut).or_not())
             .then(select! { Token::Ident(s) => s })
+            .then(
+                just(Token::Colon)
+                    .ignore_then(select! {
+                        Token::TypeI32 => Type::I32,
+                        Token::TypeI64 => Type::Int,
+                        Token::TypeF32 => Type::F32,
+                        Token::TypeFloat => Type::Float,
+                        Token::TypeBool => Type::Bool,
+                        Token::TypeStr => Type::Str,
+                    })
+                    .or_not(),
+            )
             .then_ignore(just(Token::Assign))
             .then(math.clone())
-            .map_with_span(|((is_mut, name), expr), span| {
-                Expr::Let(name, is_mut.is_some(), Box::new(expr), span)
+            .map_with_span(|(((is_mut, name), ty), expr), span| {
+                Expr::Let(name, ty, is_mut.is_some(), Box::new(expr), span)
             })
             .then_ignore(just(Token::Newline).or_not());
 
@@ -50,12 +62,7 @@ pub fn stmt_parser<'a>(
                     }
                     None => rhs,
                 };
-                Expr::FieldAssign(
-                    Box::new(target_ident),
-                    field,
-                    Box::new(final_rhs),
-                    span,
-                )
+                Expr::FieldAssign(Box::new(target_ident), field, Box::new(final_rhs), span)
             })
             .then_ignore(just(Token::Newline).or_not());
 
@@ -180,9 +187,8 @@ pub fn stmt_parser<'a>(
             })
             .then_ignore(just(Token::Newline).or_not());
 
-
-
-        let call_stmt = path.clone()
+        let call_stmt = path
+            .clone()
             .then(
                 math.clone()
                     .separated_by(just(Token::Comma))
@@ -203,16 +209,14 @@ pub fn stmt_parser<'a>(
 
         let arm_pattern = select! { Token::Ident(s) if s == "_" => s }
             .then(empty().to(Vec::new()))
-            .or(
-                path.clone().then(
-                    select! { Token::Ident(s) => s }
-                        .separated_by(just(Token::Comma))
-                        .allow_trailing()
-                        .delimited_by(just(Token::LParen), just(Token::RParen))
-                        .or_not()
-                        .map(|opt| opt.unwrap_or_default()),
-                )
-            );
+            .or(path.clone().then(
+                select! { Token::Ident(s) => s }
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .delimited_by(just(Token::LParen), just(Token::RParen))
+                    .or_not()
+                    .map(|opt| opt.unwrap_or_default()),
+            ));
 
         let match_arm = arm_pattern
             .then_ignore(just(Token::FatArrow))

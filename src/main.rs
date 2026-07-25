@@ -18,7 +18,8 @@ fn main() {
         Some(Commands::Build { src, output }) => {
             compile_to_binary(&src, &output);
         }
-        Some(Commands::Run { src }) => {
+        Some(Commands::Run { src, args }) => {
+            crate::codegen::intrinsics::set_jit_args(args);
             jit_run(&src);
         }
         None => {

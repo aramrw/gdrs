@@ -172,7 +172,9 @@ pub fn compile_expr<M: Module>(
 
             let (left, right) = if let Type::Enum(_) = lhs.ty() {
                 let l_tag = builder.ins().load(types::I64, MemFlags::new(), left_raw, 0);
-                let r_tag = builder.ins().load(types::I64, MemFlags::new(), right_raw, 0);
+                let r_tag = builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), right_raw, 0);
                 (l_tag, r_tag)
             } else {
                 (left_raw, right_raw)
@@ -280,7 +282,9 @@ pub fn compile_expr<M: Module>(
 
             let (left, right) = if let Type::Enum(_) = lhs.ty() {
                 let l_tag = builder.ins().load(types::I64, MemFlags::new(), left_raw, 0);
-                let r_tag = builder.ins().load(types::I64, MemFlags::new(), right_raw, 0);
+                let r_tag = builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), right_raw, 0);
                 (l_tag, r_tag)
             } else {
                 (left_raw, right_raw)
@@ -296,20 +300,43 @@ pub fn compile_expr<M: Module>(
 
         // Variable Declaration -> Create variable and assign value
         TypedExpr::Let(name, _is_mutable, value, ty, _) => {
-            let val = compile_expr(builder, value, vars, var_counter, module, struct_layouts);
+            let mut val = compile_expr(builder, value, vars, var_counter, module, struct_layouts);
 
             let var = Variable::from_u32(*var_counter as u32);
             *var_counter += 1;
 
+            // 1. Map gdrs Type to the precise Cranelift type
             let cranelift_ty = match ty {
+                Type::I32 => types::I32,
+                Type::Int => types::I64,
+                Type::F32 => types::F32,
                 Type::Float => types::F64,
+                Type::Bool => types::I8,
+                // All heap/stack compound pointers (Obj, Str, String, Slice, Vec, Arc, Rc) are 64-bit addresses
                 _ => types::I64,
             };
+
             builder.declare_var(var, cranelift_ty);
 
+            // 2. Coerce primitive scalar values if compile_expr returned an I64/F64 literal
+            let val_ty = builder.func.dfg.value_type(val);
+            if val_ty != cranelift_ty {
+                val = match (val_ty, cranelift_ty) {
+                    (types::I64, types::I32) => builder.ins().ireduce(types::I32, val),
+                    (types::I64, types::F32) => builder.ins().fcvt_from_sint(types::F32, val),
+                    (types::I64, types::F64) => builder.ins().fcvt_from_sint(types::F64, val),
+                    (types::F64, types::F32) => builder.ins().fdemote(types::F32, val),
+                    _ => val,
+                };
+            }
+
+            // 3. Handle stack slot layouts for composite types (Obj, Str, Vec, etc.)
             let stored_val = match ty {
                 Type::Obj(struct_name) => {
-                    let total_bytes = struct_layouts.get(*struct_name).map(|l| l.total_size).unwrap_or(16);
+                    let total_bytes = struct_layouts
+                        .get(*struct_name)
+                        .map(|l| l.total_size)
+                        .unwrap_or(16);
                     let slot = builder.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
                         if total_bytes == 0 { 8 } else { total_bytes },
@@ -317,7 +344,11 @@ pub fn compile_expr<M: Module>(
                     ));
                     let dst_ptr = builder.ins().stack_addr(types::I64, slot, 0);
 
-                    let num_words = if total_bytes == 0 { 1 } else { (total_bytes + 7) / 8 };
+                    let num_words = if total_bytes == 0 {
+                        1
+                    } else {
+                        (total_bytes + 7) / 8
+                    };
                     for i in 0..num_words {
                         let offset = (i * 8) as i32;
                         let word = builder.ins().load(types::I64, MemFlags::new(), val, offset);
@@ -347,7 +378,7 @@ pub fn compile_expr<M: Module>(
                     builder.ins().store(MemFlags::new(), val, dst_ptr, 0);
                     let zero = builder.ins().iconst(types::I64, 0);
                     builder.ins().store(MemFlags::new(), zero, dst_ptr, 8);
-                    builder.ins().store(MemFlags::new(), zero, dst_ptr, 16); // cap = 0 sentinel!
+                    builder.ins().store(MemFlags::new(), zero, dst_ptr, 16);
                     dst_ptr
                 }
                 Type::Slice(_) => {
@@ -359,7 +390,9 @@ pub fn compile_expr<M: Module>(
                     let dst_ptr = builder.ins().stack_addr(types::I64, slot, 0);
                     builder.ins().store(MemFlags::new(), val, dst_ptr, 0);
                     let len_val = match value.as_ref() {
-                        TypedExpr::ArrayInit(elems, _, _) => builder.ins().iconst(types::I64, elems.len() as i64),
+                        TypedExpr::ArrayInit(elems, _, _) => {
+                            builder.ins().iconst(types::I64, elems.len() as i64)
+                        }
                         _ => builder.ins().iconst(types::I64, 0),
                     };
                     builder.ins().store(MemFlags::new(), len_val, dst_ptr, 8);
@@ -374,12 +407,14 @@ pub fn compile_expr<M: Module>(
                     let dst_ptr = builder.ins().stack_addr(types::I64, slot, 0);
                     builder.ins().store(MemFlags::new(), val, dst_ptr, 0);
                     let len_val = match value.as_ref() {
-                        TypedExpr::ArrayInit(elems, _, _) => builder.ins().iconst(types::I64, elems.len() as i64),
+                        TypedExpr::ArrayInit(elems, _, _) => {
+                            builder.ins().iconst(types::I64, elems.len() as i64)
+                        }
                         _ => builder.ins().iconst(types::I64, 0),
                     };
                     builder.ins().store(MemFlags::new(), len_val, dst_ptr, 8);
                     let zero = builder.ins().iconst(types::I64, 0);
-                    builder.ins().store(MemFlags::new(), zero, dst_ptr, 16); // cap = 0 sentinel!
+                    builder.ins().store(MemFlags::new(), zero, dst_ptr, 16);
                     dst_ptr
                 }
                 _ => val,
@@ -393,23 +428,40 @@ pub fn compile_expr<M: Module>(
 
         // Variable Reassignment -> Update Cranelift variable value
         TypedExpr::Assign(name, value, _) => {
-            let val = compile_expr(builder, value, vars, var_counter, module, struct_layouts);
+            let mut val = compile_expr(builder, value, vars, var_counter, module, struct_layouts);
             let var = vars.get(name).expect("Undefined variable during codegen");
             let dest_ptr = builder.use_var(*var);
+
             if let Type::Obj(struct_name) = value.ty() {
                 if let Some(layout) = struct_layouts.get(struct_name) {
                     for i in 0..(layout.total_size / 8) {
                         let offset = (i * 8) as i32;
-                        let field_val = builder.ins().load(types::I64, MemFlags::new(), val, offset);
-                        builder.ins().store(MemFlags::new(), field_val, dest_ptr, offset);
+                        let field_val =
+                            builder.ins().load(types::I64, MemFlags::new(), val, offset);
+                        builder
+                            .ins()
+                            .store(MemFlags::new(), field_val, dest_ptr, offset);
                     }
                 }
             } else {
+                // Use dest_ptr (Value) with value_type() instead of *var (Variable)
+                let var_ty = builder.func.dfg.value_type(dest_ptr);
+                let val_ty = builder.func.dfg.value_type(val);
+
+                if val_ty != var_ty {
+                    val = match (val_ty, var_ty) {
+                        (types::I64, types::I32) => builder.ins().ireduce(types::I32, val),
+                        (types::I32, types::I64) => builder.ins().sextend(types::I64, val),
+                        (types::F64, types::F32) => builder.ins().fdemote(types::F32, val),
+                        (types::F32, types::F64) => builder.ins().fpromote(types::F64, val),
+                        _ => val,
+                    };
+                }
+
                 builder.def_var(*var, val);
             }
             val
         }
-
         // Variable or Function Pointer Lookup
         TypedExpr::Ident(name, _, _) => {
             if let Some(var) = vars.get(name) {
@@ -426,7 +478,9 @@ pub fn compile_expr<M: Module>(
                 sig.returns.push(AbiParam::new(types::I64));
                 let callee = match module.get_name(name) {
                     Some(cranelift_module::FuncOrDataId::Func(id)) => id,
-                    _ => module.declare_function(name, Linkage::Export, &sig).unwrap(),
+                    _ => module
+                        .declare_function(name, Linkage::Export, &sig)
+                        .unwrap(),
                 };
                 let local_callee = module.declare_func_in_func(callee, builder.func);
                 builder.ins().func_addr(types::I64, local_callee)
@@ -483,8 +537,11 @@ pub fn compile_expr<M: Module>(
         TypedExpr::Match(target, arms, _, _) => {
             use cranelift_codegen::ir::condcodes::IntCC;
 
-            let target_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
-            let tag_val = builder.ins().load(types::I64, MemFlags::new(), target_ptr, 0);
+            let target_ptr =
+                compile_expr(builder, target, vars, var_counter, module, struct_layouts);
+            let tag_val = builder
+                .ins()
+                .load(types::I64, MemFlags::new(), target_ptr, 0);
 
             let exit_block = builder.create_block();
 
@@ -497,7 +554,9 @@ pub fn compile_expr<M: Module>(
                 } else {
                     let expected_tag = builder.ins().iconst(types::I64, arm.tag);
                     let is_match = builder.ins().icmp(IntCC::Equal, tag_val, expected_tag);
-                    builder.ins().brif(is_match, arm_block, &[], next_check_block, &[]);
+                    builder
+                        .ins()
+                        .brif(is_match, arm_block, &[], next_check_block, &[]);
                 }
 
                 // Compile Arm Block
@@ -506,7 +565,10 @@ pub fn compile_expr<M: Module>(
 
                 for (idx, (b_name, _b_ty)) in arm.bindings.iter().enumerate() {
                     let offset = ((idx + 1) * 8) as i32;
-                    let payload_val = builder.ins().load(types::I64, MemFlags::new(), target_ptr, offset);
+                    let payload_val =
+                        builder
+                            .ins()
+                            .load(types::I64, MemFlags::new(), target_ptr, offset);
                     let var = cranelift_frontend::Variable::from_u32(*var_counter as u32);
                     *var_counter += 1;
                     builder.declare_var(var, types::I64);
@@ -604,8 +666,15 @@ pub fn compile_expr<M: Module>(
             for arg in args {
                 let mut compiled_arg =
                     compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
-                if matches!(arg.ty(), Type::Str | Type::String) && !matches!(arg, TypedExpr::String(_, _)) {
-                    compiled_arg = builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::new(), compiled_arg, 0);
+                if matches!(arg.ty(), Type::Str | Type::String)
+                    && !matches!(arg, TypedExpr::String(_, _))
+                {
+                    compiled_arg = builder.ins().load(
+                        types::I64,
+                        cranelift_codegen::ir::MemFlags::new(),
+                        compiled_arg,
+                        0,
+                    );
                 }
 
                 let param_ty = match arg.ty() {
@@ -637,7 +706,9 @@ pub fn compile_expr<M: Module>(
             if let Some(var) = vars.get(name) {
                 let func_ptr = builder.use_var(*var);
                 let sig_ref = builder.import_signature(sig);
-                let call_inst = builder.ins().call_indirect(sig_ref, func_ptr, &compiled_args);
+                let call_inst = builder
+                    .ins()
+                    .call_indirect(sig_ref, func_ptr, &compiled_args);
                 if *ret_ty != Type::Unit {
                     return builder.inst_results(call_inst)[0];
                 } else {
@@ -645,7 +716,11 @@ pub fn compile_expr<M: Module>(
                 }
             }
 
-            let target_symbol_name = if name == "rc_new" || name == "arc_new" || name == "rc_clone" || name == "arc_clone" {
+            let target_symbol_name = if name == "rc_new"
+                || name == "arc_new"
+                || name == "rc_clone"
+                || name == "arc_clone"
+            {
                 format!("intrinsic_{}", name)
             } else {
                 name.clone()
@@ -655,7 +730,8 @@ pub fn compile_expr<M: Module>(
                 if let Ok(c_name) = std::ffi::CString::new(target_symbol_name.as_str()) {
                     let p = libc::dlsym(libc::RTLD_DEFAULT, c_name.as_ptr());
                     if p.is_null() {
-                        let c_mangled = std::ffi::CString::new(format!("_{}", target_symbol_name)).unwrap();
+                        let c_mangled =
+                            std::ffi::CString::new(format!("_{}", target_symbol_name)).unwrap();
                         libc::dlsym(libc::RTLD_DEFAULT, c_mangled.as_ptr())
                     } else {
                         p
@@ -668,7 +744,9 @@ pub fn compile_expr<M: Module>(
             if !sym_ptr.is_null() {
                 let sig_ref = builder.import_signature(sig);
                 let callee_val = builder.ins().iconst(types::I64, sym_ptr as i64);
-                let call_inst = builder.ins().call_indirect(sig_ref, callee_val, &compiled_args);
+                let call_inst = builder
+                    .ins()
+                    .call_indirect(sig_ref, callee_val, &compiled_args);
                 if *ret_ty != Type::Unit {
                     builder.inst_results(call_inst)[0]
                 } else {
@@ -779,7 +857,9 @@ pub fn compile_expr<M: Module>(
             let base_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
             let buffer_ptr = match target.as_ref() {
                 TypedExpr::Ident(_, _, _) => match target.ty() {
-                    Type::Slice(_) | Type::Vec(_) => builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0),
+                    Type::Slice(_) | Type::Vec(_) => {
+                        builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
+                    }
                     _ => base_ptr,
                 },
                 _ => base_ptr,
@@ -803,7 +883,9 @@ pub fn compile_expr<M: Module>(
             let base_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
             let buffer_ptr = match target.as_ref() {
                 TypedExpr::Ident(_, _, _) => match target.ty() {
-                    Type::Slice(_) | Type::Vec(_) => builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0),
+                    Type::Slice(_) | Type::Vec(_) => {
+                        builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
+                    }
                     _ => base_ptr,
                 },
                 _ => base_ptr,
@@ -861,12 +943,20 @@ pub fn compile_expr<M: Module>(
         }
 
         TypedExpr::Deref(inner_expr, _ty, _) => {
-            let heap_ptr = compile_expr(builder, inner_expr, vars, var_counter, module, struct_layouts);
+            let heap_ptr = compile_expr(
+                builder,
+                inner_expr,
+                vars,
+                var_counter,
+                module,
+                struct_layouts,
+            );
             builder.ins().load(types::I64, MemFlags::new(), heap_ptr, 8)
         }
 
         TypedExpr::DerefAssign(ptr_expr, val_expr, _) => {
-            let heap_ptr = compile_expr(builder, ptr_expr, vars, var_counter, module, struct_layouts);
+            let heap_ptr =
+                compile_expr(builder, ptr_expr, vars, var_counter, module, struct_layouts);
             let val = compile_expr(builder, val_expr, vars, var_counter, module, struct_layouts);
             builder.ins().store(MemFlags::new(), val, heap_ptr, 8);
             builder.ins().iconst(types::I64, 0)
@@ -895,13 +985,17 @@ pub fn compile_expr<M: Module>(
 
             let mut sig = module.make_signature();
             for _ in params {
-                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                sig.params
+                    .push(cranelift_codegen::ir::AbiParam::new(types::I64));
             }
-            sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            sig.returns
+                .push(cranelift_codegen::ir::AbiParam::new(types::I64));
 
             let callee = match module.get_name(closure_name) {
                 Some(cranelift_module::FuncOrDataId::Func(id)) => id,
-                _ => module.declare_function(closure_name, Linkage::Export, &sig).unwrap(),
+                _ => module
+                    .declare_function(closure_name, Linkage::Export, &sig)
+                    .unwrap(),
             };
 
             let mut new_ctx = module.make_context();
@@ -920,7 +1014,14 @@ pub fn compile_expr<M: Module>(
         }
 
         TypedExpr::Range(start_expr, end_expr, _, _) => {
-            let start = compile_expr(builder, start_expr, vars, var_counter, module, struct_layouts);
+            let start = compile_expr(
+                builder,
+                start_expr,
+                vars,
+                var_counter,
+                module,
+                struct_layouts,
+            );
             let end = compile_expr(builder, end_expr, vars, var_counter, module, struct_layouts);
 
             let mut malloc_sig = module.make_signature();
@@ -940,7 +1041,14 @@ pub fn compile_expr<M: Module>(
         }
 
         TypedExpr::CoerceToDyn(inner_expr, _trait_name, _) => {
-            let data_ptr = compile_expr(builder, inner_expr, vars, var_counter, module, struct_layouts);
+            let data_ptr = compile_expr(
+                builder,
+                inner_expr,
+                vars,
+                var_counter,
+                module,
+                struct_layouts,
+            );
             let slot = builder.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
                 16,
@@ -953,13 +1061,22 @@ pub fn compile_expr<M: Module>(
 
             // Vtable pointer at offset 8
             let vtable_dummy = builder.ins().iconst(types::I64, 0);
-            builder.ins().store(MemFlags::new(), vtable_dummy, fat_ptr, 8);
+            builder
+                .ins()
+                .store(MemFlags::new(), vtable_dummy, fat_ptr, 8);
 
             fat_ptr
         }
 
         TypedExpr::DynCall(receiver_expr, method_name, args, ret_ty, _) => {
-            let fat_ptr = compile_expr(builder, receiver_expr, vars, var_counter, module, struct_layouts);
+            let fat_ptr = compile_expr(
+                builder,
+                receiver_expr,
+                vars,
+                var_counter,
+                module,
+                struct_layouts,
+            );
             let data_ptr = builder.ins().load(types::I64, MemFlags::new(), fat_ptr, 0);
 
             let mut compiled_args = vec![data_ptr];

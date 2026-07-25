@@ -1,8 +1,6 @@
 extern "C":
-	// RTLD_GLOBAL (0x8) | RTLD_LAZY (0x1) = 9 on macOS
 	fn dlopen(filename: str, flags: i32) -> i64 
 
-	// Raylib C signatures
 	fn InitWindow(width: i32, height: i32, title: str)
 	fn WindowShouldClose() -> bool
 	fn BeginDrawing()
@@ -10,26 +8,51 @@ extern "C":
 	fn DrawCircle(centerX: i32, centerY: i32, radius: f32, color_hex: i64)
 	fn EndDrawing()
 	fn CloseWindow()
+	
+	// New screen bound functions!
+	fn GetScreenWidth() -> i32
+	fn GetScreenHeight() -> i32
 
 fn main():
 	unsafe:
-		// 1. Tell macOS to load Raylib into process memory
 		let handle = dlopen("/opt/homebrew/lib/libraylib.dylib", 9)
 		if handle == 0:
-			log!("Failed to load Raylib! Make sure brew install raylib is run.")
+			log!("Failed to load Raylib!")
 			return
 
-		log!("Raylib loaded successfully! Opening window...")
+		InitWindow(800, 600, "GDRS Bouncing Circle!")
 
-		// 2. Drive Raylib directly from gdrs!
-		InitWindow(800, 600, "GDRS + Raylib Native Window!")
+		// Position and Velocity
+		let mut x: i32 = 400
+		let mut y: i32 = 300
+		let mut speed_x: i32 = 5
+		let mut speed_y: i32 = 5
+		let radius: i32 = 50
 
 		while !WindowShouldClose():
+			// 1. Get current window bounds
+			let screen_w = GetScreenWidth()
+			let screen_h = GetScreenHeight()
+
+			// 2. Apply velocity
+			x += speed_x
+			y += speed_y
+
+			// 3. Collision detection (bounce off edges)
+			if x >= (screen_w - radius):
+				speed_x = -5
+			if x <= radius:
+				speed_x = 5
+				
+			if y >= (screen_h - radius):
+				speed_y = -5
+			if y <= radius:
+				speed_y = 5
+
+			// 4. Draw
 			BeginDrawing()
-			ClearBackground(2294467295) // White
-			//DrawCircle(400, 300, 50.0, 4278190335) // Red
-			Draw
+			ClearBackground(2294467295)
+			DrawCircle(x, y, 50.0, 4278190335) // Red circle
 			EndDrawing()
 
-		// 3. Move outside the loop
 		CloseWindow()

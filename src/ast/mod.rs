@@ -124,7 +124,7 @@ pub enum Token {
     #[token(",")]
     Comma,
     #[token("i64")]
-    TypeInt,
+    TypeI64,
     #[token("i32")]
     TypeI32,
     #[token("f64")]
@@ -296,7 +296,7 @@ pub enum Expr {
 
     String(String, Span),
 
-    Let(String, bool, Box<Expr>, Span),
+    Let(String, Option<Type>, bool, Box<Expr>, Span),
     Block(Vec<Expr>, Span),
     Unsafe(Vec<Expr>, Span),
     Assign(String, Box<Expr>, Span),
@@ -373,7 +373,7 @@ impl Expr {
             Expr::Shl(_, _, s) => s.clone(),
             Expr::Shr(_, _, s) => s.clone(),
             Expr::Neg(_, s) | Expr::Not(_, s) => s.clone(),
-            Expr::Let(_, _, _, s) => s.clone(),
+            Expr::Let(_, _, _, _, s) => s.clone(),
             Expr::Block(_, s) => s.clone(),
             Expr::Unsafe(_, s) => s.clone(),
             Expr::Assign(_, _, s) => s.clone(),
