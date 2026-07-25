@@ -4,11 +4,13 @@ use crate::{
 };
 use std::collections::HashMap;
 
-/// Context Group for types
+#[derive(Clone)]
 pub struct TypeCtx<'a> {
     pub fn_map: &'a HashMap<String, &'a FuncDecl>,
     pub struct_map: &'a HashMap<String, StructLayout>,
     pub enum_map: &'a HashMap<String, (&'static str, HashMap<String, (i64, Vec<Type>)>)>,
+    pub extern_fn_names: &'a std::collections::HashSet<String>,
+    pub is_unsafe: bool,
 }
 
 /// Type checks an untyped Expr and produces a TypedExpr
@@ -490,6 +492,21 @@ pub fn type_check_expr<'a>(
             Some(TypedExpr::Block(typed_stmts, block_ty, span.clone()))
         }
 
+        Expr::Unsafe(stmts, span) => {
+            scopes.push_scope();
+            let mut unsafe_ctx = type_ctx.clone();
+            unsafe_ctx.is_unsafe = true;
+            let mut typed_stmts = Vec::new();
+            for stmt in stmts {
+                if let Some(t_stmt) = type_check_expr(scopes, errors, &unsafe_ctx, stmt) {
+                    typed_stmts.push(t_stmt);
+                }
+            }
+            scopes.pop_scope();
+            let block_ty = typed_stmts.last().map(|s| s.ty()).unwrap_or(Type::Unit);
+            Some(TypedExpr::Unsafe(typed_stmts, block_ty, span.clone()))
+        }
+
         Expr::While(cond, body, span) => {
             let t_cond = type_check_expr(scopes, errors, type_ctx, cond)?;
             let t_body = type_check_expr(scopes, errors, type_ctx, body)?;
@@ -751,6 +768,15 @@ pub fn type_check_expr<'a>(
                         }
                     }
                 }
+            }
+
+            if type_ctx.extern_fn_names.contains(&resolved_name) && !type_ctx.is_unsafe {
+                errors.push(SemanticError {
+                    message: format!("Call to extern C function '{resolved_name}' requires an 'unsafe:' block"),
+                    label: "Foreign C function call requires 'unsafe:' block".to_string(),
+                    help: Some("Wrap this call inside an 'unsafe:' block".to_string()),
+                    span: span.clone(),
+                });
             }
 
             let ret_ty = if let Some(target_func) = type_ctx.fn_map.get(&resolved_name) {

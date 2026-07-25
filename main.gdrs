@@ -1,18 +1,18 @@
-// Test script for gdrs timing & micro-sleeping
+// Positive test: wrapping extern C calls in unsafe block
 
 extern "C":
-	fn clock() -> i64
-	fn usleep(microseconds: i64) -> i64
+	fn puts(s: str) -> i64
+	fn labs(x: i64) -> i64
+	fn system(cmd: str) -> i64
 
 fn main():
-	log!("=== Testing GDRS Native Timing & Sleep ===")
+	log!("=== Testing GDRS unsafe: Block Encapsulation ===")
 
-	let start_time = clock()
+	unsafe:
+		puts("1. Hello from native C libc puts inside unsafe block!")
 
-	log!("Sleeping for 250,000 microseconds (250ms)...")
-	usleep(250000)
+		let abs_val = labs(0 - 777)
+		log!("2. C libc labs(-777) return value inside unsafe:", abs_val)
 
-	let end_time = clock()
-	let elapsed = end_time - start_time
-
-	log!("Finished! CPU ticks elapsed:", elapsed)
+		log!("3. Launching macOS Calculator app via C FFI inside unsafe:")
+		system("open -a Calculator")

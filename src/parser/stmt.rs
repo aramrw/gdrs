@@ -192,6 +192,15 @@ pub fn stmt_parser<'a>(
             .map_with_span(|(name, args), span| Expr::Call(name, args, span))
             .then_ignore(just(Token::Newline).or_not());
 
+        let unsafe_stmt = just(Token::Unsafe)
+            .ignore_then(just(Token::Colon))
+            .then_ignore(just(Token::Newline).or_not())
+            .then(block.clone())
+            .map_with_span(|(_, body_expr), span| match body_expr {
+                Expr::Block(stmts, _) => Expr::Unsafe(stmts, span),
+                other => Expr::Unsafe(vec![other], span),
+            });
+
         just(Token::Newline)
             .repeated()
             .ignore_then(
@@ -200,6 +209,7 @@ pub fn stmt_parser<'a>(
                     .or(field_assign_stmt)
                     .or(assign_stmt)
                     .or(return_stmt)
+                    .or(unsafe_stmt)
                     .or(if_stmt)
                     .or(while_stmt)
                     .or(macro_call)

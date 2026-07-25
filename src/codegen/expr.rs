@@ -417,7 +417,7 @@ pub fn compile_expr(
         }
 
         // Nested Block -> Evaluate statements in sequence
-        TypedExpr::Block(stmts, _, _) => {
+        TypedExpr::Block(stmts, _, _) | TypedExpr::Unsafe(stmts, _, _) => {
             let mut last = builder.ins().iconst(types::I64, 0);
             for stmt in stmts {
                 last = compile_expr(builder, stmt, vars, var_counter, module, struct_layouts);

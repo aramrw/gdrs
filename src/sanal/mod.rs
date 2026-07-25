@@ -225,10 +225,19 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
         fn_map.insert(func.name.clone(), func);
     }
 
+    let mut extern_fn_names = std::collections::HashSet::new();
+    for ext in &program.externs {
+        for ef in &ext.functions {
+            extern_fn_names.insert(ef.name.clone());
+        }
+    }
+
     let type_ctx = TypeCtx {
         fn_map: &fn_map,
         struct_map: &struct_map,
         enum_map: &enum_map,
+        extern_fn_names: &extern_fn_names,
+        is_unsafe: false,
     };
 
     for func in &all_functions {

@@ -160,6 +160,8 @@ pub enum Token {
     Dyn,
     #[token("extern")]
     Extern,
+    #[token("unsafe")]
+    Unsafe,
     #[token("$")]
     Dollar,
 
@@ -277,6 +279,7 @@ pub enum Expr {
 
     Let(String, bool, Box<Expr>, Span),
     Block(Vec<Expr>, Span),
+    Unsafe(Vec<Expr>, Span),
     Assign(String, Box<Expr>, Span),
     While(Box<Expr>, Box<Expr>, Span),
     If(Box<Expr>, Box<Expr>, Span),
@@ -331,6 +334,7 @@ impl Expr {
             Expr::Neg(_, s) | Expr::Not(_, s) => s.clone(),
             Expr::Let(_, _, _, s) => s.clone(),
             Expr::Block(_, s) => s.clone(),
+            Expr::Unsafe(_, s) => s.clone(),
             Expr::Assign(_, _, s) => s.clone(),
             Expr::While(_, _, s) => s.clone(),
             Expr::If(_, _, s) => s.clone(),
@@ -388,6 +392,7 @@ pub enum TypedExpr {
 
     Let(String, bool, Box<TypedExpr>, Type, Span),
     Block(Vec<TypedExpr>, Type, Span),
+    Unsafe(Vec<TypedExpr>, Type, Span),
     Assign(String, Box<TypedExpr>, Span),
     While(Box<TypedExpr>, Box<TypedExpr>, Span),
     If(Box<TypedExpr>, Box<TypedExpr>, Span),
@@ -441,6 +446,7 @@ impl TypedExpr {
             TypedExpr::Ident(_, ty, _)
             | TypedExpr::Let(_, _, _, ty, _)
             | TypedExpr::Block(_, ty, _)
+            | TypedExpr::Unsafe(_, ty, _)
             | TypedExpr::IfElse(_, _, _, ty, _)
             | TypedExpr::Call(_, _, ty, _)
             | TypedExpr::ObjInit(_, _, ty, _)
@@ -488,6 +494,7 @@ impl TypedExpr {
             TypedExpr::Neg(_, _, s) | TypedExpr::Not(_, s) => s.clone(),
             TypedExpr::Let(_, _, _, _, s) => s.clone(),
             TypedExpr::Block(_, _, s) => s.clone(),
+            TypedExpr::Unsafe(_, _, s) => s.clone(),
             TypedExpr::Assign(_, _, s) => s.clone(),
             TypedExpr::While(_, _, s) => s.clone(),
             TypedExpr::If(_, _, s) => s.clone(),
