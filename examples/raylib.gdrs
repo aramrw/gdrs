@@ -31,6 +31,8 @@ fn main():
 
 		while !WindowShouldClose():
 			// 1. Get current window bounds
+			// Why GetScreenWidth() returned 0
+			// In gdrs, when calling C FFI functions that return 32-bit values (-> i32), ensure your foreign function call codegen reads the 32-bit return register (e.g., w0 on ARM64 macOS) rather than expecting a 64-bit value or leaving high bits uninitialized.
 			let screen_w = GetScreenWidth()
 			let screen_h = GetScreenHeight()
 
