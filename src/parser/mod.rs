@@ -74,6 +74,11 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
             span,
         });
 
+    let opt_where = just(Token::Newline)
+        .repeated()
+        .ignore_then(where_clause.clone())
+        .or_not();
+
     // Function signature: fn name(params) -> return_type where T: Bounds:
     let function = just(Token::Fn)
         .ignore_then(select! { Token::Ident(s) => s })
@@ -81,7 +86,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         .then(param.clone().separated_by(just(Token::Comma)).allow_trailing())
         .then_ignore(just(Token::RParen))
         .then(just(Token::Arrow).ignore_then(type_parser.clone()).or_not())
-        .then(where_clause.clone().or_not())
+        .then(opt_where.clone())
         .then_ignore(just(Token::Colon))
         .then_ignore(just(Token::Newline).or_not())
         .then(
@@ -105,7 +110,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         .then(param.clone().separated_by(just(Token::Comma)).allow_trailing())
         .then_ignore(just(Token::RParen))
         .then(just(Token::Arrow).ignore_then(type_parser.clone()).or_not())
-        .then(where_clause.or_not())
+        .then(opt_where)
         .then_ignore(just(Token::Newline).or_not())
         .map_with_span(|(((name, params), opt_ret), where_clause), _| FuncDecl {
             name,
@@ -115,12 +120,14 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
             body: Vec::new(),
         });
 
+    let trait_method = function.clone().or(func_sig);
+
     let trait_decl = just(Token::Trait)
         .ignore_then(select! { Token::Ident(s) => s })
         .then_ignore(just(Token::Colon))
         .then_ignore(just(Token::Newline).or_not())
         .then(
-            func_sig
+            trait_method
                 .repeated()
                 .at_least(1)
                 .delimited_by(just(Token::Indent), just(Token::Dedent)),

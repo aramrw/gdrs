@@ -151,6 +151,40 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
 
     all_functions.extend(program.functions.clone());
 
+    // Populate default trait implementations for structs
+    for t in &program.traits {
+        for method in &t.methods {
+            if !method.body.is_empty() {
+                for s in &program.structs {
+                    let mangled_name = format!("{}_{}", s.name, method.name);
+                    let target_ty = Type::Obj(intern_str(&s.name));
+                    if !all_functions.iter().any(|f| f.name == mangled_name) {
+                        let mut params = Vec::new();
+                        for p in &method.params {
+                            if p.name == "self" {
+                                params.push(Param {
+                                    name: "self".to_string(),
+                                    is_mutable: p.is_mutable,
+                                    ty: target_ty,
+                                    span: p.span.clone(),
+                                });
+                            } else {
+                                params.push(p.clone());
+                            }
+                        }
+                        all_functions.push(FuncDecl {
+                            name: mangled_name,
+                            params,
+                            return_type: method.return_type,
+                            where_clause: method.where_clause.clone(),
+                            body: method.body.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     // Monomorphization Pass for $T generic functions
     let mut mono_functions = Vec::new();
     for func in &all_functions {

@@ -1,4 +1,11 @@
-// Main test script for gdrs Traits, $T Generics, and dyn Trait Dynamic Dispatch
+// Main test script for gdrs Traits, Default Methods, Trait Aliases, and Dynamic Dispatch
+
+type DrawFoo = Foo + Drawable
+
+trait Foo:
+	fn bar(self) -> bool:
+		log!("Default Trait Method from Foo!")
+		return true
 
 trait Drawable:
 	fn draw(self) -> bool
@@ -8,7 +15,7 @@ obj Button:
 
 impl Button:
 	fn draw(self) -> bool:
-		log!("Rendering Button ID:", self.id)
+		log!("Button.draw() executed for ID:", self.id)
 		return true
 
 obj Canvas:
@@ -16,24 +23,35 @@ obj Canvas:
 
 impl Canvas:
 	fn draw(self) -> bool:
-		log!("Rendering Canvas Width:", self.width)
+		log!("Canvas.draw() executed for Width:", self.width)
 		return true
 
-fn render_static(item: $T) -> bool where T: Drawable:
-	log!("--- Static Monomorphized Render ($T) ---")
+// Generic function with trait alias bound
+fn render_multiline(item: $T) -> bool
+where T: DrawFoo:
+	item.bar()
+	return item.draw()
+
+// Generic function with multiple trait bounds
+fn render_singleline(item: $T) -> bool 
+where T: Drawable + Foo:
+	item.bar()
 	return item.draw()
 
 fn render_dyn(item: dyn Drawable) -> bool:
-	log!("--- Dynamic Dispatch Render (dyn Trait) ---")
+	log!("--- Dynamic Dispatch (dyn Trait) ---")
 	return item.draw()
 
 fn main():
-	log!("=== Testing GDRS Traits & Generics ===")
+	log!("=== Testing GDRS Traits & Sugar Features ===")
 
 	let btn = Button{ id: 101 }
 	let cvs = Canvas{ width: 1920 }
 
-	render_static(btn)
-	render_static(cvs)
+	log!("--- Multiline $T Render (DrawFoo Trait Alias) ---")
+	render_multiline(btn)
+
+	log!("--- Single-line $T Render (Drawable + Foo Bounds) ---")
+	render_singleline(cvs)
 
 	render_dyn(btn)
