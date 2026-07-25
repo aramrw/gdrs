@@ -11,6 +11,7 @@ pub struct TypeCtx<'a> {
     pub enum_map: &'a HashMap<String, (&'static str, HashMap<String, (i64, Vec<Type>)>)>,
     pub extern_fn_names: &'a std::collections::HashSet<String>,
     pub extern_map: &'a HashMap<String, Type>,
+    pub extern_signatures: &'a HashMap<String, (Vec<Type>, Type)>,
     pub is_unsafe: bool,
 }
 
@@ -910,7 +911,14 @@ pub fn type_check_expr<'a>(
                     }
                 }
                 target_func.return_type
-            } else if let Some(ext_ret_ty) = type_ctx.extern_map.get(&resolved_name) {
+            } else if let Some((param_decl_types, ext_ret_ty)) = type_ctx.extern_signatures.get(&resolved_name) {
+                for (param_ty, arg) in param_decl_types.iter().zip(typed_args.iter_mut()) {
+                    if *param_ty == Type::F32 && arg.ty() == Type::Float {
+                        *arg = TypedExpr::CastF32(Box::new(arg.clone()), span.clone());
+                    } else if *param_ty == Type::I32 && arg.ty() == Type::Int {
+                        *arg = TypedExpr::CastI32(Box::new(arg.clone()), span.clone());
+                    }
+                }
                 *ext_ret_ty
             } else {
                 errors.push(SemanticError {

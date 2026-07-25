@@ -26,8 +26,10 @@ fn main():
 
 		while !WindowShouldClose():
 			BeginDrawing()
-			ClearBackground(4294967295) // White
-			DrawCircle(400, 300, 50.0, 4278190335) // Red
+			ClearBackground(2294467295) // White
+			//DrawCircle(400, 300, 50.0, 4278190335) // Red
+			Draw
 			EndDrawing()
 
-			CloseWindow()
+		// 3. Move outside the loop
+		CloseWindow()

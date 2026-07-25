@@ -179,10 +179,10 @@ pub fn compile_macro_call(
             let mut last_val = builder.ins().iconst(types::I64, 0);
             for arg in args {
                 let type_tag = match arg.ty() {
-                    Type::Int => 0,
+                    Type::Int | Type::I32 => 0,
                     Type::Bool => 1,
                     Type::Str | Type::String => 2,
-                    Type::Float => 3,
+                    Type::Float | Type::F32 => 3,
                     Type::Unit | Type::Obj(_) | Type::Enum(_) | Type::Array(_, _) | Type::Slice(_) | Type::Vec(_) | Type::Generic(_) | Type::DynTrait(_) => 0,
                 };
 
@@ -215,8 +215,8 @@ pub fn compile_macro_call(
             let mut last_val = builder.ins().iconst(types::I64, 0);
             for arg in args {
                 let type_name = match arg.ty() {
-                    Type::Int => "Int",
-                    Type::Float => "Float",
+                    Type::Int | Type::I32 => "Int",
+                    Type::Float | Type::F32 => "Float",
                     Type::Bool => "Bool",
                     Type::Str => "Str",
                     Type::String => "String",

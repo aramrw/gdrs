@@ -31,7 +31,9 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
 
         select! {
             Token::TypeInt => Type::Int,
+            Token::TypeI32 => Type::I32,
             Token::TypeFloat => Type::Float,
+            Token::TypeF32 => Type::F32,
             Token::TypeBool => Type::Bool,
             Token::TypeStr => Type::Str,
             Token::TypeString => Type::String,

@@ -29,6 +29,7 @@ pub fn compile_func(
     for param in &func.params {
         let param_ty = match param.ty {
             Type::Float => types::F64,
+            Type::F32 => types::F32,
             _ => types::I64,
         };
         ctx.func.signature.params.push(AbiParam::new(param_ty));
@@ -37,6 +38,9 @@ pub fn compile_func(
     match func.return_type {
         Type::Float => {
             ctx.func.signature.returns.push(AbiParam::new(types::F64));
+        }
+        Type::F32 => {
+            ctx.func.signature.returns.push(AbiParam::new(types::F32));
         }
         _ => {
             ctx.func.signature.returns.push(AbiParam::new(types::I64));

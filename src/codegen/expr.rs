@@ -590,11 +590,22 @@ pub fn compile_expr(
                 if matches!(arg.ty(), Type::Str | Type::String) && !matches!(arg, TypedExpr::String(_, _)) {
                     compiled_arg = builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::new(), compiled_arg, 0);
                 }
-                compiled_args.push(compiled_arg);
+
                 let param_ty = match arg.ty() {
                     Type::Float => types::F64,
+                    Type::F32 => types::F32,
+                    Type::I32 => types::I32,
                     _ => types::I64,
                 };
+
+                let val_ty = builder.func.dfg.value_type(compiled_arg);
+                if param_ty == types::F32 && val_ty == types::F64 {
+                    compiled_arg = builder.ins().fdemote(types::F32, compiled_arg);
+                } else if param_ty == types::I32 && val_ty == types::I64 {
+                    compiled_arg = builder.ins().ireduce(types::I32, compiled_arg);
+                }
+
+                compiled_args.push(compiled_arg);
                 sig.params.push(AbiParam::new(param_ty));
             }
 
@@ -795,6 +806,24 @@ pub fn compile_expr(
             }
 
             base_ptr
+        }
+
+        TypedExpr::CastF32(inner, _) => {
+            let val = compile_expr(builder, inner, vars, var_counter, module, struct_layouts);
+            if inner.ty() == Type::Float {
+                builder.ins().fdemote(types::F32, val)
+            } else {
+                val
+            }
+        }
+
+        TypedExpr::CastI32(inner, _) => {
+            let val = compile_expr(builder, inner, vars, var_counter, module, struct_layouts);
+            if inner.ty() == Type::Int {
+                builder.ins().ireduce(types::I32, val)
+            } else {
+                val
+            }
         }
 
         TypedExpr::CoerceToDyn(inner_expr, _trait_name, _) => {

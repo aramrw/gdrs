@@ -123,8 +123,12 @@ pub enum Token {
     Comma,
     #[token("i64")]
     TypeInt,
+    #[token("i32")]
+    TypeI32,
     #[token("f64")]
     TypeFloat,
+    #[token("f32")]
+    TypeF32,
     #[token("bool")]
     TypeBool,
     #[token("string")]
@@ -179,7 +183,9 @@ pub type Span = std::ops::Range<usize>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Type {
     Int,
+    I32,
     Float,
+    F32,
     Bool,
     Str,
     String,
@@ -437,6 +443,8 @@ pub enum TypedExpr {
     CoerceToDyn(Box<TypedExpr>, &'static str, Span),
     DynCall(Box<TypedExpr>, String, Vec<TypedExpr>, Type, Span),
     Match(Box<TypedExpr>, Vec<TypedMatchArm>, Type, Span),
+    CastF32(Box<TypedExpr>, Span),
+    CastI32(Box<TypedExpr>, Span),
 }
 
 impl TypedExpr {
@@ -482,6 +490,8 @@ impl TypedExpr {
             | TypedExpr::Match(_, _, ty, _) => *ty,
             | TypedExpr::DynCall(_, _, _, ty, _) => *ty,
             TypedExpr::CoerceToDyn(_, trait_name, _) => Type::DynTrait(trait_name),
+            TypedExpr::CastF32(..) => Type::F32,
+            TypedExpr::CastI32(..) => Type::I32,
             TypedExpr::Assign(..)
             | TypedExpr::While(..)
             | TypedExpr::If(..)
@@ -538,6 +548,7 @@ impl TypedExpr {
             TypedExpr::IndexAssign(_, _, _, s) => s.clone(),
             TypedExpr::EnumConstruct(_, _, _, _, _, s) => s.clone(),
             TypedExpr::Match(_, _, _, s) => s.clone(),
+            TypedExpr::CastF32(_, s) | TypedExpr::CastI32(_, s) => s.clone(),
         }
     }
 }

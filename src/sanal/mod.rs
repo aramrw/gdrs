@@ -215,10 +215,14 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
 
     let mut extern_fn_names = std::collections::HashSet::new();
     let mut extern_map = HashMap::new();
+    let mut extern_signatures = HashMap::new();
     for ext in &program.externs {
         for ef in &ext.functions {
             extern_fn_names.insert(ef.name.clone());
-            extern_map.insert(ef.name.clone(), resolve_type(ef.return_type, &enum_names));
+            let res_ret = resolve_type(ef.return_type, &enum_names);
+            let res_params: Vec<Type> = ef.params.iter().map(|p| resolve_type(p.ty, &enum_names)).collect();
+            extern_map.insert(ef.name.clone(), res_ret);
+            extern_signatures.insert(ef.name.clone(), (res_params, res_ret));
         }
     }
 
@@ -228,6 +232,7 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
         enum_map: &enum_map,
         extern_fn_names: &extern_fn_names,
         extern_map: &extern_map,
+        extern_signatures: &extern_signatures,
         is_unsafe: false,
     };
 
