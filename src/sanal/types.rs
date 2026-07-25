@@ -50,6 +50,8 @@ pub fn type_check_expr<'a>(
                     Some(TypedExpr::Ident(name.clone(), Type::Obj(intern_str(&normalized)), span.clone()))
                 } else if type_ctx.enum_map.contains_key(&normalized) {
                     Some(TypedExpr::Ident(name.clone(), Type::Enum(intern_str(&normalized)), span.clone()))
+                } else if name == "rc" || name == "arc" {
+                    Some(TypedExpr::Ident(name.clone(), Type::Unit, span.clone()))
                 } else {
                     errors.push(SemanticError {
                         message: format!("Undefined variable '{name}'"),
@@ -65,6 +67,8 @@ pub fn type_check_expr<'a>(
                     Some(TypedExpr::Ident(name.clone(), Type::Obj(intern_str(&normalized)), span.clone()))
                 } else if type_ctx.enum_map.contains_key(&normalized) {
                     Some(TypedExpr::Ident(name.clone(), Type::Enum(intern_str(&normalized)), span.clone()))
+                } else if name == "rc" || name == "arc" {
+                    Some(TypedExpr::Ident(name.clone(), Type::Unit, span.clone()))
                 } else {
                     errors.push(SemanticError {
                         message: format!("Undefined variable '{name}'"),
@@ -841,6 +845,38 @@ pub fn type_check_expr<'a>(
                     ));
                 }
                 if let TypedExpr::Ident(target_name, _, _) = &typed_args[0] {
+                    if target_name == "rc" && name == "new" {
+                        typed_args.remove(0);
+                        if typed_args.len() != 1 {
+                            errors.push(SemanticError {
+                                message: "rc.new expects exactly 1 argument".to_string(),
+                                label: "Invalid argument count".to_string(),
+                                help: None,
+                                span: span.clone(),
+                            });
+                            return Some(TypedExpr::Int(0, span.clone()));
+                        }
+                        let inner_ty = typed_args[0].ty();
+                        let rc_ty = Type::Rc(crate::ast::intern_type(inner_ty));
+                        return Some(TypedExpr::Call("rc_new".to_string(), typed_args, rc_ty, span.clone()));
+                    }
+
+                    if target_name == "arc" && name == "new" {
+                        typed_args.remove(0);
+                        if typed_args.len() != 1 {
+                            errors.push(SemanticError {
+                                message: "arc.new expects exactly 1 argument".to_string(),
+                                label: "Invalid argument count".to_string(),
+                                help: None,
+                                span: span.clone(),
+                            });
+                            return Some(TypedExpr::Int(0, span.clone()));
+                        }
+                        let inner_ty = typed_args[0].ty();
+                        let arc_ty = Type::Arc(crate::ast::intern_type(inner_ty));
+                        return Some(TypedExpr::Call("arc_new".to_string(), typed_args, arc_ty, span.clone()));
+                    }
+
                     let normalized_target = target_name.replace("::", "_");
                     let mangled = format!("{}_{}", normalized_target, name);
                     if type_ctx.fn_map.contains_key(&mangled) {
@@ -850,7 +886,20 @@ pub fn type_check_expr<'a>(
                         }
                     }
                 }
-                if resolved_name == name {
+
+                if name == "clone" && !typed_args.is_empty() {
+                    match typed_args[0].ty() {
+                        Type::Rc(inner_ty) => {
+                            return Some(TypedExpr::Call("rc_clone".to_string(), typed_args, Type::Rc(inner_ty), span.clone()));
+                        }
+                        Type::Arc(inner_ty) => {
+                            return Some(TypedExpr::Call("arc_clone".to_string(), typed_args, Type::Arc(inner_ty), span.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+
+            if resolved_name == name {
                     let first_arg_ty = typed_args[0].ty();
                     let type_name = match first_arg_ty {
                         Type::Obj(n) => Some(n),
@@ -1212,6 +1261,51 @@ pub fn type_check_expr<'a>(
                 Type::Enum(static_enum_name),
                 span.clone(),
             ))
+        }
+
+        Expr::Deref(inner, span) => {
+            let t_inner = type_check_expr(scopes, errors, type_ctx, inner)?;
+            match t_inner.ty() {
+                Type::Rc(inner_ty) | Type::Arc(inner_ty) => {
+                    Some(TypedExpr::Deref(Box::new(t_inner), *inner_ty, span.clone()))
+                }
+                other => {
+                    errors.push(SemanticError {
+                        message: format!("Cannot dereference type `{:?}`. Only `rc[T]` and `arc[T]` can be dereferenced", other),
+                        label: "Type cannot be dereferenced".to_string(),
+                        help: Some("Use rc.new(val) or arc.new(val) to create a smart pointer".to_string()),
+                        span: span.clone(),
+                    });
+                    Some(TypedExpr::Deref(Box::new(t_inner), Type::Unit, span.clone()))
+                }
+            }
+        }
+
+        Expr::DerefAssign(ptr, val, span) => {
+            let t_ptr = type_check_expr(scopes, errors, type_ctx, ptr)?;
+            let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
+            match t_ptr.ty() {
+                Type::Rc(inner_ty) | Type::Arc(inner_ty) => {
+                    if t_val.ty() != *inner_ty {
+                        errors.push(SemanticError {
+                            message: format!("Mismatched type in dereference assignment. Pointer holds `{:?}`, found `{:?}`", *inner_ty, t_val.ty()),
+                            label: format!("Expected `{:?}`", *inner_ty),
+                            help: None,
+                            span: span.clone(),
+                        });
+                    }
+                    Some(TypedExpr::DerefAssign(Box::new(t_ptr), Box::new(t_val), span.clone()))
+                }
+                other => {
+                    errors.push(SemanticError {
+                        message: format!("Cannot dereference assign type `{:?}`", other),
+                        label: "Type cannot be dereferenced".to_string(),
+                        help: None,
+                        span: span.clone(),
+                    });
+                    Some(TypedExpr::DerefAssign(Box::new(t_ptr), Box::new(t_val), span.clone()))
+                }
+            }
         }
     }
 }

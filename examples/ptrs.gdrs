@@ -1,0 +1,20 @@
+fn main():
+	// 1. Create a heap-allocated reference-counted integer (*rc)
+	let ptr1 = rc.new(48)
+	let ptr2 = ptr1.clone()
+
+	log!("Initial *rc value via ptr1:", *ptr1)
+	log!("Initial *rc value via ptr2:", *ptr2)
+
+	// 2. Mutate value inside rc via L-value deref assignment (*ptr1 = 99)
+	*ptr1 = 99
+	log!("Mutated *rc value via ptr1:", *ptr1)
+	log!("Mutated *rc value via ptr2:", *ptr2)
+
+	// 3. Create a thread-safe Atomic Reference Counted pointer (*arc)
+	let aptr = arc.new(100)
+	let aptr_copy = aptr.clone()
+
+	log!("Initial *arc value:", *aptr)
+	*aptr_copy = 777
+	log!("Mutated *arc value via clone:", *aptr)

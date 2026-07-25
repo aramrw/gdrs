@@ -46,7 +46,13 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
             .then_ignore(just(Token::Colon))
             .then(math.clone());
 
-        let path = select! { Token::Ident(s) => s }
+        let path_segment = select! {
+            Token::Ident(s) => s,
+            Token::TypeRc => "rc".to_string(),
+            Token::TypeArc => "arc".to_string(),
+        };
+
+        let path = path_segment
             .separated_by(just(Token::ColonColon))
             .at_least(1)
             .map(|parts| parts.join("::"));
@@ -156,7 +162,11 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
             .ignore_then(postfix_atom.clone())
             .map_with_span(|expr, span| Expr::Not(Box::new(expr), span));
 
-        let unary = neg.or(not).or(postfix_atom);
+        let deref = just(Token::Star)
+            .ignore_then(postfix_atom.clone())
+            .map_with_span(|expr, span| Expr::Deref(Box::new(expr), span));
+
+        let unary = neg.or(not).or(deref).or(postfix_atom);
 
         let factor =
             unary

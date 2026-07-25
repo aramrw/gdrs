@@ -17,7 +17,7 @@ use stmt::{stmt_parser};
 pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
     let type_parser = recursive(|type_parser| {
         let array_type = just(Token::LBracket)
-            .ignore_then(type_parser)
+            .ignore_then(type_parser.clone())
             .then_ignore(just(Token::RBracket))
             .map(|t| Type::Vec(intern_type(t)));
 
@@ -28,6 +28,18 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         let dyn_type = just(Token::Dyn)
             .ignore_then(select! { Token::Ident(s) => s })
             .map(|s| Type::DynTrait(intern_str(&s)));
+
+        let rc_type = just(Token::TypeRc)
+            .ignore_then(just(Token::LBracket))
+            .ignore_then(type_parser.clone())
+            .then_ignore(just(Token::RBracket))
+            .map(|t| Type::Rc(intern_type(t)));
+
+        let arc_type = just(Token::TypeArc)
+            .ignore_then(just(Token::LBracket))
+            .ignore_then(type_parser.clone())
+            .then_ignore(just(Token::RBracket))
+            .map(|t| Type::Arc(intern_type(t)));
 
         select! {
             Token::TypeInt => Type::Int,
@@ -42,6 +54,8 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         .or(generic_type)
         .or(dyn_type)
         .or(array_type)
+        .or(rc_type)
+        .or(arc_type)
     });
 
     // 3. Math Expression parser with operator precedence hierarchy

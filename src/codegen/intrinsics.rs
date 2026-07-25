@@ -42,6 +42,67 @@ unsafe extern "C" {
     fn free(ptr: *mut std::ffi::c_void);
 }
 
+pub extern "C" fn intrinsic_rc_new(val_bits: u64) -> *mut u64 {
+    unsafe {
+        let ptr = malloc(16) as *mut u64;
+        if !ptr.is_null() {
+            *ptr = 1;
+            *ptr.add(1) = val_bits;
+        }
+        ptr
+    }
+}
+
+pub extern "C" fn intrinsic_arc_new(val_bits: u64) -> *mut u64 {
+    unsafe {
+        let ptr = malloc(16) as *mut u64;
+        if !ptr.is_null() {
+            *ptr = 1;
+            *ptr.add(1) = val_bits;
+        }
+        ptr
+    }
+}
+
+pub extern "C" fn intrinsic_rc_clone(ptr: *mut u64) -> *mut u64 {
+    if !ptr.is_null() {
+        unsafe {
+            *ptr += 1;
+        }
+    }
+    ptr
+}
+
+pub extern "C" fn intrinsic_arc_clone(ptr: *mut u64) -> *mut u64 {
+    if !ptr.is_null() {
+        let atomic_ref = unsafe { &*(ptr as *const std::sync::atomic::AtomicU64) };
+        atomic_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    ptr
+}
+
+pub extern "C" fn intrinsic_rc_drop(ptr: *mut u64) {
+    if !ptr.is_null() {
+        unsafe {
+            *ptr -= 1;
+            if *ptr == 0 {
+                free(ptr as *mut _);
+            }
+        }
+    }
+}
+
+pub extern "C" fn intrinsic_arc_drop(ptr: *mut u64) {
+    if !ptr.is_null() {
+        let atomic_ref = unsafe { &*(ptr as *const std::sync::atomic::AtomicU64) };
+        if atomic_ref.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            unsafe {
+                free(ptr as *mut _);
+            }
+        }
+    }
+}
+
 pub extern "C" fn intrinsic_push_str(header_ptr: *mut u64, append_str_ptr: *const std::os::raw::c_char) {
     if header_ptr.is_null() || append_str_ptr.is_null() {
         return;
@@ -183,7 +244,7 @@ pub fn compile_macro_call(
                     Type::Bool => 1,
                     Type::Str | Type::String => 2,
                     Type::Float | Type::F32 => 3,
-                    Type::Unit | Type::Obj(_) | Type::Enum(_) | Type::Array(_, _) | Type::Slice(_) | Type::Vec(_) | Type::Generic(_) | Type::DynTrait(_) => 0,
+                    Type::Unit | Type::Obj(_) | Type::Enum(_) | Type::Array(_, _) | Type::Slice(_) | Type::Vec(_) | Type::Generic(_) | Type::DynTrait(_) | Type::Rc(_) | Type::Arc(_) => 0,
                 };
 
                 let type_tag_val = builder.ins().iconst(types::I64, type_tag);
@@ -228,6 +289,8 @@ pub fn compile_macro_call(
                     Type::Vec(_) => "Vec",
                     Type::Generic(name) => name,
                     Type::DynTrait(name) => name,
+                    Type::Rc(_) => "Rc",
+                    Type::Arc(_) => "Arc",
                 };
 
                 let ptr_val = compile_string_constant(builder, type_name, var_counter, module);

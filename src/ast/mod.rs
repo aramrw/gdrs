@@ -135,6 +135,10 @@ pub enum Token {
     TypeString,
     #[token("str")]
     TypeStr,
+    #[token("rc")]
+    TypeRc,
+    #[token("arc")]
+    TypeArc,
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*!", |lex| lex.slice()[..lex.slice().len() - 1].to_string())]
     MacroIdent(String),
 
@@ -197,6 +201,8 @@ pub enum Type {
     Array(&'static Type, usize),
     Slice(&'static Type),
     Vec(&'static Type),
+    Rc(&'static Type),
+    Arc(&'static Type),
 }
 
 impl Type {
@@ -315,6 +321,8 @@ pub enum Expr {
 
     EnumConstruct(String, String, Vec<Expr>, Span),
     Match(Box<Expr>, Vec<MatchArm>, Span),
+    Deref(Box<Expr>, Span),
+    DerefAssign(Box<Expr>, Box<Expr>, Span),
 }
 
 #[derive(Debug, Clone)]
@@ -379,6 +387,8 @@ impl Expr {
             Expr::IndexAssign(_, _, _, s) => s.clone(),
             Expr::EnumConstruct(_, _, _, s) => s.clone(),
             Expr::Match(_, _, s) => s.clone(),
+            Expr::Deref(_, s) => s.clone(),
+            Expr::DerefAssign(_, _, s) => s.clone(),
         }
     }
 }
@@ -445,6 +455,8 @@ pub enum TypedExpr {
     Match(Box<TypedExpr>, Vec<TypedMatchArm>, Type, Span),
     CastF32(Box<TypedExpr>, Span),
     CastI32(Box<TypedExpr>, Span),
+    Deref(Box<TypedExpr>, Type, Span),
+    DerefAssign(Box<TypedExpr>, Box<TypedExpr>, Span),
 }
 
 impl TypedExpr {
@@ -487,7 +499,8 @@ impl TypedExpr {
             | TypedExpr::ArrayInit(_, ty, _)
             | TypedExpr::IndexAccess(_, _, ty, _)
             | TypedExpr::EnumConstruct(_, _, _, _, ty, _)
-            | TypedExpr::Match(_, _, ty, _) => *ty,
+            | TypedExpr::Match(_, _, ty, _)
+            | TypedExpr::Deref(_, ty, _) => *ty,
             | TypedExpr::DynCall(_, _, _, ty, _) => *ty,
             TypedExpr::CoerceToDyn(_, trait_name, _) => Type::DynTrait(trait_name),
             TypedExpr::CastF32(..) => Type::F32,
@@ -498,7 +511,8 @@ impl TypedExpr {
             | TypedExpr::Return(..)
             | TypedExpr::MacroCall(..)
             | TypedExpr::FieldAssign(..)
-            | TypedExpr::IndexAssign(..) => Type::Unit,
+            | TypedExpr::IndexAssign(..)
+            | TypedExpr::DerefAssign(..) => Type::Unit,
         }
     }
 
@@ -549,6 +563,8 @@ impl TypedExpr {
             TypedExpr::EnumConstruct(_, _, _, _, _, s) => s.clone(),
             TypedExpr::Match(_, _, _, s) => s.clone(),
             TypedExpr::CastF32(_, s) | TypedExpr::CastI32(_, s) => s.clone(),
+            TypedExpr::Deref(_, _, s) => s.clone(),
+            TypedExpr::DerefAssign(_, _, s) => s.clone(),
         }
     }
 }

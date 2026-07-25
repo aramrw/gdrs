@@ -617,11 +617,17 @@ pub fn compile_expr(
                 sig.returns.push(AbiParam::new(ret_cranelift_ty));
             }
 
+            let target_symbol_name = if name == "rc_new" || name == "arc_new" || name == "rc_clone" || name == "arc_clone" {
+                format!("intrinsic_{}", name)
+            } else {
+                name.clone()
+            };
+
             let sym_ptr = unsafe {
-                if let Ok(c_name) = std::ffi::CString::new(name.as_str()) {
+                if let Ok(c_name) = std::ffi::CString::new(target_symbol_name.as_str()) {
                     let p = libc::dlsym(libc::RTLD_DEFAULT, c_name.as_ptr());
                     if p.is_null() {
-                        let c_mangled = std::ffi::CString::new(format!("_{}", name)).unwrap();
+                        let c_mangled = std::ffi::CString::new(format!("_{}", target_symbol_name)).unwrap();
                         libc::dlsym(libc::RTLD_DEFAULT, c_mangled.as_ptr())
                     } else {
                         p
@@ -642,7 +648,7 @@ pub fn compile_expr(
                 }
             } else {
                 let callee = module
-                    .declare_function(name, Linkage::Import, &sig)
+                    .declare_function(&target_symbol_name, Linkage::Import, &sig)
                     .unwrap();
                 let local_callee = module.declare_func_in_func(callee, builder.func);
                 let call_inst = builder.ins().call(local_callee, &compiled_args);
@@ -824,6 +830,18 @@ pub fn compile_expr(
             } else {
                 val
             }
+        }
+
+        TypedExpr::Deref(inner_expr, _ty, _) => {
+            let heap_ptr = compile_expr(builder, inner_expr, vars, var_counter, module, struct_layouts);
+            builder.ins().load(types::I64, MemFlags::new(), heap_ptr, 8)
+        }
+
+        TypedExpr::DerefAssign(ptr_expr, val_expr, _) => {
+            let heap_ptr = compile_expr(builder, ptr_expr, vars, var_counter, module, struct_layouts);
+            let val = compile_expr(builder, val_expr, vars, var_counter, module, struct_layouts);
+            builder.ins().store(MemFlags::new(), val, heap_ptr, 8);
+            builder.ins().iconst(types::I64, 0)
         }
 
         TypedExpr::CoerceToDyn(inner_expr, _trait_name, _) => {

@@ -243,10 +243,27 @@ pub fn stmt_parser<'a>(
             )
             .map_with_span(|(target, arms), span| Expr::Match(Box::new(target), arms, span));
 
+        let deref_assign_stmt = just(Token::Star)
+            .ignore_then(math.clone())
+            .then(assign_op.clone())
+            .then(math.clone())
+            .map_with_span(|((ptr, op), rhs), span| {
+                let final_rhs = match op {
+                    Some(make_expr) => {
+                        let lhs = Expr::Deref(Box::new(ptr.clone()), span.clone());
+                        make_expr(Box::new(lhs), Box::new(rhs), span.clone())
+                    }
+                    None => rhs,
+                };
+                Expr::DerefAssign(Box::new(ptr), Box::new(final_rhs), span)
+            })
+            .then_ignore(just(Token::Newline).or_not());
+
         just(Token::Newline)
             .repeated()
             .ignore_then(
-                let_stmt
+                deref_assign_stmt
+                    .or(let_stmt)
                     .or(index_assign_stmt)
                     .or(field_assign_stmt)
                     .or(assign_stmt)

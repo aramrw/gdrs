@@ -5,7 +5,11 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::default_libcall_names;
 use cranelift_native::builder as native_builder;
 
-use crate::codegen::intrinsics::{intrinsic_log, intrinsic_push_str, intrinsic_vec_pop, intrinsic_vec_push};
+use crate::codegen::intrinsics::{
+    intrinsic_arc_clone, intrinsic_arc_drop, intrinsic_arc_new, intrinsic_log,
+    intrinsic_push_str, intrinsic_rc_clone, intrinsic_rc_drop, intrinsic_rc_new,
+    intrinsic_vec_pop, intrinsic_vec_push,
+};
 
 /// Creates a new Cranelift JITModule configured for the host CPU architecture.
 pub fn create_jit_module() -> JITModule {
@@ -20,6 +24,12 @@ pub fn create_jit_module() -> JITModule {
     builder.symbol("intrinsic_push_str", intrinsic_push_str as *const u8);
     builder.symbol("intrinsic_vec_push", intrinsic_vec_push as *const u8);
     builder.symbol("intrinsic_vec_pop", intrinsic_vec_pop as *const u8);
+    builder.symbol("intrinsic_rc_new", intrinsic_rc_new as *const u8);
+    builder.symbol("intrinsic_arc_new", intrinsic_arc_new as *const u8);
+    builder.symbol("intrinsic_rc_clone", intrinsic_rc_clone as *const u8);
+    builder.symbol("intrinsic_arc_clone", intrinsic_arc_clone as *const u8);
+    builder.symbol("intrinsic_rc_drop", intrinsic_rc_drop as *const u8);
+    builder.symbol("intrinsic_arc_drop", intrinsic_arc_drop as *const u8);
 
     builder.symbol_lookup_fn(Box::new(|name| {
         let c_str = std::ffi::CString::new(name).ok()?;
