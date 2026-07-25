@@ -515,8 +515,11 @@ pub fn compile_expr(
             let mut sig = module.make_signature();
 
             for arg in args {
-                let compiled_arg =
+                let mut compiled_arg =
                     compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
+                if matches!(arg.ty(), Type::Str | Type::String) && !matches!(arg, TypedExpr::String(_, _)) {
+                    compiled_arg = builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::new(), compiled_arg, 0);
+                }
                 compiled_args.push(compiled_arg);
                 let param_ty = match arg.ty() {
                     Type::Float => types::F64,
@@ -529,14 +532,45 @@ pub fn compile_expr(
                 Type::Float => types::F64,
                 _ => types::I64,
             };
-            sig.returns.push(AbiParam::new(ret_cranelift_ty));
+            if *ret_ty != Type::Unit {
+                sig.returns.push(AbiParam::new(ret_cranelift_ty));
+            }
 
-            let callee = module
-                .declare_function(name, Linkage::Import, &sig)
-                .unwrap();
-            let local_callee = module.declare_func_in_func(callee, builder.func);
-            let call_inst = builder.ins().call(local_callee, &compiled_args);
-            builder.inst_results(call_inst)[0]
+            let sym_ptr = unsafe {
+                if let Ok(c_name) = std::ffi::CString::new(name.as_str()) {
+                    let p = libc::dlsym(libc::RTLD_DEFAULT, c_name.as_ptr());
+                    if p.is_null() {
+                        let c_mangled = std::ffi::CString::new(format!("_{}", name)).unwrap();
+                        libc::dlsym(libc::RTLD_DEFAULT, c_mangled.as_ptr())
+                    } else {
+                        p
+                    }
+                } else {
+                    std::ptr::null_mut()
+                }
+            };
+
+            if !sym_ptr.is_null() {
+                let sig_ref = builder.import_signature(sig);
+                let callee_val = builder.ins().iconst(types::I64, sym_ptr as i64);
+                let call_inst = builder.ins().call_indirect(sig_ref, callee_val, &compiled_args);
+                if *ret_ty != Type::Unit {
+                    builder.inst_results(call_inst)[0]
+                } else {
+                    builder.ins().iconst(types::I64, 0)
+                }
+            } else {
+                let callee = module
+                    .declare_function(name, Linkage::Import, &sig)
+                    .unwrap();
+                let local_callee = module.declare_func_in_func(callee, builder.func);
+                let call_inst = builder.ins().call(local_callee, &compiled_args);
+                if *ret_ty != Type::Unit {
+                    builder.inst_results(call_inst)[0]
+                } else {
+                    builder.ins().iconst(types::I64, 0)
+                }
+            }
         }
 
         // Boolean literal (1 for true, 0 for false)

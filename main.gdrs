@@ -1,57 +1,18 @@
-// Main test script for gdrs Traits, Default Methods, Trait Aliases, and Dynamic Dispatch
+// Test script for gdrs timing & micro-sleeping
 
-type DrawFoo = Foo + Drawable
-
-trait Foo:
-	fn bar(self) -> bool:
-		log!("Default Trait Method from Foo!")
-		return true
-
-trait Drawable:
-	fn draw(self) -> bool
-
-obj Button:
-	id: i64
-
-impl Button:
-	fn draw(self) -> bool:
-		log!("Button.draw() executed for ID:", self.id)
-		return true
-
-obj Canvas:
-	width: i64
-
-impl Canvas:
-	fn draw(self) -> bool:
-		log!("Canvas.draw() executed for Width:", self.width)
-		return true
-
-// Generic function with trait alias bound
-fn render_multiline(item: $T) -> bool
-where T: DrawFoo:
-	item.bar()
-	return item.draw()
-
-// Generic function with multiple trait bounds
-fn render_singleline(item: $T) -> bool 
-where T: Drawable + Foo:
-	item.bar()
-	return item.draw()
-
-fn render_dyn(item: dyn Drawable) -> bool:
-	log!("--- Dynamic Dispatch (dyn Trait) ---")
-	return item.draw()
+extern "C":
+	fn clock() -> i64
+	fn usleep(microseconds: i64) -> i64
 
 fn main():
-	log!("=== Testing GDRS Traits & Sugar Features ===")
+	log!("=== Testing GDRS Native Timing & Sleep ===")
 
-	let btn = Button{ id: 101 }
-	let cvs = Canvas{ width: 1920 }
+	let start_time = clock()
 
-	log!("--- Multiline $T Render (DrawFoo Trait Alias) ---")
-	render_multiline(btn)
+	log!("Sleeping for 250,000 microseconds (250ms)...")
+	usleep(250000)
 
-	log!("--- Single-line $T Render (Drawable + Foo Bounds) ---")
-	render_singleline(cvs)
+	let end_time = clock()
+	let elapsed = end_time - start_time
 
-	render_dyn(btn)
+	log!("Finished! CPU ticks elapsed:", elapsed)

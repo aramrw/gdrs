@@ -170,6 +170,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
     let enum_variant = select! { Token::Ident(name) => name }
         .then(
             type_parser
+                .clone()
                 .separated_by(just(Token::Comma))
                 .allow_trailing()
                 .delimited_by(just(Token::LParen), just(Token::RParen))
@@ -225,6 +226,36 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         .then_ignore(just(Token::Newline).or_not())
         .map_with_span(|path, span| UseDecl { path, alias: None, span });
 
+    let extern_fn_sig = just(Token::Fn)
+        .ignore_then(select! { Token::Ident(s) => s })
+        .then_ignore(just(Token::LParen))
+        .then(param.clone().separated_by(just(Token::Comma)).allow_trailing())
+        .then_ignore(just(Token::RParen))
+        .then(just(Token::Arrow).ignore_then(type_parser.clone()).or_not())
+        .then_ignore(just(Token::Newline).or_not())
+        .map_with_span(|((name, params), opt_ret), span| ExternFnDecl {
+            name,
+            params,
+            return_type: opt_ret.unwrap_or(Type::Unit),
+            span,
+        });
+
+    let extern_decl = just(Token::Extern)
+        .ignore_then(select! { Token::String(s) => s })
+        .then_ignore(just(Token::Colon))
+        .then_ignore(just(Token::Newline).or_not())
+        .then(
+            extern_fn_sig
+                .repeated()
+                .at_least(1)
+                .delimited_by(just(Token::Indent), just(Token::Dedent)),
+        )
+        .map_with_span(|(abi, functions), span| ExternDecl {
+            abi,
+            functions,
+            span,
+        });
+
     let item = just(Token::Newline)
         .repeated()
         .ignore_then(
@@ -233,6 +264,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
                 .or(use_decl.map(Item::Use))
                 .or(trait_decl.map(Item::Trait))
                 .or(trait_alias_decl.map(Item::TraitAlias))
+                .or(extern_decl.map(Item::Extern))
                 .or(function.map(Item::Func))
                 .or(obj_decl.map(Item::Struct))
                 .or(enum_decl.map(Item::Enum))
@@ -245,6 +277,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         let mut uses = Vec::new();
         let mut traits = Vec::new();
         let mut trait_aliases = Vec::new();
+        let mut externs = Vec::new();
         let mut structs = Vec::new();
         let mut enums = Vec::new();
         let mut impls = Vec::new();
@@ -255,6 +288,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
                 Item::Use(u) => uses.push(u),
                 Item::Trait(t) => traits.push(t),
                 Item::TraitAlias(ta) => trait_aliases.push(ta),
+                Item::Extern(ext) => externs.push(ext),
                 Item::Func(f) => functions.push(f),
                 Item::Struct(s) => structs.push(s),
                 Item::Enum(e) => enums.push(e),
@@ -266,6 +300,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
             uses,
             traits,
             trait_aliases,
+            externs,
             structs,
             enums,
             impls,
@@ -279,6 +314,7 @@ enum Item {
     Use(UseDecl),
     Trait(TraitDecl),
     TraitAlias(TraitAliasDecl),
+    Extern(ExternDecl),
     Func(FuncDecl),
     Struct(StructDecl),
     Enum(EnumDecl),

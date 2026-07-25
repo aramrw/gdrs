@@ -158,6 +158,8 @@ pub enum Token {
     TypeKw,
     #[token("dyn")]
     Dyn,
+    #[token("extern")]
+    Extern,
     #[token("$")]
     Dollar,
 
@@ -540,12 +542,28 @@ pub struct WhereClause {
     pub span: Span,
 }
 
+#[derive(Debug, Clone)]
+pub struct ExternFnDecl {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub return_type: Type,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternDecl {
+    pub abi: String,
+    pub functions: Vec<ExternFnDecl>,
+    pub span: Span,
+}
+
 #[derive(Debug)]
 pub struct Program {
     pub mods: Vec<ModDecl>,
     pub uses: Vec<UseDecl>,
     pub traits: Vec<TraitDecl>,
     pub trait_aliases: Vec<TraitAliasDecl>,
+    pub externs: Vec<ExternDecl>,
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
     pub impls: Vec<ImplDecl>,
@@ -565,6 +583,7 @@ pub struct FuncDecl {
 pub struct TypedProgram {
     pub traits: Vec<TraitDecl>,
     pub trait_aliases: Vec<TraitAliasDecl>,
+    pub externs: Vec<ExternDecl>,
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
     pub impls: Vec<ImplDecl>,

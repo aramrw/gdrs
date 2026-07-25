@@ -16,6 +16,7 @@ pub fn load_program(entry_file: &Path) -> Result<Program, String> {
         uses: Vec::new(),
         traits: Vec::new(),
         trait_aliases: Vec::new(),
+        externs: Vec::new(),
         structs: Vec::new(),
         enums: Vec::new(),
         impls: Vec::new(),
@@ -137,6 +138,8 @@ fn load_file_recursive(
         }
         merged_program.trait_aliases.push(ta);
     }
+
+    merged_program.externs.extend(program.externs);
 
     // Mangle and push structs
     for mut s in program.structs {

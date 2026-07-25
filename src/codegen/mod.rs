@@ -70,6 +70,8 @@ impl JitCompiler {
             }
         }
 
+        self.module.finalize_definitions();
+
         if let Some(ptr) = main_fn_ptr {
             unsafe {
                 let code_fn: extern "C" fn() -> i64 = mem::transmute(ptr);

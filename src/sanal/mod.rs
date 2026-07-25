@@ -151,6 +151,18 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
 
     all_functions.extend(program.functions.clone());
 
+    for ext in &program.externs {
+        for ef in &ext.functions {
+            all_functions.push(FuncDecl {
+                name: ef.name.clone(),
+                params: ef.params.clone(),
+                return_type: ef.return_type,
+                where_clause: None,
+                body: Vec::new(),
+            });
+        }
+    }
+
     // Populate default trait implementations for structs
     for t in &program.traits {
         for method in &t.methods {
@@ -262,6 +274,7 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
         Ok(TypedProgram {
             traits: program.traits.clone(),
             trait_aliases: program.trait_aliases.clone(),
+            externs: program.externs.clone(),
             structs: program.structs.clone(),
             enums: program.enums.clone(),
             impls: program.impls.clone(),
