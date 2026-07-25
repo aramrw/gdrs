@@ -77,7 +77,7 @@ impl ScopeStack {
     }
 }
 
-pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticError>> {
+pub fn check_semantics(program: &Program) -> Result<(TypedProgram, HashMap<String, StructLayout>), Vec<SemanticError>> {
     let mut errors = Vec::new();
     let mut typed_functions = Vec::new();
 
@@ -276,15 +276,18 @@ pub fn check_semantics(program: &Program) -> Result<TypedProgram, Vec<SemanticEr
 
     if errors.is_empty() {
         typed_functions.sort_by_key(|f| if f.name == "main" { 1 } else { 0 });
-        Ok(TypedProgram {
-            traits: program.traits.clone(),
-            trait_aliases: program.trait_aliases.clone(),
-            externs: program.externs.clone(),
-            structs: program.structs.clone(),
-            enums: program.enums.clone(),
-            impls: program.impls.clone(),
-            functions: typed_functions,
-        })
+        Ok((
+            TypedProgram {
+                traits: program.traits.clone(),
+                trait_aliases: program.trait_aliases.clone(),
+                externs: program.externs.clone(),
+                structs: program.structs.clone(),
+                enums: program.enums.clone(),
+                impls: program.impls.clone(),
+                functions: typed_functions,
+            },
+            struct_map,
+        ))
     } else {
         Err(errors)
     }

@@ -16,6 +16,8 @@ pub enum Token {
     Assign,
     #[token("+")]
     Plus,
+    #[token("..")]
+    DotDot,
     #[token("-")]
     Minus,
     #[token("*")]
@@ -323,6 +325,8 @@ pub enum Expr {
     Match(Box<Expr>, Vec<MatchArm>, Span),
     Deref(Box<Expr>, Span),
     DerefAssign(Box<Expr>, Box<Expr>, Span),
+    Closure(Vec<String>, Box<Expr>, Span),
+    Range(Box<Expr>, Box<Expr>, Span),
 }
 
 #[derive(Debug, Clone)]
@@ -389,6 +393,8 @@ impl Expr {
             Expr::Match(_, _, s) => s.clone(),
             Expr::Deref(_, s) => s.clone(),
             Expr::DerefAssign(_, _, s) => s.clone(),
+            Expr::Closure(_, _, s) => s.clone(),
+            Expr::Range(_, _, s) => s.clone(),
         }
     }
 }
@@ -457,6 +463,8 @@ pub enum TypedExpr {
     CastI32(Box<TypedExpr>, Span),
     Deref(Box<TypedExpr>, Type, Span),
     DerefAssign(Box<TypedExpr>, Box<TypedExpr>, Span),
+    Closure(String, Vec<(String, Type)>, Box<TypedExpr>, Type, Span),
+    Range(Box<TypedExpr>, Box<TypedExpr>, Type, Span),
 }
 
 impl TypedExpr {
@@ -500,7 +508,9 @@ impl TypedExpr {
             | TypedExpr::IndexAccess(_, _, ty, _)
             | TypedExpr::EnumConstruct(_, _, _, _, ty, _)
             | TypedExpr::Match(_, _, ty, _)
-            | TypedExpr::Deref(_, ty, _) => *ty,
+            | TypedExpr::Deref(_, ty, _)
+            | TypedExpr::Closure(_, _, _, ty, _)
+            | TypedExpr::Range(_, _, ty, _) => *ty,
             | TypedExpr::DynCall(_, _, _, ty, _) => *ty,
             TypedExpr::CoerceToDyn(_, trait_name, _) => Type::DynTrait(trait_name),
             TypedExpr::CastF32(..) => Type::F32,
@@ -565,6 +575,8 @@ impl TypedExpr {
             TypedExpr::CastF32(_, s) | TypedExpr::CastI32(_, s) => s.clone(),
             TypedExpr::Deref(_, _, s) => s.clone(),
             TypedExpr::DerefAssign(_, _, s) => s.clone(),
+            TypedExpr::Closure(_, _, _, _, s) => s.clone(),
+            TypedExpr::Range(_, _, _, s) => s.clone(),
         }
     }
 }

@@ -95,7 +95,30 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
 
         let ident = path.map_with_span(|name, span| Expr::Ident(name, span));
 
-        let atom = string
+        let closure_params = select! { Token::Ident(s) => s }
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .delimited_by(just(Token::Pipe), just(Token::Pipe))
+            .or(just(Token::Pipe).then(just(Token::Pipe)).to(Vec::new()));
+
+        let closure_block = closure_params
+            .clone()
+            .then_ignore(just(Token::Colon))
+            .then_ignore(just(Token::Newline).or_not())
+            .then(
+                math.clone()
+                    .delimited_by(just(Token::Indent), just(Token::Dedent))
+                    .or(math.clone()),
+            )
+            .map_with_span(|(params, body), span| Expr::Closure(params, Box::new(body), span));
+
+        let closure_expr = closure_params
+            .then(math.clone())
+            .map_with_span(|(params, body), span| Expr::Closure(params, Box::new(body), span));
+
+        let atom = closure_block
+            .or(closure_expr)
+            .or(string)
             .or(float_lit)
             .or(int)
             .or(boolean)
@@ -186,10 +209,21 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
                     make_expr(Box::new(lhs), Box::new(rhs), span)
                 });
 
+        let range_term = term
+            .clone()
+            .then(just(Token::DotDot).then(term.clone()).or_not())
+            .map(|(lhs, opt_rhs)| match opt_rhs {
+                Some((_, rhs)) => {
+                    let span = lhs.span().start..rhs.span().end;
+                    Expr::Range(Box::new(lhs), Box::new(rhs), span)
+                }
+                None => lhs,
+            });
+
         // 1. Shift operations (<<, >>) - Binds looser than +, - but tighter than comparisons
         let shift_term =
-            term.clone()
-                .then(shift_op.then(term).repeated())
+            range_term.clone()
+                .then(shift_op.then(range_term).repeated())
                 .foldl(|lhs, (make_expr, rhs)| {
                     let span = lhs.span().start..rhs.span().end;
                     make_expr(Box::new(lhs), Box::new(rhs), span)

@@ -259,6 +259,8 @@ pub fn stmt_parser<'a>(
             })
             .then_ignore(just(Token::Newline).or_not());
 
+        let math_stmt = math.clone().then_ignore(just(Token::Newline).or_not());
+
         just(Token::Newline)
             .repeated()
             .ignore_then(
@@ -275,6 +277,7 @@ pub fn stmt_parser<'a>(
                     .or(macro_call)
                     .or(method_call_stmt)
                     .or(call_stmt)
+                    .or(math_stmt)
                     .or(block),
             )
             .then_ignore(just(Token::Newline).repeated())

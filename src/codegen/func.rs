@@ -14,14 +14,14 @@ use crate::ast::{Type, TypedFuncDecl};
 use crate::codegen::expr::compile_expr;
 use crate::sanal::StructLayout;
 
-/// Compiles a single function declaration to native machine code in the JITModule.
-pub fn compile_func(
+/// Compiles a single function declaration to native machine code in the Module.
+pub fn compile_func<M: Module>(
     func: &TypedFuncDecl,
     struct_layouts: &HashMap<String, StructLayout>,
-    module: &mut JITModule,
+    module: &mut M,
     ctx: &mut Context,
     builder_context: &mut FunctionBuilderContext,
-) -> *const u8 {
+) -> Option<cranelift_module::FuncId> {
     ctx.func.clear();
     ctx.func.signature = module.make_signature();
 
@@ -98,18 +98,28 @@ pub fn compile_func(
         let final_ret = builder.use_var(ret_var);
         builder.ins().return_(&[final_ret]);
     }
-
-    builder.seal_all_blocks();
     builder.finalize();
 
+    let export_name = if func.name == "main" { "gdrs_main" } else { &func.name };
+
     // Declare & compile native function
-    let func_id = module
-        .declare_function(&func.name, Linkage::Export, &ctx.func.signature)
-        .unwrap();
+    let func_id = match module.get_name(export_name) {
+        Some(cranelift_module::FuncOrDataId::Func(id)) => id,
+        _ => module
+            .declare_function(export_name, Linkage::Export, &ctx.func.signature)
+            .unwrap(),
+    };
 
-    module.define_function(func_id, ctx).unwrap();
+    if let Err(e) = module.define_function(func_id, ctx) {
+        match e {
+            cranelift_module::ModuleError::DuplicateDefinition(_) => {
+                module.clear_context(ctx);
+                return Some(func_id);
+            }
+            err => panic!("define_function error: {:?}", err),
+        }
+    }
     module.clear_context(ctx);
-    module.finalize_definitions().unwrap();
 
-    module.get_finalized_function(func_id)
+    Some(func_id)
 }

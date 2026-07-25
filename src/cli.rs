@@ -1,18 +1,39 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "compiler", version = "0.1", about = "Compiler Cli")]
+#[command(name = "gdrs", version = "0.1", about = "gdrs programming language compiler toolchain")]
 pub struct Cli {
-    /// The input source files to compile (must end with .gdrs)
-    #[arg(required = true, value_parser = validate_gdrs_extension)]
-    pub srcs: Vec<PathBuf>, 
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+
+    /// Direct input source files for JIT execution (e.g. `gdrs main.gdrs`)
+    #[arg(value_parser = validate_gdrs_extension)]
+    pub srcs: Vec<PathBuf>,
 }
 
-/// Custom validator to check for the .gdrs extension
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// JIT compile and run directly in memory (0.06s fast dev loop)
+    Run {
+        /// Source file to run
+        #[arg(value_parser = validate_gdrs_extension)]
+        src: PathBuf,
+    },
+    /// AOT compile to a standalone native binary executable
+    Build {
+        /// Source file to build
+        #[arg(value_parser = validate_gdrs_extension)]
+        src: PathBuf,
+
+        /// Output binary executable path
+        #[arg(short, long, default_value = "main")]
+        output: String,
+    },
+}
+
 fn validate_gdrs_extension(val: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(val);
-
     match path.extension() {
         Some(ext) if ext == "gdrs" => Ok(path),
         _ => Err(format!(

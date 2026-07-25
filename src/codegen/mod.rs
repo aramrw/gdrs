@@ -5,6 +5,7 @@ pub mod expr;
 pub mod func;
 pub mod intrinsics;
 pub mod jit;
+pub mod object;
 
 use std::collections::HashMap;
 use std::mem;

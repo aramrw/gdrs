@@ -1,5 +1,5 @@
 fn main():
-	// 1. Create a heap-allocated reference-counted integer (*rc)
+	// 1. Create a heap-allocated reference-counted integer (rc[T])
 	let ptr1 = rc.new(48)
 	let ptr2 = ptr1.clone()
 
@@ -11,10 +11,14 @@ fn main():
 	log!("Mutated *rc value via ptr1:", *ptr1)
 	log!("Mutated *rc value via ptr2:", *ptr2)
 
-	// 3. Create a thread-safe Atomic Reference Counted pointer (*arc)
+	// 3. Create a thread-safe Atomic Reference Counted pointer (arc[T])
 	let aptr = arc.new(100)
 	let aptr_copy = aptr.clone()
 
 	log!("Initial *arc value:", *aptr)
 	*aptr_copy = 777
 	log!("Mutated *arc value via clone:", *aptr)
+
+	// 4. Thread-safe atomic pointer sharing across background OS threads via thread! macro & inline closure
+	log!("Spawning background OS thread with thread! macro and inline closure...")
+	thread!(|shared_handle| log!("Background OS thread reading *arc payload:", *shared_handle), aptr.clone())

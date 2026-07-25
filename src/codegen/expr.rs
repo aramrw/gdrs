@@ -17,12 +17,12 @@ use crate::ast::{Type, TypedExpr};
 use crate::sanal::StructLayout;
 
 /// Recursively compiles a `TypedExpr` into a Cranelift IR `Value`.
-pub fn compile_expr(
+pub fn compile_expr<M: Module>(
     builder: &mut FunctionBuilder,
     expr: &TypedExpr,
     vars: &mut HashMap<String, Variable>,
     var_counter: &mut usize,
-    module: &mut JITModule,
+    module: &mut M,
     struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
     match expr {
@@ -410,10 +410,27 @@ pub fn compile_expr(
             val
         }
 
-        // Variable Lookup -> Read value from variable
+        // Variable or Function Pointer Lookup
         TypedExpr::Ident(name, _, _) => {
-            let var = vars.get(name).expect("Undefined variable during codegen");
-            builder.use_var(*var)
+            if let Some(var) = vars.get(name) {
+                builder.use_var(*var)
+            } else {
+                if let Ok(c_name) = std::ffi::CString::new(name.as_str()) {
+                    let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c_name.as_ptr()) };
+                    if !p.is_null() {
+                        return builder.ins().iconst(types::I64, p as i64);
+                    }
+                }
+                let mut sig = module.make_signature();
+                sig.params.push(AbiParam::new(types::I64));
+                sig.returns.push(AbiParam::new(types::I64));
+                let callee = match module.get_name(name) {
+                    Some(cranelift_module::FuncOrDataId::Func(id)) => id,
+                    _ => module.declare_function(name, Linkage::Export, &sig).unwrap(),
+                };
+                let local_callee = module.declare_func_in_func(callee, builder.func);
+                builder.ins().func_addr(types::I64, local_callee)
+            }
         }
 
         TypedExpr::Return(opt_expr, _) => {
@@ -615,6 +632,17 @@ pub fn compile_expr(
             };
             if *ret_ty != Type::Unit {
                 sig.returns.push(AbiParam::new(ret_cranelift_ty));
+            }
+
+            if let Some(var) = vars.get(name) {
+                let func_ptr = builder.use_var(*var);
+                let sig_ref = builder.import_signature(sig);
+                let call_inst = builder.ins().call_indirect(sig_ref, func_ptr, &compiled_args);
+                if *ret_ty != Type::Unit {
+                    return builder.inst_results(call_inst)[0];
+                } else {
+                    return builder.ins().iconst(types::I64, 0);
+                }
             }
 
             let target_symbol_name = if name == "rc_new" || name == "arc_new" || name == "rc_clone" || name == "arc_clone" {
@@ -842,6 +870,73 @@ pub fn compile_expr(
             let val = compile_expr(builder, val_expr, vars, var_counter, module, struct_layouts);
             builder.ins().store(MemFlags::new(), val, heap_ptr, 8);
             builder.ins().iconst(types::I64, 0)
+        }
+
+        TypedExpr::Closure(closure_name, params, body, ret_ty, span) => {
+            use cranelift_frontend::FunctionBuilderContext;
+
+            let mut func_params = Vec::new();
+            for (p_name, p_ty) in params {
+                func_params.push(crate::ast::Param {
+                    name: p_name.clone(),
+                    is_mutable: false,
+                    ty: *p_ty,
+                    span: span.clone(),
+                });
+            }
+
+            let func_decl = crate::ast::TypedFuncDecl {
+                name: closure_name.clone(),
+                params: func_params,
+                return_type: *ret_ty,
+                where_clause: None,
+                body: vec![body.as_ref().clone()],
+            };
+
+            let mut sig = module.make_signature();
+            for _ in params {
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            }
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+
+            let callee = match module.get_name(closure_name) {
+                Some(cranelift_module::FuncOrDataId::Func(id)) => id,
+                _ => module.declare_function(closure_name, Linkage::Export, &sig).unwrap(),
+            };
+
+            let mut new_ctx = module.make_context();
+            let mut new_builder_ctx = FunctionBuilderContext::new();
+
+            crate::codegen::func::compile_func(
+                &func_decl,
+                struct_layouts,
+                module,
+                &mut new_ctx,
+                &mut new_builder_ctx,
+            );
+
+            let local_callee = module.declare_func_in_func(callee, builder.func);
+            builder.ins().func_addr(types::I64, local_callee)
+        }
+
+        TypedExpr::Range(start_expr, end_expr, _, _) => {
+            let start = compile_expr(builder, start_expr, vars, var_counter, module, struct_layouts);
+            let end = compile_expr(builder, end_expr, vars, var_counter, module, struct_layouts);
+
+            let mut malloc_sig = module.make_signature();
+            malloc_sig.params.push(AbiParam::new(types::I64));
+            malloc_sig.returns.push(AbiParam::new(types::I64));
+            let callee = module
+                .declare_function("malloc", Linkage::Import, &malloc_sig)
+                .unwrap();
+            let local_callee = module.declare_func_in_func(callee, builder.func);
+            let size_val = builder.ins().iconst(types::I64, 16);
+            let call_inst = builder.ins().call(local_callee, &[size_val]);
+            let heap_ptr = builder.inst_results(call_inst)[0];
+
+            builder.ins().store(MemFlags::new(), start, heap_ptr, 0);
+            builder.ins().store(MemFlags::new(), end, heap_ptr, 8);
+            heap_ptr
         }
 
         TypedExpr::CoerceToDyn(inner_expr, _trait_name, _) => {

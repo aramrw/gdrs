@@ -103,6 +103,70 @@ pub extern "C" fn intrinsic_arc_drop(ptr: *mut u64) {
     }
 }
 
+pub extern "C" fn intrinsic_spawn_thread(func_ptr: u64, arg: u64) {
+    if func_ptr == 0 {
+        return;
+    }
+    std::thread::spawn(move || unsafe {
+        let f: extern "C" fn(u64) -> u64 = std::mem::transmute(func_ptr as *const ());
+        f(arg);
+    });
+}
+
+pub extern "C" fn intrinsic_iter_for_each(range_ptr: *mut u64, func_ptr: u64) {
+    if range_ptr.is_null() || func_ptr == 0 {
+        return;
+    }
+    unsafe {
+        let start = *range_ptr;
+        let end = *range_ptr.add(1);
+        let f: extern "C" fn(u64) -> u64 = std::mem::transmute(func_ptr as *const ());
+        for i in start..end {
+            f(i);
+        }
+    }
+}
+
+pub extern "C" fn intrinsic_iter_map(range_ptr: *mut u64, closure_ptr: u64) -> *mut u64 {
+    if range_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        let ptr = malloc(24) as *mut u64;
+        *ptr = *range_ptr;
+        *ptr.add(1) = *range_ptr.add(1);
+        *ptr.add(2) = closure_ptr;
+        ptr
+    }
+}
+
+pub extern "C" fn intrinsic_map_for_each(map_iter_ptr: *mut u64, consumer_func_ptr: u64) {
+    if map_iter_ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let start = *map_iter_ptr;
+        let end = *map_iter_ptr.add(1);
+        let map_fn_ptr = *map_iter_ptr.add(2);
+        if map_fn_ptr == 0 {
+            return;
+        }
+        let map_fn: extern "C" fn(u64) -> u64 = std::mem::transmute(map_fn_ptr as *const ());
+
+        if consumer_func_ptr != 0 {
+            let consumer_fn: extern "C" fn(u64) -> u64 = std::mem::transmute(consumer_func_ptr as *const ());
+            for i in start..end {
+                let mapped_val = map_fn(i);
+                consumer_fn(mapped_val);
+            }
+        } else {
+            for i in start..end {
+                map_fn(i);
+            }
+        }
+    }
+}
+
 pub extern "C" fn intrinsic_push_str(header_ptr: *mut u64, append_str_ptr: *const std::os::raw::c_char) {
     if header_ptr.is_null() || append_str_ptr.is_null() {
         return;
@@ -202,11 +266,11 @@ pub extern "C" fn intrinsic_vec_pop(header_ptr: *mut u64) -> u64 {
 use std::sync::atomic::{AtomicUsize, Ordering};
 static STR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-fn compile_string_constant(
+fn compile_string_constant<M: Module>(
     builder: &mut FunctionBuilder,
     s: &str,
     _var_counter: &mut usize,
-    module: &mut JITModule,
+    module: &mut M,
 ) -> Value {
     use cranelift_module::DataDescription;
     let mut data_ctx = DataDescription::new();
@@ -226,16 +290,39 @@ fn compile_string_constant(
 }
 
 /// Central dispatcher for all compiler macro intrinsics (`macro_name!(...)`)
-pub fn compile_macro_call(
+pub fn compile_macro_call<M: Module>(
     builder: &mut FunctionBuilder,
     name: &str,
     args: &[TypedExpr],
     vars: &mut HashMap<String, Variable>,
     var_counter: &mut usize,
-    module: &mut JITModule,
+    module: &mut M,
     struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
     match name {
+        "thread" | "spawn" => {
+            if args.is_empty() {
+                return builder.ins().iconst(types::I64, 0);
+            }
+            let func_ptr = compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
+            let arg_val = if args.len() > 1 {
+                compile_expr(builder, &args[1], vars, var_counter, module, struct_layouts)
+            } else {
+                builder.ins().iconst(types::I64, 0)
+            };
+
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+
+            let callee = module
+                .declare_function("intrinsic_spawn_thread", Linkage::Import, &sig)
+                .unwrap();
+            let local_callee = module.declare_func_in_func(callee, builder.func);
+            let call_inst = builder.ins().call(local_callee, &[func_ptr, arg_val]);
+            builder.inst_results(call_inst)[0]
+        }
         "log" | "println" => {
             let mut last_val = builder.ins().iconst(types::I64, 0);
             for arg in args {

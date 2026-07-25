@@ -50,8 +50,8 @@ pub fn type_check_expr<'a>(
                     Some(TypedExpr::Ident(name.clone(), Type::Obj(intern_str(&normalized)), span.clone()))
                 } else if type_ctx.enum_map.contains_key(&normalized) {
                     Some(TypedExpr::Ident(name.clone(), Type::Enum(intern_str(&normalized)), span.clone()))
-                } else if name == "rc" || name == "arc" {
-                    Some(TypedExpr::Ident(name.clone(), Type::Unit, span.clone()))
+                } else if name == "rc" || name == "arc" || type_ctx.fn_map.contains_key(name) || type_ctx.fn_map.contains_key(&normalized) {
+                    Some(TypedExpr::Ident(name.clone(), Type::Int, span.clone()))
                 } else {
                     errors.push(SemanticError {
                         message: format!("Undefined variable '{name}'"),
@@ -67,8 +67,8 @@ pub fn type_check_expr<'a>(
                     Some(TypedExpr::Ident(name.clone(), Type::Obj(intern_str(&normalized)), span.clone()))
                 } else if type_ctx.enum_map.contains_key(&normalized) {
                     Some(TypedExpr::Ident(name.clone(), Type::Enum(intern_str(&normalized)), span.clone()))
-                } else if name == "rc" || name == "arc" {
-                    Some(TypedExpr::Ident(name.clone(), Type::Unit, span.clone()))
+                } else if name == "rc" || name == "arc" || type_ctx.fn_map.contains_key(name) || type_ctx.fn_map.contains_key(&normalized) {
+                    Some(TypedExpr::Ident(name.clone(), Type::Int, span.clone()))
                 } else {
                     errors.push(SemanticError {
                         message: format!("Undefined variable '{name}'"),
@@ -707,6 +707,29 @@ pub fn type_check_expr<'a>(
         }
 
         Expr::MacroCall(name, args, span) => {
+            if (name == "thread" || name == "spawn") && args.len() == 2 {
+                if let Expr::Closure(params, body, c_span) = &args[0] {
+                    if let Some(t_arg1) = type_check_expr(scopes, errors, type_ctx, &args[1]) {
+                        static CLOSURE_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                        let closure_name = format!("__closure_{}", CLOSURE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+
+                        scopes.push_scope();
+                        let param_ty = t_arg1.ty();
+                        let mut typed_params = Vec::new();
+                        for p in params {
+                            scopes.declare(p.clone(), false, param_ty);
+                            typed_params.push((p.clone(), param_ty));
+                        }
+
+                        let t_body = type_check_expr(scopes, errors, type_ctx, body).unwrap_or(TypedExpr::Int(0, c_span.clone()));
+                        scopes.pop_scope();
+
+                        let t_closure = TypedExpr::Closure(closure_name, typed_params, Box::new(t_body), Type::Int, c_span.clone());
+                        return Some(TypedExpr::MacroCall(name.clone(), vec![t_closure, t_arg1], span.clone()));
+                    }
+                }
+            }
+
             let mut typed_args = Vec::new();
             for arg in args {
                 if let Some(t_arg) = type_check_expr(scopes, errors, type_ctx, arg) {
@@ -899,6 +922,29 @@ pub fn type_check_expr<'a>(
                     }
                 }
 
+                if name == "iter" && !typed_args.is_empty() {
+                    let target_ty = typed_args[0].ty();
+                    match target_ty {
+                        Type::Obj(s_name) if s_name == "Range" => {
+                            return Some(typed_args.remove(0));
+                        }
+                        _ => {}
+                    }
+                }
+
+                if name == "map" && !typed_args.is_empty() {
+                    return Some(TypedExpr::Call("intrinsic_iter_map".to_string(), typed_args, Type::Obj(crate::ast::intern_str("MapIter")), span.clone()));
+                }
+
+                if name == "for_each" && !typed_args.is_empty() {
+                    let target_ty = typed_args[0].ty();
+                    if target_ty == Type::Obj(crate::ast::intern_str("MapIter")) {
+                        return Some(TypedExpr::Call("intrinsic_map_for_each".to_string(), typed_args, Type::Unit, span.clone()));
+                    } else {
+                        return Some(TypedExpr::Call("intrinsic_iter_for_each".to_string(), typed_args, Type::Unit, span.clone()));
+                    }
+                }
+
             if resolved_name == name {
                     let first_arg_ty = typed_args[0].ty();
                     let type_name = match first_arg_ty {
@@ -939,7 +985,9 @@ pub fn type_check_expr<'a>(
                 });
             }
 
-            let ret_ty = if let Some(target_func) = type_ctx.fn_map.get(&resolved_name) {
+            let ret_ty = if scopes.lookup(&resolved_name).is_some() {
+                Type::Int
+            } else if let Some(target_func) = type_ctx.fn_map.get(&resolved_name) {
                 if target_func.params.len() != typed_args.len() {
                     errors.push(SemanticError {
                         message: format!(
@@ -1306,6 +1354,29 @@ pub fn type_check_expr<'a>(
                     Some(TypedExpr::DerefAssign(Box::new(t_ptr), Box::new(t_val), span.clone()))
                 }
             }
+        }
+
+        Expr::Closure(params, body, span) => {
+            static CLOSURE_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let closure_name = format!("__closure_{}", CLOSURE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+
+            scopes.push_scope();
+            let mut typed_params = Vec::new();
+            for p in params {
+                scopes.declare(p.clone(), false, Type::Int);
+                typed_params.push((p.clone(), Type::Int));
+            }
+
+            let t_body = type_check_expr(scopes, errors, type_ctx, body).unwrap_or(TypedExpr::Int(0, span.clone()));
+            scopes.pop_scope();
+
+            Some(TypedExpr::Closure(closure_name, typed_params, Box::new(t_body), Type::Int, span.clone()))
+        }
+
+        Expr::Range(start, end, span) => {
+            let t_start = type_check_expr(scopes, errors, type_ctx, start)?;
+            let t_end = type_check_expr(scopes, errors, type_ctx, end)?;
+            Some(TypedExpr::Range(Box::new(t_start), Box::new(t_end), Type::Obj(crate::ast::intern_str("Range")), span.clone()))
         }
     }
 }
