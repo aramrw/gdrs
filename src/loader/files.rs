@@ -42,9 +42,13 @@ pub fn load_file_recursive(
     let eof_span = source.len()..source.len();
     let stream = chumsky::Stream::from_iter(eof_span, processed_tokens.into_iter());
 
-    let program = parser()
-        .parse(stream)
-        .map_err(|errs| format!("Parse error in '{}': {:?}", canonical.display(), errs))?;
+    let program = match parser().parse(stream) {
+        Ok(prog) => prog,
+        Err(errs) => {
+            crate::diagnostics::print_syntax_errors(&canonical, &source, errs);
+            return Err(format!("Parse error in '{}'", canonical.display()));
+        }
+    };
 
     let prefix_str = if mod_prefix.is_empty() {
         "".to_string()

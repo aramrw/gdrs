@@ -47,6 +47,7 @@ pub fn type_check_array_init<'a>(
     for (i, elem) in typed_elems.iter().enumerate().skip(1) {
         if elem.ty() != elem_ty {
             errors.push(SemanticError {
+                code: "E0308",
                 message: format!(
                     "Array elements must all have the same type. Expected `{:?}`, element {} has type `{:?}`",
                     elem_ty,
@@ -54,6 +55,7 @@ pub fn type_check_array_init<'a>(
                     elem.ty()
                 ),
                 label: format!("Expected `{:?}`", elem_ty),
+                secondary_label: None,
                 help: Some("Arrays are homogeneous and cannot hold mixed types".into()),
                 span: elem.span().clone(),
             });
@@ -77,8 +79,10 @@ pub fn type_check_index_access<'a>(
 
     if !matches!(t_idx.ty(), Type::Int | Type::I32) {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("Array index must be an `Int`, found `{:?}`", t_idx.ty()),
             label: "Invalid index type".into(),
+            secondary_label: None,
             help: None,
             span: t_idx.span().clone(),
         });
@@ -88,8 +92,10 @@ pub fn type_check_index_access<'a>(
         Type::Array(e_ty, _) | Type::Slice(e_ty) | Type::Vec(e_ty) => *e_ty,
         other_ty => {
             errors.push(SemanticError {
+                code: "E0308",
                 message: format!("Cannot index into non-array type `{:?}`", other_ty),
                 label: "Not an array".into(),
+                secondary_label: None,
                 help: None,
                 span: t_target.span().clone(),
             });
@@ -120,8 +126,10 @@ pub fn type_check_index_assign<'a>(
 
     if !matches!(t_idx.ty(), Type::Int | Type::I32) {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("Array index must be an `Int`, found `{:?}`", t_idx.ty()),
             label: "Invalid index type".into(),
+            secondary_label: None,
             help: None,
             span: t_idx.span().clone(),
         });
@@ -134,12 +142,14 @@ pub fn type_check_index_assign<'a>(
     if let Some(elem_ty) = opt_elem_ty {
         if elem_ty != t_val.ty() {
             errors.push(SemanticError {
+                code: "E0308",
                 message: format!(
                     "Cannot assign type `{:?}` to array holding `{:?}`",
                     t_val.ty(),
                     elem_ty
                 ),
                 label: "Type mismatch".into(),
+                secondary_label: None,
                 help: None,
                 span: t_val.span().clone(),
             });
@@ -177,10 +187,12 @@ pub fn type_check_obj_init<'a>(
         for (expected_field, (_, expected_ty)) in &layout.field_offsets {
             if !typed_fields.iter().any(|(f, _)| f == expected_field) {
                 errors.push(SemanticError {
+                    code: "E0063",
                     message: format!(
                         "Missing field '{expected_field}' in struct initialization of '{name}'"
                     ),
                     label: format!("Field '{expected_field}: {expected_ty:?}' is missing"),
+                    secondary_label: None,
                     help: None,
                     span: span.clone(),
                 });
@@ -191,20 +203,24 @@ pub fn type_check_obj_init<'a>(
             if let Some((_, expected_ty)) = layout.field_offsets.get(f_name) {
                 if !is_obj_field_type_compatible(expected_ty, &f_expr.ty()) {
                     errors.push(SemanticError {
+                        code: "E0308",
                         message: format!(
                             "Field '{f_name}' in struct '{name}' expects type `{:?}`, found `{:?}`",
                             expected_ty,
                             f_expr.ty()
                         ),
                         label: format!("Expected `{:?}`", expected_ty),
+                        secondary_label: None,
                         help: None,
                         span: f_expr.span().clone(),
                     });
                 }
             } else {
                 errors.push(SemanticError {
+                    code: "E0599",
                     message: format!("Struct '{name}' has no field named '{f_name}'"),
                     label: "Unknown field".into(),
+                    secondary_label: None,
                     help: None,
                     span: f_expr.span().clone(),
                 });
@@ -213,8 +229,10 @@ pub fn type_check_obj_init<'a>(
         mangled_name.as_str()
     } else {
         errors.push(SemanticError {
+            code: "E0425",
             message: format!("Undefined struct '{name}'"),
             label: "Struct does not exist".into(),
+            secondary_label: None,
             help: None,
             span: span.clone(),
         });
@@ -272,8 +290,10 @@ pub fn type_check_field_access<'a>(
                 field_ty = *fty;
             } else {
                 errors.push(SemanticError {
+                    code: "E0599",
                     message: format!("Struct '{struct_name}' has no field '{field_name}'"),
                     label: "Field not found".to_string(),
+                    secondary_label: None,
                     help: None,
                     span: span.clone(),
                 });
@@ -281,8 +301,10 @@ pub fn type_check_field_access<'a>(
         }
     } else {
         errors.push(SemanticError {
+            code: "E0599",
             message: format!("Cannot access field on non-object type {:?}", t_target.ty()),
             label: "Not a struct object".to_string(),
+            secondary_label: None,
             help: None,
             span: span.clone(),
         });
@@ -317,8 +339,10 @@ pub fn type_check_field_assign<'a>(
             let is_ref = matches!(info.ty, Type::Ref(_) | Type::MutRef(_));
             if !info.is_mutable && !is_ref {
                 errors.push(SemanticError {
+                    code: "E0382",
                     message: format!("Cannot mutate field of immutable object '{var_name}'"),
                     label: "Object is immutable".to_string(),
+                    secondary_label: None,
                     help: Some(format!("Declare as mutable: 'let mut {var_name}'")),
                     span: span.clone(),
                 });

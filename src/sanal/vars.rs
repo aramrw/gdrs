@@ -69,8 +69,10 @@ pub fn type_check_ident<'a>(
             Some(TypedExpr::Ident(name.to_string(), Type::Int, span.clone()))
         } else {
             errors.push(SemanticError {
+                code: "E0425",
                 message: format!("Undefined variable '{name}'"),
                 label: "Variable does not exist in this scope".to_string(),
+                secondary_label: None,
                 help: None,
                 span: span.clone(),
             });
@@ -131,8 +133,10 @@ pub fn type_check_ident<'a>(
             Some(TypedExpr::Ident(name.to_string(), Type::Int, span.clone()))
         } else {
             errors.push(SemanticError {
+                code: "E0425",
                 message: format!("Undefined variable '{name}'"),
                 label: "Variable does not exist in this scope".to_string(),
+                secondary_label: None,
                 help: None,
                 span: span.clone(),
             });
@@ -163,10 +167,12 @@ pub fn type_check_let<'a>(
         };
         if !compatible {
             errors.push(SemanticError {
+                code: "E0308",
                 message: format!(
                     "Cannot assign value of type `{inferred_ty:?}` to variable '{name}' declared as `{annotated:?}`"
                 ),
                 label: "Type mismatch in let binding".to_string(),
+                secondary_label: None,
                 help: None,
                 span: span.clone(),
             });
@@ -224,8 +230,10 @@ pub fn type_check_assign<'a>(
     if let Some(info) = scopes.lookup(name) {
         if !info.is_mutable {
             errors.push(SemanticError {
+                code: "E0382",
                 message: format!("Cannot reassign immutable variable '{name}'"),
                 label: format!("Variable '{name}' is immutable"),
+                secondary_label: None,
                 help: Some(format!(
                     "Consider declaring this variable as mutable: 'let mut {name}'"
                 )),
@@ -248,19 +256,23 @@ pub fn type_check_assign<'a>(
 
         if !is_compatible {
             errors.push(SemanticError {
+                code: "E0308",
                 message: format!(
                     "Cannot assign type `{:?}` to variable '{name}' of type `{:?}`",
                     val_ty, info.ty
                 ),
                 label: "Type mismatch".to_string(),
+                secondary_label: None,
                 help: None,
                 span: span.clone(),
             });
         }
     } else {
         errors.push(SemanticError {
+            code: "E0425",
             message: format!("Cannot assign to undefined variable '{name}'"),
             label: format!("Variable '{name}' does not exist in this scope"),
+            secondary_label: None,
             help: None,
             span: span.clone(),
         });

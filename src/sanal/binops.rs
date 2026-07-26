@@ -42,8 +42,10 @@ pub fn check_binary_op(
         (Type::Generic(g), _) | (_, Type::Generic(g)) => Type::Generic(g),
         _ => {
             errors.push(SemanticError {
+                code: "E0308",
                 message: format!("Cannot perform '{op_name}' on types `{l_ty:?}` and `{r_ty:?}`"),
                 label: format!("Type mismatch: `{l_ty:?}` vs `{r_ty:?}`"),
+                secondary_label: None,
                 help: if !allow_float && (is_float(l_ty) || is_float(r_ty)) {
                     Some("Bitwise operations can only be used on integers.".into())
                 } else {
@@ -302,8 +304,10 @@ pub fn type_check_neg<'a>(
 
     if !matches!(ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_)) {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("Cannot negate non-numeric type `{:?}`", ty),
             label: "Invalid negation".into(),
+            secondary_label: None,
             help: Some("The '-' operator can only be used on integers and floats".into()),
             span: span.clone(),
         });
@@ -323,8 +327,10 @@ pub fn type_check_not<'a>(
 
     if t_val.ty() != Type::Bool {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("Cannot apply logical NOT to non-boolean type `{:?}`", t_val.ty()),
             label: "Expected boolean expression".into(),
+            secondary_label: None,
             help: None,
             span: span.clone(),
         });
@@ -351,8 +357,10 @@ pub fn type_check_greater_than<'a>(
         || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
     {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '>'"),
             label: "Invalid comparison operator".into(),
+            secondary_label: None,
             help: Some("Ordering comparisons can only be used on numbers (`Int` or `Float`)".into()),
             span: span.clone(),
         });
@@ -383,8 +391,10 @@ pub fn type_check_less_than<'a>(
         || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
     {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '<'"),
             label: "Invalid comparison operator".into(),
+            secondary_label: None,
             help: Some("Ordering comparisons can only be used on numbers (`Int` or `Float`)".into()),
             span: span.clone(),
         });
@@ -415,8 +425,10 @@ pub fn type_check_greater_equal<'a>(
         || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
     {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '>='"),
             label: "Invalid comparison operator".into(),
+            secondary_label: None,
             help: Some("Ordering comparisons can only be used on numbers (`Int` or `Float`)".into()),
             span: span.clone(),
         });
@@ -447,8 +459,10 @@ pub fn type_check_less_equal<'a>(
         || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
     {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '<='"),
             label: "Invalid comparison operator".into(),
+            secondary_label: None,
             help: Some("Ordering comparisons can only be used on numbers (`Int` or `Float`)".into()),
             span: span.clone(),
         });
@@ -482,8 +496,10 @@ pub fn type_check_equal<'a>(
     );
     if l_ty != r_ty && !numeric_compatible {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("Cannot compare distinct types `{l_ty:?}` and `{r_ty:?}` for equality"),
             label: format!("Type mismatch: `{l_ty:?}` vs `{r_ty:?}`"),
+            secondary_label: None,
             help: Some("Both operands must be the same type to check for equality".into()),
             span: span.clone(),
         });
@@ -517,8 +533,10 @@ pub fn type_check_not_equal<'a>(
     );
     if l_ty != r_ty && !numeric_compatible {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("Cannot compare distinct types `{l_ty:?}` and `{r_ty:?}` for equality"),
             label: format!("Type mismatch: `{l_ty:?}` vs `{r_ty:?}`"),
+            secondary_label: None,
             help: Some("Both operands must be the same type to check for equality".into()),
             span: span.clone(),
         });
@@ -544,8 +562,10 @@ pub fn type_check_and<'a>(
 
     if t_lhs.ty() != Type::Bool {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("Left side of '&&' must be a `Bool`, found `{:?}`", t_lhs.ty()),
             label: "Expected boolean".into(),
+            secondary_label: None,
             help: None,
             span: t_lhs.span().clone(),
         });
@@ -553,8 +573,10 @@ pub fn type_check_and<'a>(
 
     if t_rhs.ty() != Type::Bool {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("Right side of '&&' must be a `Bool`, found `{:?}`", t_rhs.ty()),
             label: "Expected boolean".into(),
+            secondary_label: None,
             help: None,
             span: t_rhs.span().clone(),
         });
@@ -580,8 +602,10 @@ pub fn type_check_or<'a>(
 
     if t_lhs.ty() != Type::Bool {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("Left side of '||' must be a `Bool`, found `{:?}`", t_lhs.ty()),
             label: "Expected boolean".into(),
+            secondary_label: None,
             help: None,
             span: t_lhs.span().clone(),
         });
@@ -589,8 +613,10 @@ pub fn type_check_or<'a>(
 
     if t_rhs.ty() != Type::Bool {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("Right side of '||' must be a `Bool`, found `{:?}`", t_rhs.ty()),
             label: "Expected boolean".into(),
+            secondary_label: None,
             help: None,
             span: t_rhs.span().clone(),
         });

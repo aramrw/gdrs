@@ -63,8 +63,10 @@ pub fn type_check_match<'a>(
         Type::Obj(name) if type_ctx.enum_map.contains_key(name) => name,
         other => {
             errors.push(SemanticError {
+                code: "E0308",
                 message: format!("`match` target must be an `enum`, found `{:?}`", other),
                 label: "Expected enum type".into(),
+                secondary_label: None,
                 help: None,
                 span: target_expr.span().clone(),
             });
@@ -98,11 +100,13 @@ pub fn type_check_match<'a>(
                     *v_tag
                 } else {
                     errors.push(SemanticError {
+                        code: "E0004",
                         message: format!(
                             "Unknown variant `{}` for enum `{}`",
                             arm.variant_name, enum_name
                         ),
                         label: "Unknown variant".into(),
+                        secondary_label: None,
                         help: None,
                         span: arm.span.clone(),
                     });
@@ -219,11 +223,13 @@ pub fn type_check_try<'a>(
         type_check_expr(scopes, errors, type_ctx, &match_expr)
     } else {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!(
                 "The `?` operator can only be applied to `Option` or `Result`, found `{:?}`",
                 inner_ty
             ),
             label: "Cannot apply `?` operator".into(),
+            secondary_label: None,
             help: Some("Ensure expression returns an Option or Result type".into()),
             span: span.clone(),
         });
@@ -244,8 +250,10 @@ pub fn type_check_while<'a>(
 
     if t_cond.ty() != Type::Bool {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("`while` condition must be a `Bool`, found `{:?}`", t_cond.ty()),
             label: "Expected boolean condition".into(),
+            secondary_label: None,
             help: None,
             span: t_cond.span().clone(),
         });
@@ -271,8 +279,10 @@ pub fn type_check_if<'a>(
 
     if t_cond.ty() != Type::Bool {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("`if` condition must be a `Bool`, found `{:?}`", t_cond.ty()),
             label: "Expected boolean expression".into(),
+            secondary_label: None,
             help: Some("Try using a comparison operator like ==, <, or >".into()),
             span: t_cond.span().clone(),
         });
@@ -300,8 +310,10 @@ pub fn type_check_if_else<'a>(
 
     if t_cond.ty() != Type::Bool {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!("`if` condition must be a `Bool`, found `{:?}`", t_cond.ty()),
             label: "Expected boolean expression".into(),
+            secondary_label: None,
             help: None,
             span: t_cond.span().clone(),
         });
@@ -309,12 +321,17 @@ pub fn type_check_if_else<'a>(
 
     if t_then.ty() != t_else.ty() {
         errors.push(SemanticError {
+            code: "E0308",
             message: format!(
                 "`if` and `else` branches have incompatible types (`{:?}` vs `{:?}`)",
                 t_then.ty(),
                 t_else.ty()
             ),
             label: format!("Expected `{:?}` because of `if` branch", t_then.ty()),
+            secondary_label: Some((
+                t_then.span().clone(),
+                format!("`if` branch evaluated to type `{:?}`", t_then.ty()),
+            )),
             help: Some(
                 "Both branches of an if/else expression must yield the exact same type".into(),
             ),

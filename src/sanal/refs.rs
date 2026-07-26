@@ -49,8 +49,10 @@ pub fn type_check_deref<'a>(
         }
         other => {
             errors.push(SemanticError {
+                code: "E0614",
                 message: format!("Cannot dereference type `{:?}`", other),
                 label: "Type cannot be dereferenced".to_string(),
+                secondary_label: None,
                 help: Some("Use rc.new(val) or arc.new(val) or raw pointer".to_string()),
                 span: span.clone(),
             });
@@ -77,12 +79,14 @@ pub fn type_check_deref_assign<'a>(
         Type::Rc(inner_ty) | Type::Arc(inner_ty) | Type::Ref(inner_ty) | Type::MutRef(inner_ty) => {
             if t_val.ty() != *inner_ty {
                 errors.push(SemanticError {
+                    code: "E0308",
                     message: format!(
                         "Mismatched type in dereference assignment. Pointer holds `{:?}`, found `{:?}`",
                         *inner_ty,
                         t_val.ty()
                     ),
                     label: format!("Expected `{:?}`", *inner_ty),
+                    secondary_label: None,
                     help: None,
                     span: span.clone(),
                 });
@@ -95,8 +99,10 @@ pub fn type_check_deref_assign<'a>(
         }
         other => {
             errors.push(SemanticError {
+                code: "E0614",
                 message: format!("Cannot dereference assign type `{:?}`", other),
                 label: "Type cannot be dereferenced".to_string(),
+                secondary_label: None,
                 help: None,
                 span: span.clone(),
             });

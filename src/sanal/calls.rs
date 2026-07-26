@@ -200,10 +200,12 @@ pub fn type_check_call<'a>(
                     if let Some(var_info) = scopes.lookup_mut(var_name) {
                         if !var_info.is_mutable {
                             errors.push(SemanticError {
+                                code: "E0382",
                                 message: format!(
                                     "Cannot call mutating macro '{name}' on immutable variable '{var_name}'"
                                 ),
                                 label: format!("'{var_name}' is immutable"),
+                                secondary_label: None,
                                 help: Some(format!("Declare as mutable: 'let mut {var_name}'")),
                                 span: span.clone(),
                             });
@@ -262,10 +264,12 @@ pub fn type_check_call<'a>(
                         && !target_info.is_mutable
                     {
                         errors.push(SemanticError {
+                            code: "E0382",
                             message: format!(
                                 "Cannot call mutating method '{method_name}' on immutable variable '{target_or_var}'"
                             ),
                             label: format!("'{target_or_var}' is immutable"),
+                            secondary_label: None,
                             help: Some(format!("Declare as mutable: 'let mut {target_or_var}'")),
                             span: span.clone(),
                         });
@@ -367,8 +371,10 @@ pub fn type_check_call<'a>(
                 typed_args.remove(0);
                 if typed_args.len() != 1 {
                     errors.push(SemanticError {
+                        code: "E0061",
                         message: "rc.new expects exactly 1 argument".to_string(),
                         label: "Invalid argument count".to_string(),
+                        secondary_label: None,
                         help: None,
                         span: span.clone(),
                     });
@@ -388,8 +394,10 @@ pub fn type_check_call<'a>(
                 typed_args.remove(0);
                 if typed_args.len() != 1 {
                     errors.push(SemanticError {
+                        code: "E0061",
                         message: "arc.new expects exactly 1 argument".to_string(),
                         label: "Invalid argument count".to_string(),
+                        secondary_label: None,
                         help: None,
                         span: span.clone(),
                     });
@@ -475,10 +483,12 @@ pub fn type_check_call<'a>(
                 if let Some(target_info) = scopes.lookup_mut(var_name) {
                     if !target_info.is_mutable {
                         errors.push(SemanticError {
+                            code: "E0382",
                             message: format!(
                                 "Cannot call mutating method 'push' on immutable variable '{var_name}'"
                             ),
                             label: format!("'{var_name}' is immutable"),
+                            secondary_label: None,
                             help: Some(format!("Declare as mutable: 'let mut {var_name}'")),
                             span: span.clone(),
                         });
@@ -579,10 +589,12 @@ pub fn type_check_call<'a>(
 
     if type_ctx.extern_fn_names.contains(&resolved_name) && !type_ctx.is_unsafe {
         errors.push(SemanticError {
+            code: "E0133",
             message: format!(
                 "Call to extern C function '{resolved_name}' requires an 'unsafe:' block"
             ),
             label: "Foreign C function call requires 'unsafe:' block".to_string(),
+            secondary_label: None,
             help: Some("Wrap this call inside an 'unsafe:' block".to_string()),
             span: span.clone(),
         });
@@ -600,12 +612,14 @@ pub fn type_check_call<'a>(
         }
         if target_func.params.len() != typed_args.len() {
             errors.push(SemanticError {
+                code: "E0061",
                 message: format!(
                     "Function '{resolved_name}' expects {} arguments, found {}",
                     target_func.params.len(),
                     typed_args.len()
                 ),
                 label: format!("Expected {} args", target_func.params.len()),
+                secondary_label: None,
                 help: None,
                 span: span.clone(),
             });
@@ -686,8 +700,10 @@ pub fn type_check_call<'a>(
         *ext_ret_ty
     } else {
         errors.push(SemanticError {
+            code: "E0425",
             message: format!("Undefined function '{resolved_name}' (raw: '{raw_name}')"),
             label: "Function does not exist".to_string(),
+            secondary_label: None,
             help: None,
             span: span.clone(),
         });

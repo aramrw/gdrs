@@ -15,11 +15,13 @@ use crate::{
 };
 use std::collections::HashMap;
 
-// A custom struct to hold the error message, label, optional help message, AND where it happened
+// A custom struct to hold the error message, label, error code, optional help message, AND where it happened
 #[derive(Debug)]
 pub struct SemanticError {
+    pub code: &'static str,
     pub message: String,
     pub label: String,
+    pub secondary_label: Option<(Span, String)>,
     pub help: Option<String>,
     pub span: Span,
 }
@@ -304,8 +306,10 @@ fn resolve_type(ty: Type, enum_names: &std::collections::HashSet<String>, span: 
     match ty {
         Type::Obj("Result_bare") => {
             errors.push(SemanticError {
+                code: "E0107",
                 message: "Type `Result` requires generic parameter(s), e.g. `Result<T>` or `Result<T, E>`".to_string(),
                 label: "Missing generic parameter for `Result`".to_string(),
+                secondary_label: None,
                 help: Some("Specify generic types: `Result<T>` or `Result<T, E>`".to_string()),
                 span,
             });
@@ -313,8 +317,10 @@ fn resolve_type(ty: Type, enum_names: &std::collections::HashSet<String>, span: 
         }
         Type::Obj("Option_bare") => {
             errors.push(SemanticError {
+                code: "E0107",
                 message: "Type `Option` requires a generic parameter, e.g. `Option<T>`".to_string(),
                 label: "Missing generic parameter for `Option`".to_string(),
+                secondary_label: None,
                 help: Some("Specify generic type: `Option<T>`".to_string()),
                 span,
             });
