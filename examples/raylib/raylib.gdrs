@@ -57,29 +57,27 @@ fn main():
 
 		let pos1 = Vec2.new(400.0, 300.0)
 		let speed1 = Vec2.new(5.0, 5.0)
-		let mut ball1 = Ball{pos: pos1, speed: speed1, r: 50.0, color: 4278190335}
+		let ball1 = Ball{pos: pos1, speed: speed1, r: 50.0, color: 4278190335}
 
 		let pos2 = Vec2.new(200.0, 150.0)
 		let speed2 = Vec2.new(-3.0, 4.0)
-		let mut ball2 = Ball{pos: pos2, speed: speed2, r: 30.0, color: 4294902015}
+		let ball2 = Ball{pos: pos2, speed: speed2, r: 30.0, color: 4294902015}
+
+		let mut balls = [ball1, ball2]
 
 		while !WindowShouldClose():
 			BeginDrawing()
 			ClearBackground(2294467295)
 
-			// Ball 1 update & bounds
-			ball1.update()
-			ball1.bounds_check_x(bounds)
-			ball1.bounds_check_y(bounds)
+			let mut i = 0
+			while i < 2:
+				// Call methods directly on the indexed array element
+				balls[i].update()
+				balls[i].bounds_check_x(bounds)
+				balls[i].bounds_check_y(bounds)
 
-			// Ball 2 update & bounds
-			ball2.update()
-			ball2.bounds_check_x(bounds)
-			ball2.bounds_check_y(bounds)
-
-			// Render both
-			DrawCircle(ball1.pos.x, ball1.pos.y, ball1.r, ball1.color)
-			DrawCircle(ball2.pos.x, ball2.pos.y, ball2.r, ball2.color)
+				DrawCircle(balls[i].pos.x, balls[i].pos.y, balls[i].r, balls[i].color)
+				i += 1
 
 			EndDrawing()
 
