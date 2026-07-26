@@ -37,8 +37,8 @@ fn main():
 		while !WindowShouldClose():
 			let bounds = Vec2.new(GetScreenWidth(), GetScreenHeight())
 
-			ball.pos.x = += ball.speed.x
-			ball.pos.y = += ball.speed.y
+			ball.pos.x += ball.speed.x
+			ball.pos.y += ball.speed.y
 
 			if ball.pos.x >= (bounds.x - ball.r):
 				ball.pos.x = bounds.x - ball.r
