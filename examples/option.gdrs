@@ -1,3 +1,4 @@
+use std::time::Instant
 use std::core::{Result as Res, Option as Opt}
 
 fn find_even(val: i64) -> Opt<i64>:
@@ -11,6 +12,7 @@ fn double_even(val: i64) -> Opt<i64>:
 	return Opt::Some(even * 2)
 
 fn main():
+	let now = Instant.now()
 	log!("--- Testing Multi Imports with aliases ---")
 
 	let d1 = double_even(15)
@@ -21,6 +23,9 @@ fn main():
 
 	let some = Some(1)
 	log!("some.is_some(): ", some.is_some())
+	log!(some.unwrap())
 
 	let res = Res::Ok(777)
 	log!("res.unwrap():", res.unwrap())
+
+	log!(now.us())
