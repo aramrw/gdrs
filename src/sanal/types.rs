@@ -1450,8 +1450,8 @@ pub fn type_check_expr<'a>(
                         }
                     }
                 }
-                if target_func.return_type == Type::Generic("T") {
-                    Type::Str
+                if matches!(target_func.return_type, Type::Generic(_)) {
+                    Type::Int
                 } else {
                     target_func.return_type
                 }
