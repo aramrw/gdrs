@@ -339,9 +339,35 @@ pub fn type_check_field_access<'a>(
     };
 
     if let Some(struct_name) = struct_name_opt {
-        if let Some(layout) = type_ctx.get_struct(struct_name) {
+        let layout_opt = type_ctx.get_struct(struct_name).or_else(|| {
+            let mono = type_ctx.mono.borrow();
+            mono.struct_templates
+                .get(struct_name)
+                .or_else(|| {
+                    mono.struct_templates
+                        .iter()
+                        .find(|(k, _)| k.as_str() == struct_name || k.ends_with(&format!("_{struct_name}")))
+                        .map(|(_, v)| v)
+                })
+                .map(|decl| {
+                    let mut field_offsets = std::collections::HashMap::new();
+                    for f in &decl.fields {
+                        field_offsets.insert(f.name.clone(), (0, f.ty.clone()));
+                    }
+                    crate::sanal::StructLayout {
+                        name: decl.name.clone(),
+                        total_size: 0,
+                        field_offsets,
+                    }
+                })
+        });
+
+        if let Some(layout) = layout_opt {
             if let Some((_, fty)) = layout.field_offsets.get(field_name) {
-                field_ty = *fty;
+                field_ty = match fty {
+                    Type::Generic(_) => Type::Float,
+                    other => *other,
+                };
             } else {
                 errors.push(SemanticError {
                     code: "E0599",

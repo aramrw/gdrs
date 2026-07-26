@@ -318,7 +318,11 @@ pub fn compile_gt<M: Module>(
     let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
     let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
     let (left, right) = coerce_operands(builder, left, right);
-    let cmp = if is_float_ty(&lhs.ty()) || is_float_val(builder, left) {
+    let is_float = is_float_ty(&lhs.ty())
+        || is_float_ty(&rhs.ty())
+        || is_float_val(builder, left)
+        || is_float_val(builder, right);
+    let cmp = if is_float {
         builder.ins().fcmp(FloatCC::GreaterThan, left, right)
     } else {
         builder.ins().icmp(IntCC::SignedGreaterThan, left, right)
@@ -338,7 +342,11 @@ pub fn compile_lt<M: Module>(
     let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
     let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
     let (left, right) = coerce_operands(builder, left, right);
-    let cmp = if is_float_ty(&lhs.ty()) || is_float_val(builder, left) {
+    let is_float = is_float_ty(&lhs.ty())
+        || is_float_ty(&rhs.ty())
+        || is_float_val(builder, left)
+        || is_float_val(builder, right);
+    let cmp = if is_float {
         builder.ins().fcmp(FloatCC::LessThan, left, right)
     } else {
         builder.ins().icmp(IntCC::SignedLessThan, left, right)
@@ -358,7 +366,11 @@ pub fn compile_gte<M: Module>(
     let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
     let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
     let (left, right) = coerce_operands(builder, left, right);
-    let cmp = if is_float_ty(&lhs.ty()) || is_float_val(builder, left) {
+    let is_float = is_float_ty(&lhs.ty())
+        || is_float_ty(&rhs.ty())
+        || is_float_val(builder, left)
+        || is_float_val(builder, right);
+    let cmp = if is_float {
         builder.ins().fcmp(FloatCC::GreaterThanOrEqual, left, right)
     } else {
         builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, left, right)
@@ -378,7 +390,11 @@ pub fn compile_lte<M: Module>(
     let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
     let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
     let (left, right) = coerce_operands(builder, left, right);
-    let cmp = if is_float_ty(&lhs.ty()) || is_float_val(builder, left) {
+    let is_float = is_float_ty(&lhs.ty())
+        || is_float_ty(&rhs.ty())
+        || is_float_val(builder, left)
+        || is_float_val(builder, right);
+    let cmp = if is_float {
         builder.ins().fcmp(FloatCC::LessThanOrEqual, left, right)
     } else {
         builder.ins().icmp(IntCC::SignedLessThanOrEqual, left, right)

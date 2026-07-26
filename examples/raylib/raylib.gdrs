@@ -31,22 +31,26 @@ impl Ball:
 			let screen_w = GetScreenWidth()
 			if self.pos.x >= (screen_w - self.r):
 				self.pos.x = screen_w - self.r
-				self.speed.x = -self.speed.x
+				if self.speed.x > 0.0:
+					self.speed.x = -self.speed.x
 
 			if self.pos.x <= self.r:
 				self.pos.x = self.r
-				self.speed.x = -self.speed.x
+				if self.speed.x < 0.0:
+					self.speed.x = -self.speed.x
 
 	fn bounds_check_y(&mut self):
 		unsafe:
 			let screen_h = GetScreenHeight()
 			if self.pos.y >= (screen_h - self.r):
 				self.pos.y = screen_h - self.r
-				self.speed.y = -self.speed.y
+				if self.speed.y > 0.0:
+					self.speed.y = -self.speed.y
 
 			if self.pos.y <= self.r:
 				self.pos.y = self.r
-				self.speed.y = -self.speed.y
+				if self.speed.y < 0.0:
+					self.speed.y = -self.speed.y
 
 fn main():
 	let now = Instant.now()

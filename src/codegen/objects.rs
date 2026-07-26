@@ -72,7 +72,19 @@ pub fn compile_field_access<M: Module>(
     };
 
     if let Some(struct_name) = target_struct_name {
-        if let Some(layout) = struct_layouts.get(struct_name) {
+        let layout_opt = struct_layouts.get(struct_name).cloned().or_else(|| {
+            struct_layouts
+                .iter()
+                .find(|(k, _)| {
+                    **k == struct_name
+                        || k.contains(&format!("{struct_name}_"))
+                        || k.starts_with(&format!("{struct_name}_"))
+                        || k.ends_with(&format!("_{struct_name}"))
+                        || k.ends_with(struct_name)
+                })
+                .map(|(_, v)| v.clone())
+        });
+        if let Some(layout) = layout_opt {
             if let Some((f_offset, _)) = layout.field_offsets.get(field_name) {
                 offset = *f_offset as i32;
             }
@@ -113,7 +125,13 @@ pub fn compile_field_assign<M: Module>(
         let layout_opt = struct_layouts.get(struct_name).cloned().or_else(|| {
             struct_layouts
                 .iter()
-                .find(|(k, _)| **k == struct_name || k.starts_with(&format!("{struct_name}_")) || k.ends_with(&format!("_{struct_name}")))
+                .find(|(k, _)| {
+                    **k == struct_name
+                        || k.contains(&format!("{struct_name}_"))
+                        || k.starts_with(&format!("{struct_name}_"))
+                        || k.ends_with(&format!("_{struct_name}"))
+                        || k.ends_with(struct_name)
+                })
                 .map(|(_, v)| v.clone())
         });
         if let Some(layout) = layout_opt {
