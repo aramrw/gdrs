@@ -36,7 +36,8 @@ pub fn type_check_expr<'a>(
                 Some(TypedExpr::Ident(name.clone(), info.ty, span.clone()))
             } else if let Some((enum_part, variant_part)) = name.split_once("::") {
                 let normalized_enum = enum_part.replace("::", "_");
-                if let Some((mangled_enum, v_map)) = type_ctx.enum_map.get(&normalized_enum) {
+                let found_enum = type_ctx.enum_map.iter().find(|(k, _)| **k == normalized_enum || k.ends_with(&format!("_{normalized_enum}")));
+                if let Some((_, (mangled_enum, v_map))) = found_enum {
                     if let Some((tag, _p_types)) = v_map.get(variant_part) {
                         return Some(TypedExpr::EnumConstruct(
                             mangled_enum.to_string(),
@@ -77,9 +78,13 @@ pub fn type_check_expr<'a>(
                     None
                 }
             } else {
-                let normalized = name.replace("::", "_");
+                let normalized = match name.as_str() {
+                    "None" => "std_core_Option_None".to_string(),
+                    _ => name.replace("::", "_"),
+                };
                 if let Some((enum_part, variant_part)) = normalized.rsplit_once('_') {
-                    if let Some((mangled_enum, v_map)) = type_ctx.enum_map.get(enum_part) {
+                    let found_enum = type_ctx.enum_map.iter().find(|(k, _)| *k == enum_part || k.ends_with(&format!("_{enum_part}")));
+                    if let Some((_, (mangled_enum, v_map))) = found_enum {
                         if let Some((tag, _p_types)) = v_map.get(variant_part) {
                             return Some(TypedExpr::EnumConstruct(
                                 mangled_enum.to_string(),
@@ -774,11 +779,11 @@ pub fn type_check_expr<'a>(
             let t_inner = type_check_expr(scopes, errors, type_ctx, inner_expr)?;
             let inner_ty = t_inner.ty();
             let enum_name_opt = match inner_ty {
-                Type::Enum(name) | Type::Obj(name) if name.ends_with("Option") => Some(name.to_string()),
+                Type::Enum(name) | Type::Obj(name) if name.ends_with("Option") => Some("std_core_Option".to_string()),
                 _ => None,
             };
             let enum_name_res = match inner_ty {
-                Type::Enum(name) | Type::Obj(name) if name.ends_with("Result") => Some(name.to_string()),
+                Type::Enum(name) | Type::Obj(name) if name.ends_with("Result") => Some("std_core_Result".to_string()),
                 _ => None,
             };
 
@@ -973,6 +978,7 @@ pub fn type_check_expr<'a>(
                         return Some(TypedExpr::MacroCall(
                             name.clone(),
                             vec![t_closure, t_arg1],
+                            Type::Int,
                             span.clone(),
                         ));
                     }
@@ -985,7 +991,12 @@ pub fn type_check_expr<'a>(
                     typed_args.push(t_arg);
                 }
             }
-            Some(TypedExpr::MacroCall(name.clone(), typed_args, span.clone()))
+            let macro_ret_ty = match name.trim_end_matches('!') {
+                "format" | "arg_at" | "args_at" | "args" => Type::Str,
+                "arg_count" | "args_count" | "thread" | "spawn" | "len" => Type::Int,
+                _ => Type::Unit,
+            };
+            Some(TypedExpr::MacroCall(name.clone(), typed_args, macro_ret_ty, span.clone()))
         }
 
         Expr::Call(raw_name, args, span) => {
@@ -996,9 +1007,16 @@ pub fn type_check_expr<'a>(
                 }
             }
 
-            let normalized_name = raw_name.replace("::", "_");
+            let normalized_name = match raw_name.as_str() {
+                "Some" => "std_core_Option_Some".to_string(),
+                "None" => "std_core_Option_None".to_string(),
+                "Ok" => "std_core_Result_Ok".to_string(),
+                "Err" => "std_core_Result_Err".to_string(),
+                _ => raw_name.replace("::", "_"),
+            };
             if let Some((enum_name, variant_name)) = normalized_name.rsplit_once('_') {
-                if let Some((static_enum_name, variants)) = type_ctx.enum_map.get(enum_name) {
+                let found_enum = type_ctx.enum_map.iter().find(|(k, _)| *k == enum_name || k.ends_with(&format!("_{enum_name}")));
+                if let Some((_, (static_enum_name, variants))) = found_enum {
                     if let Some((disc, _)) = variants.get(variant_name) {
                         return Some(TypedExpr::EnumConstruct(
                             static_enum_name.to_string(),
@@ -1013,22 +1031,55 @@ pub fn type_check_expr<'a>(
             }
 
             let name = raw_name.replace("::", "_");
-            if name == "push_str" || name == "push" || name == "pop" {
-                if !typed_args.is_empty() {
-                    if let TypedExpr::Ident(var_name, _, _) = &typed_args[0] {
-                        if let Some(target_info) = scopes.lookup(var_name) {
-                            if !target_info.is_mutable {
-                                errors.push(SemanticError {
-                                    message: format!("Cannot call mutating method '{name}' on immutable variable '{var_name}'"),
-                                    label: format!("'{var_name}' is immutable"),
-                                    help: Some(format!("Declare as mutable: 'let mut {var_name}'")),
-                                    span: span.clone(),
-                                });
+            let is_intrinsic_macro = matches!(
+                name.as_str(),
+                "log"
+                    | "log!"
+                    | "println"
+                    | "println!"
+                    | "print"
+                    | "print!"
+                    | "assert"
+                    | "assert!"
+                    | "assert_eq"
+                    | "assert_eq!"
+                    | "panic"
+                    | "panic!"
+                    | "format"
+                    | "format!"
+                    | "vec"
+                    | "vec!"
+                    | "arg_count"
+                    | "arg_at"
+                    | "args_count"
+                    | "args_at"
+                    | "args"
+                    | "thread"
+                    | "spawn"
+            );
+            if is_intrinsic_macro {
+                if name == "push" || name == "push_str" || name == "pop" {
+                    if let Some(first_arg) = typed_args.first() {
+                        if let TypedExpr::Ident(var_name, _, _) = first_arg {
+                            if let Some(var_info) = scopes.lookup(var_name) {
+                                if !var_info.is_mutable {
+                                    errors.push(SemanticError {
+                                        message: format!("Cannot call mutating macro '{name}' on immutable variable '{var_name}'"),
+                                        label: format!("'{var_name}' is immutable"),
+                                        help: Some(format!("Declare as mutable: 'let mut {var_name}'")),
+                                        span: span.clone(),
+                                    });
+                                }
                             }
                         }
                     }
                 }
-                return Some(TypedExpr::MacroCall(name.clone(), typed_args, span.clone()));
+                let macro_ret_ty = match name.trim_end_matches('!') {
+                    "format" | "arg_at" | "args_at" | "args" => Type::Str,
+                    "arg_count" | "args_count" | "thread" | "spawn" | "len" => Type::Int,
+                    _ => Type::Unit,
+                };
+                return Some(TypedExpr::MacroCall(name.clone(), typed_args, macro_ret_ty, span.clone()));
             }
             let mut resolved_name = name.clone();
             let split_sep = if name.contains("::") {
@@ -1067,15 +1118,33 @@ pub fn type_check_expr<'a>(
                             &Expr::Ident(target_or_var.to_string(), span.clone()),
                         ) {
                             typed_args.insert(0, target_expr);
+                            let macro_ret_ty = match method_name {
+                                "len" => Type::Int,
+                                _ => Type::Unit,
+                            };
                             return Some(TypedExpr::MacroCall(
                                 method_name.to_string(),
                                 typed_args,
+                                macro_ret_ty,
                                 span.clone(),
                             ));
                         }
                     }
-                    if type_ctx.fn_map.contains_key(&mangled) {
-                        resolved_name = mangled;
+                    let mangled = format!("{}_{}", target_or_var.replace("::", "_"), method_name);
+                    let found_fn = type_ctx.fn_map.iter().find(|(k, _)| **k == mangled || k.ends_with(&format!("_{mangled}")));
+                    if let Some((mangled_fn_name, target_func)) = found_fn {
+                        resolved_name = mangled_fn_name.clone();
+                        let expects_self = target_func.params.first().map(|p| p.name == "self").unwrap_or(false);
+                        if expects_self {
+                            if let Some(target_expr) = type_check_expr(
+                                scopes,
+                                errors,
+                                type_ctx,
+                                &Expr::Ident(target_or_var.to_string(), span.clone()),
+                            ) {
+                                typed_args.insert(0, target_expr);
+                            }
+                        }
                     } else if let Some(var_info) = scopes.lookup(target_or_var) {
                         match var_info.ty {
                             Type::DynTrait(trait_name) => {
@@ -1110,15 +1179,19 @@ pub fn type_check_expr<'a>(
                             }
                             Type::Obj(tn) | Type::Enum(tn) => {
                                 let var_mangled = format!("{}_{}", tn, method_name);
-                                if type_ctx.fn_map.contains_key(&var_mangled) {
-                                    resolved_name = var_mangled;
-                                    if let Some(target_expr) = type_check_expr(
-                                        scopes,
-                                        errors,
-                                        type_ctx,
-                                        &Expr::Ident(target_or_var.to_string(), span.clone()),
-                                    ) {
-                                        typed_args.insert(0, target_expr);
+                                let found_var_fn = type_ctx.fn_map.iter().find(|(k, _)| **k == var_mangled || k.ends_with(&format!("_{var_mangled}")));
+                                if let Some((mangled_fn_name, target_func)) = found_var_fn {
+                                    resolved_name = mangled_fn_name.clone();
+                                    let expects_self = target_func.params.first().map(|p| p.name == "self").unwrap_or(false);
+                                    if expects_self {
+                                        if let Some(target_expr) = type_check_expr(
+                                            scopes,
+                                            errors,
+                                            type_ctx,
+                                            &Expr::Ident(target_or_var.to_string(), span.clone()),
+                                        ) {
+                                            typed_args.insert(0, target_expr);
+                                        }
                                     }
                                 }
                             }
@@ -1127,6 +1200,16 @@ pub fn type_check_expr<'a>(
                     }
                 }
             } else if !type_ctx.fn_map.contains_key(&name) && !typed_args.is_empty() {
+                let target_ty = typed_args[0].ty();
+                match target_ty {
+                    Type::Obj(tn) | Type::Enum(tn) => {
+                        let method_mangled = format!("{tn}_{name}");
+                        if type_ctx.fn_map.contains_key(&method_mangled) {
+                            resolved_name = method_mangled;
+                        }
+                    }
+                    _ => {}
+                }
                 if let Type::DynTrait(_trait_name) = typed_args[0].ty() {
                     let receiver = typed_args.remove(0);
                     return Some(TypedExpr::DynCall(
@@ -1265,20 +1348,26 @@ pub fn type_check_expr<'a>(
                     }
                 }
 
-                if resolved_name == name {
-                    let first_arg_ty = typed_args[0].ty();
-                    let type_name = match first_arg_ty {
-                        Type::Obj(n) => Some(n),
-                        Type::Enum(n) => Some(n),
-                        _ => None,
-                    };
-                    if let Some(tn) = type_name {
-                        let mangled = format!("{}_{}", tn, name);
-                        let mono_mangled = format!("{}_{}", name, tn);
-                        if type_ctx.fn_map.contains_key(&mangled) {
-                            resolved_name = mangled;
-                        } else if type_ctx.fn_map.contains_key(&mono_mangled) {
-                            resolved_name = mono_mangled;
+                if !type_ctx.extern_fn_names.contains(&resolved_name) && !type_ctx.fn_map.contains_key(&resolved_name) {
+                    let norm = resolved_name.replace("::", "_");
+                    if let Some((found_fn_name, _)) = type_ctx.fn_map.iter().find(|(k, _)| **k == norm || k.ends_with(&format!("_{norm}"))) {
+                        resolved_name = found_fn_name.clone();
+                    }
+                    if !typed_args.is_empty() {
+                        let first_arg_ty = typed_args[0].ty();
+                        let type_name = match first_arg_ty {
+                            Type::Obj(n) => Some(n),
+                            Type::Enum(n) => Some(n),
+                            _ => None,
+                        };
+                        if let Some(tn) = type_name {
+                            let mangled = format!("{}_{}", tn, name);
+                            let mono_mangled = format!("{}_{}", name, tn);
+                            if type_ctx.fn_map.contains_key(&mangled) {
+                                resolved_name = mangled;
+                            } else if type_ctx.fn_map.contains_key(&mono_mangled) {
+                                resolved_name = mono_mangled;
+                            }
                         }
                     }
                 }
@@ -1340,7 +1429,11 @@ pub fn type_check_expr<'a>(
                         }
                     }
                 }
-                target_func.return_type
+                if target_func.return_type == Type::Generic("T") {
+                    Type::Str
+                } else {
+                    target_func.return_type
+                }
             } else if let Some((param_decl_types, ext_ret_ty)) =
                 type_ctx.extern_signatures.get(&resolved_name)
             {
@@ -1488,7 +1581,8 @@ pub fn type_check_expr<'a>(
                 typed_fields.push((f_name.clone(), t_expr));
             }
 
-            if let Some(layout) = type_ctx.struct_map.get(name) {
+            let found_struct = type_ctx.struct_map.iter().find(|(k, _)| *k == name || k.ends_with(&format!("_{name}")));
+            let obj_ty_name = if let Some((mangled_name, layout)) = found_struct {
                 // A. Check for missing required fields
                 for (expected_field, (_, expected_ty)) in &layout.field_offsets {
                     if !typed_fields.iter().any(|(f, _)| f == expected_field) {
@@ -1524,6 +1618,7 @@ pub fn type_check_expr<'a>(
                         });
                     }
                 }
+                mangled_name.as_str()
             } else {
                 errors.push(SemanticError {
                     message: format!("Undefined struct '{name}'"),
@@ -1531,11 +1626,12 @@ pub fn type_check_expr<'a>(
                     help: None,
                     span: span.clone(),
                 });
-            }
+                name.as_str()
+            };
 
-            let obj_ty = Type::Obj(intern_str(name));
+            let obj_ty = Type::Obj(intern_str(obj_ty_name));
             Some(TypedExpr::ObjInit(
-                name.clone(),
+                obj_ty_name.to_string(),
                 typed_fields,
                 obj_ty,
                 span.clone(),
@@ -1652,11 +1748,14 @@ pub fn type_check_expr<'a>(
                 Type::Rc(inner_ty) | Type::Arc(inner_ty) => {
                     Some(TypedExpr::Deref(Box::new(t_inner), *inner_ty, span.clone()))
                 }
+                Type::Int | Type::I32 => {
+                    Some(TypedExpr::Deref(Box::new(t_inner), Type::Int, span.clone()))
+                }
                 other => {
                     errors.push(SemanticError {
-                        message: format!("Cannot dereference type `{:?}`. Only `rc[T]` and `arc[T]` can be dereferenced", other),
+                        message: format!("Cannot dereference type `{:?}`", other),
                         label: "Type cannot be dereferenced".to_string(),
-                        help: Some("Use rc.new(val) or arc.new(val) to create a smart pointer".to_string()),
+                        help: Some("Use rc.new(val) or arc.new(val) or raw pointer".to_string()),
                         span: span.clone(),
                     });
                     Some(TypedExpr::Deref(
@@ -1765,6 +1864,8 @@ fn is_obj_field_type_compatible(expected: &Type, found: &Type) -> bool {
         (Type::Int | Type::I32, Type::Int | Type::I32) => true,
         (Type::Float | Type::F32, Type::Float | Type::F32) => true,
         (Type::Float | Type::F32, Type::Int | Type::I32) => true,
+        (Type::Str | Type::Obj("String"), Type::Str | Type::Obj("String")) => true,
+        (Type::Obj(e1), Type::Enum(e2)) | (Type::Enum(e1), Type::Obj(e2)) if e1 == e2 => true,
         _ => false,
     }
 }

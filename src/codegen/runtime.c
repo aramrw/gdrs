@@ -9,6 +9,14 @@
 static int g_argc = 0;
 static char** g_argv = NULL;
 
+extern void gdrs_main(void);
+
+void intrinsic_panic(const char* msg) {
+    fprintf(stderr, "panic: %s\n", msg ? msg : "(null)");
+    fflush(stderr);
+    abort();
+}
+
 int main(int argc, char** argv) {
     setbuf(stdout, NULL);
     g_argc = argc;
@@ -20,6 +28,27 @@ int main(int argc, char** argv) {
 int64_t intrinsic_arg_count(void) {
     return (int64_t)g_argc;
 }
+
+// Returns all argv[1..] joined by spaces as a heap-allocated C string
+const char* intrinsic_args_str(void) {
+    if (g_argc <= 1) return "";
+    size_t total = 0;
+    for (int i = 1; i < g_argc; i++) total += strlen(g_argv[i]) + 1;
+    char* buf = (char*)malloc(total + 1);
+    buf[0] = '\0';
+    for (int i = 1; i < g_argc; i++) {
+        if (i > 1) strcat(buf, " ");
+        strcat(buf, g_argv[i]);
+    }
+    return buf;
+}
+
+// Returns argv[idx] as a C string (or empty string if out of bounds)
+const char* intrinsic_arg_at_str(int64_t idx) {
+    if (idx < 0 || idx >= g_argc) return "";
+    return g_argv[idx];
+}
+
 
 int64_t intrinsic_arg_at(int64_t idx) {
     if (idx < 0 || idx >= g_argc || !g_argv) return 0;

@@ -1,0 +1,22 @@
+use std::core::{Result as Res, Option as Opt}
+
+fn find_even(val: i64) -> Opt:
+	if val % 2 == 0:
+		return Opt::Some(val)
+	else:
+		return Opt::None
+
+fn double_even(val: i64) -> Opt:
+	let even = find_even(val)?
+	return Opt::Some(even * 2)
+
+fn main():
+	log!("--- Testing Multi Imports with aliases ---")
+
+	let d1 = double_even(15)
+	log!("double_even(15).is_none():", d1.is_none())
+
+	let res = Res::Ok(777)
+	log!("res.unwrap():", res.unwrap())
+
+	panic!("ending program")

@@ -44,7 +44,22 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         let path_obj_type = select! { Token::Ident(s) => s }
             .separated_by(just(Token::ColonColon))
             .at_least(1)
-            .map(|parts| Type::Obj(intern_str(&parts.join("::"))));
+            .then(
+                type_parser
+                    .clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .delimited_by(just(Token::LessThan), just(Token::GreaterThan))
+                    .or_not(),
+            )
+            .map(|(parts, opt_generics)| {
+                let name = parts.join("::");
+                if (name == "Result" || name == "Option") && opt_generics.is_none() {
+                    Type::Obj(intern_str(&format!("{}_bare", name)))
+                } else {
+                    Type::Obj(intern_str(&name))
+                }
+            });
 
         select! {
             Token::TypeI64 => Type::Int,
@@ -172,14 +187,38 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         .then_ignore(just(Token::Newline).or_not())
         .map_with_span(|(name, traits), span| TraitAliasDecl { name, traits, span });
 
-    let field_decl = select! { Token::Ident(name) => name }
+    let attr_arg = select! { Token::Ident(s) => s }
+        .or(select! { Token::String(s) => s });
+
+    let attr_args = attr_arg
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .delimited_by(just(Token::LParen), just(Token::RParen))
+        .or_not()
+        .map(|opt| opt.unwrap_or_default());
+
+    let attribute = just(Token::Hash)
+        .ignore_then(just(Token::LBracket))
+        .ignore_then(select! { Token::Ident(s) => s })
+        .then(attr_args)
+        .then_ignore(just(Token::RBracket))
+        .then_ignore(just(Token::Newline).or_not())
+        .map_with_span(|(name, args), span: Span| Attribute { name, args, span });
+
+    let opt_attributes = attribute.repeated();
+
+    let field_decl = opt_attributes
+        .clone()
+        .then(select! { Token::Ident(name) => name })
         .then_ignore(just(Token::Colon))
         .then(type_parser.clone())
-        .map_with_span(|(name, ty), span| FieldDecl { name, ty, span })
+        .map_with_span(|((attributes, name), ty), span| FieldDecl { name, ty, attributes, span })
         .then_ignore(just(Token::Newline).or_not());
 
-    let obj_decl = just(Token::Obj)
-        .ignore_then(select! { Token::Ident(s) => s })
+    let obj_decl = opt_attributes
+        .clone()
+        .then_ignore(just(Token::Obj))
+        .then(select! { Token::Ident(s) => s })
         .then(opt_where.clone())
         .then_ignore(just(Token::Colon))
         .then_ignore(just(Token::Newline).or_not())
@@ -189,14 +228,17 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
                 .at_least(1)
                 .delimited_by(just(Token::Indent), just(Token::Dedent)),
         )
-        .map_with_span(|((name, where_clause), fields), span| StructDecl {
+        .map_with_span(|(((attributes, name), where_clause), fields), span| StructDecl {
             name,
             fields,
+            attributes,
             where_clause,
             span,
         });
 
-    let enum_variant = select! { Token::Ident(name) => name }
+    let enum_variant = opt_attributes
+        .clone()
+        .then(select! { Token::Ident(name) => name })
         .then(
             type_parser
                 .clone()
@@ -205,15 +247,18 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
                 .delimited_by(just(Token::LParen), just(Token::RParen))
                 .or_not(),
         )
-        .map_with_span(|(name, payload), span| EnumVariantDecl {
+        .map_with_span(|((attributes, name), payload), span| EnumVariantDecl {
             name,
             payload_types: payload.unwrap_or_default(),
+            attributes,
             span,
         })
         .then_ignore(just(Token::Newline).or_not());
 
-    let enum_decl = just(Token::Enum)
-        .ignore_then(select! { Token::Ident(s) => s })
+    let enum_decl = opt_attributes
+        .clone()
+        .then_ignore(just(Token::Enum))
+        .then(select! { Token::Ident(s) => s })
         .then(opt_where.clone())
         .then_ignore(just(Token::Colon))
         .then_ignore(just(Token::Newline).or_not())
@@ -223,9 +268,10 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
                 .at_least(1)
                 .delimited_by(just(Token::Indent), just(Token::Dedent)),
         )
-        .map_with_span(|((name, where_clause), variants), span| EnumDecl {
+        .map_with_span(|(((attributes, name), where_clause), variants), span| EnumDecl {
             name,
             variants,
+            attributes,
             where_clause,
             span,
         });

@@ -1,0 +1,7 @@
+// std/error.gdrs - Error trait
+
+use std::fmt::Display
+use std::core::Option
+
+trait Error:
+	fn source(self) -> Option

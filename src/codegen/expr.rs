@@ -438,18 +438,8 @@ pub fn compile_expr<M: Module>(
                     }
                     dst_ptr
                 }
-                Type::Str => {
-                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        StackSlotKind::ExplicitSlot,
-                        16,
-                        0,
-                    ));
-                    let dst_ptr = builder.ins().stack_addr(types::I64, slot, 0);
-                    builder.ins().store(MemFlags::new(), val, dst_ptr, 0);
-                    let zero = builder.ins().iconst(types::I64, 0);
-                    builder.ins().store(MemFlags::new(), zero, dst_ptr, 8);
-                    dst_ptr
-                }
+                Type::Str => val,
+
                 Type::String => {
                     let slot = builder.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
@@ -791,7 +781,7 @@ pub fn compile_expr<M: Module>(
         }
 
         // Intrinsic Macro: name!(args...) -> Central intrinsic dispatcher
-        TypedExpr::MacroCall(name, args, _) => crate::codegen::intrinsics::compile_macro_call(
+        TypedExpr::MacroCall(name, args, _, _) => crate::codegen::intrinsics::compile_macro_call(
             builder,
             name,
             args,
@@ -830,18 +820,9 @@ pub fn compile_expr<M: Module>(
             for arg in args {
                 let mut compiled_arg =
                     compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
-                if matches!(arg.ty(), Type::Str | Type::String)
-                    && !matches!(arg, TypedExpr::String(_, _))
-                {
-                    compiled_arg = builder.ins().load(
-                        types::I64,
-                        cranelift_codegen::ir::MemFlags::new(),
-                        compiled_arg,
-                        0,
-                    );
-                }
 
                 let param_ty = match arg.ty() {
+                    Type::Bool => types::I8,
                     Type::Float => types::F64,
                     Type::F32 => types::F32,
                     Type::I32 => types::I32,
@@ -870,6 +851,7 @@ pub fn compile_expr<M: Module>(
                         }
                         (types::F64, types::F32) => builder.ins().fdemote(types::F32, compiled_arg),
                         (types::I8, t) if t.is_int() => builder.ins().sextend(t, compiled_arg),
+                        (t, types::I8) if t.is_int() => builder.ins().ireduce(types::I8, compiled_arg),
                         _ => compiled_arg,
                     };
                 }
@@ -987,13 +969,17 @@ pub fn compile_expr<M: Module>(
         TypedExpr::Bool(b, _) => builder.ins().iconst(types::I8, if *b { 1 } else { 0 }),
 
         TypedExpr::ObjInit(_struct_name, fields, _ty, _) => {
-            let slot_size = (fields.len() * 8) as u32;
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                if slot_size == 0 { 8 } else { slot_size },
-                0,
-            ));
-            let base_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+            use cranelift_codegen::ir::AbiParam;
+            let slot_size = (fields.len() * 8) as i64;
+            let size_val = builder.ins().iconst(types::I64, if slot_size == 0 { 8 } else { slot_size });
+
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let callee = module.declare_function("malloc", Linkage::Import, &sig).unwrap();
+            let local_callee = module.declare_func_in_func(callee, builder.func);
+            let call_inst = builder.ins().call(local_callee, &[size_val]);
+            let base_ptr = builder.inst_results(call_inst)[0];
 
             for (i, (_field_name, field_expr)) in fields.iter().enumerate() {
                 let val = compile_expr(
@@ -1113,13 +1099,17 @@ pub fn compile_expr<M: Module>(
         }
 
         TypedExpr::EnumConstruct(_enum_name, _variant_name, disc, payload_exprs, _ty, _) => {
-            let total_bytes = ((1 + payload_exprs.len()) * 8) as u32;
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                if total_bytes == 0 { 8 } else { total_bytes },
-                0,
-            ));
-            let base_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+            use cranelift_codegen::ir::AbiParam;
+            let total_bytes = ((1 + payload_exprs.len()) * 8) as i64;
+            let size_val = builder.ins().iconst(types::I64, if total_bytes == 0 { 8 } else { total_bytes });
+
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let callee = module.declare_function("malloc", Linkage::Import, &sig).unwrap();
+            let local_callee = module.declare_func_in_func(callee, builder.func);
+            let call_inst = builder.ins().call(local_callee, &[size_val]);
+            let base_ptr = builder.inst_results(call_inst)[0];
 
             // Store discriminant tag at offset 0
             let disc_val = builder.ins().iconst(types::I64, *disc as i64);
@@ -1167,7 +1157,11 @@ pub fn compile_expr<M: Module>(
                 module,
                 struct_layouts,
             );
-            builder.ins().load(types::I64, MemFlags::new(), heap_ptr, 8)
+            let offset = match inner_expr.ty() {
+                Type::Int | Type::I32 => 0,
+                _ => 8,
+            };
+            builder.ins().load(types::I64, MemFlags::new(), heap_ptr, offset)
         }
 
         TypedExpr::DerefAssign(ptr_expr, val_expr, _) => {

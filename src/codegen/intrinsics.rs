@@ -72,6 +72,17 @@ pub extern "C" fn intrinsic_arg_at(idx: i64) -> *const std::os::raw::c_char {
     c_str.into_raw() as *const std::os::raw::c_char
 }
 
+pub extern "C" fn intrinsic_args_str() -> i64 {
+    let guard = JIT_ARGS.lock().unwrap();
+    let joined = guard.join(" ");
+    drop(guard);
+    let mut bytes = joined.into_bytes();
+    bytes.push(0);
+    let ptr = bytes.as_ptr() as i64;
+    std::mem::forget(bytes);
+    ptr
+}
+
 /// Type Tag ABI:
 /// 0 = Int (i64)
 /// 1 = Bool (1 = true, 0 = false)
@@ -358,7 +369,62 @@ pub fn compile_macro_call<M: Module>(
     module: &mut M,
     struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
-    match name {
+    let clean_name = name.trim_end_matches('!');
+    match clean_name {
+        "format" => {
+            let mut compiled_args = Vec::new();
+            for arg in args {
+                let val = compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
+                let ty = arg.ty();
+                let str_val = if ty == Type::Str || matches!(ty, Type::Obj(n) if n == "String") {
+                    val
+                } else {
+                    let target_name = match ty {
+                        Type::Obj(n) | Type::Enum(n) => n,
+                        _ => "",
+                    };
+                    let method_mangled = format!("{target_name}_to_string");
+                    let mut sig = module.make_signature();
+                    sig.params.push(AbiParam::new(types::I64));
+                    sig.returns.push(AbiParam::new(types::I64));
+                    let callee = module
+                        .declare_function(&method_mangled, Linkage::Import, &sig)
+                        .unwrap();
+                    let local_callee = module.declare_func_in_func(callee, builder.func);
+                    let call_inst = builder.ins().call(local_callee, &[val]);
+                    builder.inst_results(call_inst)[0]
+                };
+                compiled_args.push(str_val);
+            }
+
+            let mut sig_malloc = module.make_signature();
+            sig_malloc.params.push(AbiParam::new(types::I64));
+            sig_malloc.returns.push(AbiParam::new(types::I64));
+            let callee_malloc = module
+                .declare_function("malloc", Linkage::Import, &sig_malloc)
+                .unwrap();
+            let local_malloc = module.declare_func_in_func(callee_malloc, builder.func);
+
+            let buf_size = builder.ins().iconst(types::I64, 4096);
+            let buf_call = builder.ins().call(local_malloc, &[buf_size]);
+            let buf_ptr = builder.inst_results(buf_call)[0];
+            let zero = builder.ins().iconst(types::I8, 0);
+            builder.ins().store(MemFlags::new(), zero, buf_ptr, 0);
+
+            let mut sig_strcat = module.make_signature();
+            sig_strcat.params.push(AbiParam::new(types::I64));
+            sig_strcat.params.push(AbiParam::new(types::I64));
+            sig_strcat.returns.push(AbiParam::new(types::I64));
+            let callee_strcat = module
+                .declare_function("strcat", Linkage::Import, &sig_strcat)
+                .unwrap();
+            let local_strcat = module.declare_func_in_func(callee_strcat, builder.func);
+
+            for str_val in compiled_args {
+                builder.ins().call(local_strcat, &[buf_ptr, str_val]);
+            }
+            buf_ptr
+        }
         "panic" => {
             let msg_ptr = if !args.is_empty() {
                 compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts)
@@ -385,6 +451,16 @@ pub fn compile_macro_call<M: Module>(
                 .ins()
                 .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
             dummy
+        }
+        "args" => {
+            let mut sig = module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let callee = module
+                .declare_function("intrinsic_args_str", Linkage::Import, &sig)
+                .unwrap();
+            let local_callee = module.declare_func_in_func(callee, builder.func);
+            let call_inst = builder.ins().call(local_callee, &[]);
+            builder.inst_results(call_inst)[0]
         }
         "arg_count" | "args_count" => {
             let mut sig = module.make_signature();
@@ -437,32 +513,76 @@ pub fn compile_macro_call<M: Module>(
         "log" | "println" => {
             let mut last_val = builder.ins().iconst(types::I64, 0);
             for arg in args {
-                let type_tag = match arg.ty() {
-                    Type::Int | Type::I32 => 0,
-                    Type::Bool => 1,
-                    Type::Str | Type::String => 2,
-                    Type::Float | Type::F32 => 3,
-                    Type::Unit | Type::Obj(_) | Type::Enum(_) | Type::Array(_, _) | Type::Slice(_) | Type::Vec(_) | Type::Generic(_) | Type::DynTrait(_) | Type::Rc(_) | Type::Arc(_) => 0,
+                let (raw_val, type_tag) = match arg.ty() {
+                    Type::Int | Type::I32 => (
+                        compile_expr(builder, arg, vars, var_counter, module, struct_layouts),
+                        0,
+                    ),
+                    Type::Bool => (
+                        compile_expr(builder, arg, vars, var_counter, module, struct_layouts),
+                        1,
+                    ),
+                    Type::Str | Type::String => (
+                        compile_expr(builder, arg, vars, var_counter, module, struct_layouts),
+                        2,
+                    ),
+                    Type::Float | Type::F32 => (
+                        compile_expr(builder, arg, vars, var_counter, module, struct_layouts),
+                        3,
+                    ),
+                    Type::Obj(tn) | Type::Enum(tn) => {
+                        let to_string_fn = format!("{tn}_to_string");
+                        if module.get_name(&to_string_fn).is_some() {
+                            let method_call = TypedExpr::Call(
+                                to_string_fn,
+                                vec![arg.clone()],
+                                Type::Str,
+                                arg.span(),
+                            );
+                            (
+                                compile_expr(
+                                    builder,
+                                    &method_call,
+                                    vars,
+                                    var_counter,
+                                    module,
+                                    struct_layouts,
+                                ),
+                                2,
+                            )
+                        } else {
+                            (
+                                compile_expr(
+                                    builder,
+                                    arg,
+                                    vars,
+                                    var_counter,
+                                    module,
+                                    struct_layouts,
+                                ),
+                                0,
+                            )
+                        }
+                    }
+                    _ => (
+                        compile_expr(builder, arg, vars, var_counter, module, struct_layouts),
+                        0,
+                    ),
                 };
 
                 let type_tag_val = builder.ins().iconst(types::I64, type_tag);
-                let raw_val = compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
 
                 let value_bits = {
                     let raw_ty = builder.func.dfg.value_type(raw_val);
-                    if (arg.ty() == Type::Str || arg.ty() == Type::String) && !matches!(arg, TypedExpr::String(..)) {
-                        // Str/String are stack pointers — load the char* from offset 0
-                        builder.ins().load(types::I64, MemFlags::new(), raw_val, 0)
-                    } else if raw_ty == types::F64 {
+                    if raw_ty == types::F64 {
                         builder.ins().bitcast(types::I64, MemFlags::new(), raw_val)
                     } else if raw_ty == types::F32 {
-                        // promote f32 -> f64 then bitcast to i64 for ABI
                         let promoted = builder.ins().fpromote(types::F64, raw_val);
                         builder.ins().bitcast(types::I64, MemFlags::new(), promoted)
                     } else if raw_ty == types::I32 || raw_ty == types::I8 {
                         builder.ins().sextend(types::I64, raw_val)
                     } else {
-                        raw_val // already I64
+                        raw_val // already I64 pointer or integer
                     }
                 };
 

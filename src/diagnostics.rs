@@ -29,11 +29,12 @@ pub fn print_semantic_errors(src: &PathBuf, source_code: &str, errors: Vec<Seman
     let file_name = src.to_string_lossy().to_string();
 
     for err in errors {
-        let mut report = Report::build(ReportKind::Error, (file_name.clone(), err.span.clone()))
+        let span = if err.span.is_empty() { 0..1 } else { err.span.clone() };
+        let mut report = Report::build(ReportKind::Error, (file_name.clone(), span.clone()))
             .with_code("E001")
             .with_message(&err.message)
             .with_label(
-                Label::new((file_name.clone(), err.span.clone()))
+                Label::new((file_name.clone(), span))
                     .with_message(&err.label)
                     .with_color(Color::Red),
             );

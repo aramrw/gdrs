@@ -6,8 +6,9 @@ use logos::Logos;
 #[derive(Logos, Debug, PartialEq, Eq, Hash, Clone)]
 #[logos(skip r"[ \t]+")] // Automatically skip spaces and tabs inline
 #[logos(skip(r"//[^\r\n]*", allow_greedy = true))]
-#[logos(skip(r"#[^\r\n]*", allow_greedy = true))]
 pub enum Token {
+    #[token("#")]
+    Hash,
     #[token("let")]
     Let,
     #[token("mut")]
@@ -230,9 +231,17 @@ pub fn intern_str(s: &str) -> &'static str {
 }
 
 #[derive(Debug, Clone)]
+pub struct Attribute {
+    pub name: String,
+    pub args: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct FieldDecl {
     pub name: String,
     pub ty: Type,
+    pub attributes: Vec<Attribute>,
     pub span: Span,
 }
 
@@ -240,6 +249,7 @@ pub struct FieldDecl {
 pub struct StructDecl {
     pub name: String,
     pub fields: Vec<FieldDecl>,
+    pub attributes: Vec<Attribute>,
     pub where_clause: Option<WhereClause>,
     pub span: Span,
 }
@@ -248,6 +258,7 @@ pub struct StructDecl {
 pub struct EnumVariantDecl {
     pub name: String,
     pub payload_types: Vec<Type>,
+    pub attributes: Vec<Attribute>,
     pub span: Span,
 }
 
@@ -255,6 +266,7 @@ pub struct EnumVariantDecl {
 pub struct EnumDecl {
     pub name: String,
     pub variants: Vec<EnumVariantDecl>,
+    pub attributes: Vec<Attribute>,
     pub where_clause: Option<WhereClause>,
     pub span: Span,
 }
@@ -452,7 +464,7 @@ pub enum TypedExpr {
     If(Box<TypedExpr>, Box<TypedExpr>, Span),
     IfElse(Box<TypedExpr>, Box<TypedExpr>, Box<TypedExpr>, Type, Span),
     Return(Option<Box<TypedExpr>>, Span),
-    MacroCall(String, Vec<TypedExpr>, Span),
+    MacroCall(String, Vec<TypedExpr>, Type, Span),
     Call(String, Vec<TypedExpr>, Type, Span),
 
     ObjInit(String, Vec<(String, TypedExpr)>, Type, Span),
@@ -509,6 +521,7 @@ impl TypedExpr {
             | TypedExpr::Block(_, ty, _)
             | TypedExpr::Unsafe(_, ty, _)
             | TypedExpr::IfElse(_, _, _, ty, _)
+            | TypedExpr::MacroCall(_, _, ty, _)
             | TypedExpr::Call(_, _, ty, _)
             | TypedExpr::ObjInit(_, _, ty, _)
             | TypedExpr::FieldAccess(_, _, ty, _)
@@ -527,7 +540,6 @@ impl TypedExpr {
             | TypedExpr::While(..)
             | TypedExpr::If(..)
             | TypedExpr::Return(..)
-            | TypedExpr::MacroCall(..)
             | TypedExpr::FieldAssign(..)
             | TypedExpr::IndexAssign(..)
             | TypedExpr::DerefAssign(..) => Type::Unit,
@@ -568,7 +580,7 @@ impl TypedExpr {
             TypedExpr::If(_, _, s) => s.clone(),
             TypedExpr::IfElse(_, _, _, _, s) => s.clone(),
             TypedExpr::Return(_, s) => s.clone(),
-            TypedExpr::MacroCall(_, _, s) => s.clone(),
+            TypedExpr::MacroCall(_, _, _, s) => s.clone(),
             TypedExpr::Call(_, _, _, s) => s.clone(),
             TypedExpr::ObjInit(_, _, _, s) => s.clone(),
             TypedExpr::CoerceToDyn(_, _, s) => s.clone(),

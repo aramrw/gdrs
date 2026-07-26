@@ -1,37 +1,47 @@
 // std/fs.gdrs
+use std::core::{Result, Option}
+use std::error::Error
+use std::fmt::Display
+
+fn buffer_to_string(ptr: i64, size: i64) -> str:
+	return ptr
+
+#[derive(Error)]
+enum IoError:
+	#[err("Failed to open file at path: '{0}'")]
+	OpenFailed(String)
+	#[err("Failed to allocate memory for file read")]
+	AllocationFailed
+	#[err("Failed to read file contents")]
+	ReadFailed
 
 extern "C":
-	// Opens a file ("r" for read, "w" for write)
 	fn fopen(filename: str, mode: str) -> i64
-
-	// Moves file pointer (used for finding file size)
-	// Note: whence for fseek is usually 2 for end-of-file, 
-	// or can use constants: SEEK_SET = 0, SEEK_CUR = 1, SEEK_END = 2)
 	fn fseek(stream: i64, offset: i64, whence: i32) -> i32
-
-	// Gets current file pointer position (used to get file length)
 	fn ftell(stream: i64) -> i64
-
-	// Reads raw bytes into a buffer
 	fn fread(ptr: i64, size: i64, nmemb: i64, stream: i64) -> i64
-
-	// Closes the file pointer
 	fn fclose(stream: i64) -> i32
+	fn malloc(size: i64) -> i64
+	fn free(ptr: i64)
+	fn memset(ptr: i64, val: i32, size: i64) -> i64
 
 obj File:
 	handle: i64
 
 impl File:
-	fn open(path: str) -> File:
+	fn open(path: str) -> Result<File, IoError>:
 		unsafe:
 			let ptr = fopen(path, "r")
-			return File{handle: ptr}
+			if ptr == 0:
+				return Err(IoError::OpenFailed(path))
+			
+			return Ok(File{handle: ptr})
 
-	fn read_to_string(self) -> String:
+	fn read_to_string(self) -> Result<String, IoError>:
 		unsafe:
 			let stream = self.handle
 			if stream == 0:
-				return ""
+				return Err(IoError::ReadFailed)
 
 			// 1. Seek to end of file to find size
 			fseek(stream, 0, 2)
@@ -40,11 +50,21 @@ impl File:
 			// 2. Seek back to the beginning to read
 			fseek(stream, 0, 0)
 
-			// 3. Allocate buffer (using your heap/string allocation mechanism)
-			// (Or read into a byte buffer block)
-			
-			// 4. Read data
-			// fread(buffer_ptr, 1, size, stream)
+			// 3. Allocate buffer (+1 for null terminator safety)
+			let buffer = malloc(size + 1)
+			if buffer == 0:
+				fclose(stream)
+				return Err(IoError::AllocationFailed)
 
+			// 4. Read data into the buffer pointer
+			fread(buffer, 1, size, stream)
+			memset(buffer + size, 0, 1)
+
+			// Clean up file handle
 			fclose(stream)
-			return "content_placeholder"
+
+			return Ok(buffer_to_string(buffer, size))
+
+	fn close(self) -> i32:
+		unsafe:
+			return fclose(self.handle)

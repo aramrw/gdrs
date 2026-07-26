@@ -1,0 +1,33 @@
+// std/time.gdrs
+use std::fmt::Display
+
+extern "C":
+	fn clock_gettime(clk_id: i32, tp: i64) -> i32
+	fn malloc(size: i64) -> i64
+	fn free(ptr: i64)
+
+obj Instant:
+	sec: i64
+	nsec: i64
+
+impl Instant:
+	fn now() -> Instant:
+		unsafe:
+			let ts = malloc(16)
+			clock_gettime(0, ts)
+			let sec = *ts
+			let nsec = *(ts + 8)
+			free(ts)
+			return Instant{sec: sec, nsec: nsec}
+
+	fn ms(self) -> i64:
+		let end = Instant::now()
+		let sec_diff = end.sec - self.sec
+		let nsec_diff = end.nsec - self.nsec
+		return (sec_diff * 1000) + (nsec_diff / 1000000)
+
+	fn us(self) -> i64:
+		let end = Instant::now()
+		let sec_diff = end.sec - self.sec
+		let nsec_diff = end.nsec - self.nsec
+		return (sec_diff * 1000000) + (nsec_diff / 1000)

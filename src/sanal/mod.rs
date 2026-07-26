@@ -123,7 +123,7 @@ pub fn check_semantics(program: &Program) -> Result<(TypedProgram, HashMap<Strin
     let mut all_functions = Vec::new();
 
     for impl_block in &program.impls {
-        let target_ty = resolve_type(Type::Obj(intern_str(&impl_block.target_type)), &enum_names);
+        let target_ty = resolve_type(Type::Obj(intern_str(&impl_block.target_type)), &enum_names, 0..1, &mut errors);
         for method in &impl_block.methods {
             let mangled_name = format!("{}_{}", impl_block.target_type, method.name);
             let mut params = Vec::new();
@@ -185,6 +185,14 @@ pub fn check_semantics(program: &Program) -> Result<(TypedProgram, HashMap<Strin
         }
     }
 
+    for func in &mut all_functions {
+        let f_span = func.params.first().map(|p| p.span.clone()).unwrap_or(0..1);
+        func.return_type = resolve_type(func.return_type, &enum_names, f_span, &mut errors);
+        for param in &mut func.params {
+            param.ty = resolve_type(param.ty, &enum_names, param.span.clone(), &mut errors);
+        }
+    }
+
     let mut fn_map = HashMap::new();
     for func in &all_functions {
         fn_map.insert(func.name.clone(), func);
@@ -196,8 +204,8 @@ pub fn check_semantics(program: &Program) -> Result<(TypedProgram, HashMap<Strin
     for ext in &program.externs {
         for ef in &ext.functions {
             extern_fn_names.insert(ef.name.clone());
-            let res_ret = resolve_type(ef.return_type, &enum_names);
-            let res_params: Vec<Type> = ef.params.iter().map(|p| resolve_type(p.ty, &enum_names)).collect();
+            let res_ret = resolve_type(ef.return_type, &enum_names, 0..1, &mut errors);
+            let res_params: Vec<Type> = ef.params.iter().map(|p| resolve_type(p.ty, &enum_names, p.span.clone(), &mut errors)).collect();
             extern_map.insert(ef.name.clone(), res_ret);
             extern_signatures.insert(ef.name.clone(), (res_params, res_ret));
         }
@@ -217,11 +225,11 @@ pub fn check_semantics(program: &Program) -> Result<(TypedProgram, HashMap<Strin
         let mut scope_stack = ScopeStack::new();
         let mut typed_body = Vec::new();
 
-        let resolved_return_type = resolve_type(func.return_type, &enum_names);
+        let resolved_return_type = func.return_type;
         let mut resolved_params = Vec::new();
 
         for param in &func.params {
-            let res_ty = resolve_type(param.ty, &enum_names);
+            let res_ty = param.ty;
             scope_stack.declare(param.name.clone(), param.is_mutable, res_ty);
             resolved_params.push(Param {
                 name: param.name.clone(),
@@ -267,11 +275,31 @@ pub fn check_semantics(program: &Program) -> Result<(TypedProgram, HashMap<Strin
     }
 }
 
-fn resolve_type(ty: Type, enum_names: &std::collections::HashSet<String>) -> Type {
+fn resolve_type(ty: Type, enum_names: &std::collections::HashSet<String>, span: Span, errors: &mut Vec<SemanticError>) -> Type {
     match ty {
+        Type::Obj("Result_bare") => {
+            errors.push(SemanticError {
+                message: "Type `Result` requires generic parameter(s), e.g. `Result<T>` or `Result<T, E>`".to_string(),
+                label: "Missing generic parameter for `Result`".to_string(),
+                help: Some("Specify generic types: `Result<T>` or `Result<T, E>`".to_string()),
+                span,
+            });
+            Type::Enum(intern_str("std_core_Result"))
+        }
+        Type::Obj("Option_bare") => {
+            errors.push(SemanticError {
+                message: "Type `Option` requires a generic parameter, e.g. `Option<T>`".to_string(),
+                label: "Missing generic parameter for `Option`".to_string(),
+                help: Some("Specify generic type: `Option<T>`".to_string()),
+                span,
+            });
+            Type::Enum(intern_str("std_core_Option"))
+        }
+        Type::Obj("Option") => Type::Enum(intern_str("std_core_Option")),
+        Type::Obj("Result") => Type::Enum(intern_str("std_core_Result")),
         Type::Obj(name) if enum_names.contains(name) => Type::Enum(intern_str(name)),
         Type::Array(elem_ty, len) => Type::Array(
-            crate::ast::intern_type(resolve_type(*elem_ty, enum_names)),
+            crate::ast::intern_type(resolve_type(*elem_ty, enum_names, span, errors)),
             len,
         ),
         other => other,
