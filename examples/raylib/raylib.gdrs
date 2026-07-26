@@ -1,4 +1,5 @@
 use std::math::Vec2
+use std::time::Instant
 
 extern "C":
 	fn dlopen(filename: str, flags: i32) -> i64
@@ -48,6 +49,7 @@ impl Ball:
 				self.speed.y = -self.speed.y
 
 fn main():
+	let now = Instant.now()
 	unsafe:
 		let handle = dlopen("/opt/homebrew/lib/libraylib.dylib", 9)
 		if handle == 0:
@@ -61,7 +63,7 @@ fn main():
 
 		let mut i = 0
 		while i < 5:
-			let pos = Vec2.new(100.0 + (120.0 * i), 100.0 + (120.0 * i))
+			let pos = Vec2.new(100.0 + (120.0 + i), 100.0 + (120.0 + i))
 			let speed = Vec2.new(3.0 + i, 5.0 - i)
 			let mut r = 10.0
 			if (i % 2) == 0:
@@ -71,6 +73,8 @@ fn main():
 			let ball = Ball{pos: pos, speed: speed, r: 50.0, color: 4278190335 + (120 * i)}
 			balls.push(ball)
 			i += 1
+
+			log!("starting drawing at: ", now.ms())
 
 		while !WindowShouldClose():
 			BeginDrawing()
