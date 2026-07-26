@@ -1,0 +1,23 @@
+// imp.gdrs - Low-level Unix process runner using libc
+
+extern "C":
+	fn fork() -> i32
+	fn intrinsic_execvp(file: String) -> i32
+	fn intrinsic_waitpid(pid: i32) -> i32
+
+obj ImpCommand:
+	program: String
+
+impl ImpCommand:
+	fn spawn(program: String) -> i32:
+		unsafe:
+			let pid = fork()
+
+			if pid == 0:
+				intrinsic_execvp(program)
+				return -1
+			else:
+				if pid > 0:
+					return intrinsic_waitpid(pid)
+				else:
+					return -1

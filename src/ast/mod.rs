@@ -238,6 +238,7 @@ pub struct FieldDecl {
 pub struct StructDecl {
     pub name: String,
     pub fields: Vec<FieldDecl>,
+    pub where_clause: Option<WhereClause>,
     pub span: Span,
 }
 
@@ -252,13 +253,16 @@ pub struct EnumVariantDecl {
 pub struct EnumDecl {
     pub name: String,
     pub variants: Vec<EnumVariantDecl>,
+    pub where_clause: Option<WhereClause>,
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct ImplDecl {
+    pub trait_name: Option<String>,
     pub target_type: String,
     pub methods: Vec<FuncDecl>,
+    pub where_clause: Option<WhereClause>,
     pub span: Span,
 }
 

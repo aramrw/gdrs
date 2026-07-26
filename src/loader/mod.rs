@@ -5,7 +5,7 @@ use crate::ast::*;
 use crate::parser::parser;
 use chumsky::Parser;
 use logos::Logos;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -125,6 +125,57 @@ fn load_file_recursive(
         local_types.insert(e.name.clone());
     }
 
+    // Process `use` declarations in this file
+    let mut use_aliases = HashMap::new();
+    for u in &program.uses {
+        if u.path.is_empty() {
+            continue;
+        }
+
+        let mut found_file: Option<(PathBuf, Vec<String>, usize)> = None;
+        for i in (1..=u.path.len()).rev() {
+            let mod_parts = &u.path[0..i];
+            let rel_path = format!("{}.gdrs", mod_parts.join("/"));
+
+            let candidates = vec![
+                base_dir.join(&rel_path),
+                Path::new(".").join(&rel_path),
+                Path::new("std").join(format!("{}.gdrs", mod_parts[1..].join("/"))),
+                Path::new("std").join(&rel_path),
+            ];
+
+            for cand in candidates {
+                if cand.exists() {
+                    let mut prefix = mod_parts.to_vec();
+                    if cand.to_string_lossy().contains("std/") && prefix.first().map(|s| s.as_str()) != Some("std") {
+                        prefix.insert(0, "std".to_string());
+                    }
+                    found_file = Some((cand, prefix, i));
+                    break;
+                }
+            }
+            if found_file.is_some() {
+                break;
+            }
+        }
+
+        if let Some((sub_file, sub_prefix, matched_len)) = found_file {
+            let sub_base = sub_file.parent().unwrap_or_else(|| Path::new("."));
+            load_file_recursive(&sub_file, sub_base, &sub_prefix, loaded_files, merged_program)?;
+
+            let sub_prefix_str = format!("{}_", sub_prefix.join("_"));
+            if matched_len < u.path.len() {
+                let sym = &u.path[matched_len];
+                let alias = u.alias.as_ref().unwrap_or(sym);
+                use_aliases.insert(alias.clone(), format!("{}{}", sub_prefix_str, sym));
+            } else {
+                let sym = u.path.last().unwrap();
+                let alias = u.alias.as_ref().unwrap_or(sym);
+                use_aliases.insert(alias.clone(), sub_prefix_str.trim_end_matches('_').to_string());
+            }
+        }
+    }
+
     for mut t in program.traits {
         if !prefix_str.is_empty() {
             t.name = format!("{}{}", prefix_str, t.name);
@@ -146,7 +197,7 @@ fn load_file_recursive(
         if !prefix_str.is_empty() {
             s.name = format!("{}{}", prefix_str, s.name);
             for field in &mut s.fields {
-                rewrite_type(&mut field.ty, &local_types, &prefix_str);
+                rewrite_type(&mut field.ty, &local_types, &use_aliases, &prefix_str);
             }
         }
         merged_program.structs.push(s);
@@ -158,7 +209,7 @@ fn load_file_recursive(
             e.name = format!("{}{}", prefix_str, e.name);
             for v in &mut e.variants {
                 for p_ty in &mut v.payload_types {
-                    rewrite_type(p_ty, &local_types, &prefix_str);
+                    rewrite_type(p_ty, &local_types, &use_aliases, &prefix_str);
                 }
             }
         }
@@ -167,18 +218,27 @@ fn load_file_recursive(
 
     // Mangle and push impls
     for mut i in program.impls {
-        if !prefix_str.is_empty() {
-            if local_types.contains(&i.target_type) {
-                i.target_type = format!("{}{}", prefix_str, i.target_type);
+        if use_aliases.contains_key(&i.target_type) {
+            i.target_type = use_aliases[&i.target_type].clone();
+        } else if !prefix_str.is_empty() && local_types.contains(&i.target_type) {
+            i.target_type = format!("{}{}", prefix_str, i.target_type);
+        }
+
+        if let Some(t_name) = &mut i.trait_name {
+            if use_aliases.contains_key(t_name) {
+                *t_name = use_aliases[t_name].clone();
+            } else if !prefix_str.is_empty() && local_types.contains(t_name) {
+                *t_name = format!("{}{}", prefix_str, t_name);
             }
-            for method in &mut i.methods {
-                rewrite_type(&mut method.return_type, &local_types, &prefix_str);
-                for p in &mut method.params {
-                    rewrite_type(&mut p.ty, &local_types, &prefix_str);
-                }
-                for expr in &mut method.body {
-                    rewrite_expr(expr, &local_types, &prefix_str);
-                }
+        }
+
+        for method in &mut i.methods {
+            rewrite_type(&mut method.return_type, &local_types, &use_aliases, &prefix_str);
+            for p in &mut method.params {
+                rewrite_type(&mut p.ty, &local_types, &use_aliases, &prefix_str);
+            }
+            for expr in &mut method.body {
+                rewrite_expr(expr, &local_types, &use_aliases, &prefix_str);
             }
         }
         merged_program.impls.push(i);
@@ -188,13 +248,13 @@ fn load_file_recursive(
     for mut f in program.functions {
         if !prefix_str.is_empty() && f.name != "main" {
             f.name = format!("{}{}", prefix_str, f.name);
-            rewrite_type(&mut f.return_type, &local_types, &prefix_str);
-            for p in &mut f.params {
-                rewrite_type(&mut p.ty, &local_types, &prefix_str);
-            }
-            for expr in &mut f.body {
-                rewrite_expr(expr, &local_types, &prefix_str);
-            }
+        }
+        rewrite_type(&mut f.return_type, &local_types, &use_aliases, &prefix_str);
+        for p in &mut f.params {
+            rewrite_type(&mut p.ty, &local_types, &use_aliases, &prefix_str);
+        }
+        for expr in &mut f.body {
+            rewrite_expr(expr, &local_types, &use_aliases, &prefix_str);
         }
         merged_program.functions.push(f);
     }
@@ -202,8 +262,6 @@ fn load_file_recursive(
     // Process sub-modules declared via `mod path::to::sub`
     for m in program.mods {
         let sub_prefix = m.path.clone();
-
-        // Resolve file path: e.g. base_dir / "math.gdrs" or base_dir / "geometry/rect.gdrs"
         let rel_path = format!("{}.gdrs", m.path.join("/"));
         let sub_file = base_dir.join(rel_path);
 
@@ -213,83 +271,119 @@ fn load_file_recursive(
     Ok(())
 }
 
-fn rewrite_type(ty: &mut Type, local_types: &HashSet<String>, prefix: &str) {
+fn resolve_name_alias(
+    name: &str,
+    aliases: &HashMap<String, String>,
+    local_types: &HashSet<String>,
+    prefix: &str,
+) -> Option<String> {
+    if aliases.contains_key(name) {
+        return Some(aliases[name].clone());
+    }
+    if let Some((mod_part, item_part)) = name.split_once("::") {
+        if aliases.contains_key(mod_part) {
+            return Some(format!("{}_{}", aliases[mod_part], item_part));
+        }
+    }
+    if local_types.contains(name) {
+        return Some(format!("{}{}", prefix, name));
+    }
+    None
+}
+
+fn rewrite_type(
+    ty: &mut Type,
+    local_types: &HashSet<String>,
+    aliases: &HashMap<String, String>,
+    prefix: &str,
+) {
     match ty {
         Type::Obj(name) => {
-            if local_types.contains(*name) {
-                *ty = Type::Obj(intern_str(&format!("{}{}", prefix, name)));
+            if let Some(r) = resolve_name_alias(&**name, aliases, local_types, prefix) {
+                *ty = Type::Obj(intern_str(&r));
             }
         }
         Type::Enum(name) => {
-            if local_types.contains(*name) {
-                *ty = Type::Enum(intern_str(&format!("{}{}", prefix, name)));
+            if let Some(r) = resolve_name_alias(&**name, aliases, local_types, prefix) {
+                *ty = Type::Enum(intern_str(&r));
             }
         }
         Type::Array(elem_ty, size) => {
             let mut inner = **elem_ty;
-            rewrite_type(&mut inner, local_types, prefix);
+            rewrite_type(&mut inner, local_types, aliases, prefix);
             *ty = Type::Array(intern_type(inner), *size);
         }
         Type::Slice(elem_ty) => {
             let mut inner = **elem_ty;
-            rewrite_type(&mut inner, local_types, prefix);
+            rewrite_type(&mut inner, local_types, aliases, prefix);
             *ty = Type::Slice(intern_type(inner));
         }
         Type::Vec(elem_ty) => {
             let mut inner = **elem_ty;
-            rewrite_type(&mut inner, local_types, prefix);
+            rewrite_type(&mut inner, local_types, aliases, prefix);
             *ty = Type::Vec(intern_type(inner));
         }
         _ => {}
     }
 }
 
-fn rewrite_expr(expr: &mut Expr, local_types: &HashSet<String>, prefix: &str) {
+fn rewrite_expr(
+    expr: &mut Expr,
+    local_types: &HashSet<String>,
+    aliases: &HashMap<String, String>,
+    prefix: &str,
+) {
     match expr {
         Expr::Ident(name, _) => {
-            if local_types.contains(name) {
-                *name = format!("{}{}", prefix, name);
+            if let Some(r) = resolve_name_alias(name, aliases, local_types, prefix) {
+                *name = r;
             }
         }
         Expr::ObjInit(name, fields, _) => {
-            if local_types.contains(name) {
-                *name = format!("{}{}", prefix, name);
+            if let Some(r) = resolve_name_alias(name, aliases, local_types, prefix) {
+                *name = r;
             }
             for (_, f_expr) in fields {
-                rewrite_expr(f_expr, local_types, prefix);
+                rewrite_expr(f_expr, local_types, aliases, prefix);
             }
         }
         Expr::Call(name, args, _) => {
-            if local_types.contains(name) {
-                *name = format!("{}{}", prefix, name);
+            if let Some(r) = resolve_name_alias(name, aliases, local_types, prefix) {
+                *name = r;
+            } else if name.contains('.') {
+                if let Some((target, method)) = name.split_once('.') {
+                    if let Some(r) = resolve_name_alias(target, aliases, local_types, prefix) {
+                        *name = format!("{}.{}", r, method);
+                    }
+                }
             }
             for arg in args {
-                rewrite_expr(arg, local_types, prefix);
+                rewrite_expr(arg, local_types, aliases, prefix);
             }
         }
         Expr::Block(stmts, _) => {
             for s in stmts {
-                rewrite_expr(s, local_types, prefix);
+                rewrite_expr(s, local_types, aliases, prefix);
             }
         }
         Expr::If(cond, body, _) => {
-            rewrite_expr(cond, local_types, prefix);
-            rewrite_expr(body, local_types, prefix);
+            rewrite_expr(cond, local_types, aliases, prefix);
+            rewrite_expr(body, local_types, aliases, prefix);
         }
         Expr::IfElse(cond, then_b, else_b, _) => {
-            rewrite_expr(cond, local_types, prefix);
-            rewrite_expr(then_b, local_types, prefix);
-            rewrite_expr(else_b, local_types, prefix);
+            rewrite_expr(cond, local_types, aliases, prefix);
+            rewrite_expr(then_b, local_types, aliases, prefix);
+            rewrite_expr(else_b, local_types, aliases, prefix);
         }
         Expr::While(cond, body, _) => {
-            rewrite_expr(cond, local_types, prefix);
-            rewrite_expr(body, local_types, prefix);
+            rewrite_expr(cond, local_types, aliases, prefix);
+            rewrite_expr(body, local_types, aliases, prefix);
         }
-        Expr::Let(_, _, _, val, _) => rewrite_expr(val, local_types, prefix),
-        Expr::Assign(_, val, _) => rewrite_expr(val, local_types, prefix),
+        Expr::Let(_, _, _, val, _) => rewrite_expr(val, local_types, aliases, prefix),
+        Expr::Assign(_, val, _) => rewrite_expr(val, local_types, aliases, prefix),
         Expr::Return(opt_expr, _) => {
             if let Some(e) = opt_expr {
-                rewrite_expr(e, local_types, prefix);
+                rewrite_expr(e, local_types, aliases, prefix);
             }
         }
         Expr::Add(lhs, rhs, _)
@@ -310,19 +404,19 @@ fn rewrite_expr(expr: &mut Expr, local_types: &HashSet<String>, prefix: &str) {
         | Expr::GreaterEqual(lhs, rhs, _)
         | Expr::And(lhs, rhs, _)
         | Expr::Or(lhs, rhs, _) => {
-            rewrite_expr(lhs, local_types, prefix);
-            rewrite_expr(rhs, local_types, prefix);
+            rewrite_expr(lhs, local_types, aliases, prefix);
+            rewrite_expr(rhs, local_types, aliases, prefix);
         }
         Expr::FieldAccess(target, _, _) => {
-            rewrite_expr(target, local_types, prefix);
+            rewrite_expr(target, local_types, aliases, prefix);
         }
         Expr::FieldAssign(target, _, val, _) => {
-            rewrite_expr(target, local_types, prefix);
-            rewrite_expr(val, local_types, prefix);
+            rewrite_expr(target, local_types, aliases, prefix);
+            rewrite_expr(val, local_types, aliases, prefix);
         }
         Expr::MacroCall(_, args, _) => {
             for arg in args {
-                rewrite_expr(arg, local_types, prefix);
+                rewrite_expr(arg, local_types, aliases, prefix);
             }
         }
         _ => {}

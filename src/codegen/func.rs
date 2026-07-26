@@ -129,7 +129,11 @@ pub fn compile_func<M: Module>(
 
     // Declare & compile native function
     let func_id = match module.get_name(export_name) {
-        Some(cranelift_module::FuncOrDataId::Func(id)) => id,
+        Some(cranelift_module::FuncOrDataId::Func(id)) => {
+            let existing_sig = module.declarations().get_function_decl(id).signature.clone();
+            ctx.func.signature = existing_sig;
+            id
+        }
         _ => module
             .declare_function(export_name, Linkage::Export, &ctx.func.signature)
             .unwrap(),

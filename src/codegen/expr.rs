@@ -640,7 +640,8 @@ pub fn compile_expr<M: Module>(
             builder.switch_to_block(then_block);
             builder.seal_block(then_block);
             let then_val = compile_expr(builder, then_b, vars, var_counter, module, struct_layouts);
-            if !builder.is_unreachable() {
+            let then_term = builder.is_unreachable();
+            if !then_term {
                 if is_unit {
                     builder.ins().jump(exit_block, &[]);
                 } else {
@@ -653,7 +654,8 @@ pub fn compile_expr<M: Module>(
             builder.switch_to_block(else_block);
             builder.seal_block(else_block);
             let else_val = compile_expr(builder, else_b, vars, var_counter, module, struct_layouts);
-            if !builder.is_unreachable() {
+            let else_term = builder.is_unreachable();
+            if !else_term {
                 if is_unit {
                     builder.ins().jump(exit_block, &[]);
                 } else {
@@ -666,7 +668,11 @@ pub fn compile_expr<M: Module>(
             builder.switch_to_block(exit_block);
             builder.seal_block(exit_block);
 
-            if is_unit {
+            if then_term && else_term {
+                let dummy = builder.ins().iconst(cranelift_ty, 0);
+                builder.ins().trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+                dummy
+            } else if is_unit {
                 builder.ins().iconst(types::I64, 0)
             } else {
                 builder.block_params(exit_block)[0]
@@ -880,19 +886,24 @@ pub fn compile_expr<M: Module>(
                 name.clone()
             };
 
-            let sym_ptr = unsafe {
-                if let Ok(c_name) = std::ffi::CString::new(target_symbol_name.as_str()) {
-                    let p = libc::dlsym(libc::RTLD_DEFAULT, c_name.as_ptr());
-                    if p.is_null() {
-                        let c_mangled =
-                            std::ffi::CString::new(format!("_{}", target_symbol_name)).unwrap();
-                        libc::dlsym(libc::RTLD_DEFAULT, c_mangled.as_ptr())
+            let known_in_module = module.get_name(&target_symbol_name).is_some();
+            let sym_ptr = if !known_in_module {
+                unsafe {
+                    if let Ok(c_name) = std::ffi::CString::new(target_symbol_name.as_str()) {
+                        let p = libc::dlsym(libc::RTLD_DEFAULT, c_name.as_ptr());
+                        if p.is_null() {
+                            let c_mangled =
+                                std::ffi::CString::new(format!("_{}", target_symbol_name)).unwrap();
+                            libc::dlsym(libc::RTLD_DEFAULT, c_mangled.as_ptr())
+                        } else {
+                            p
+                        }
                     } else {
-                        p
+                        std::ptr::null_mut()
                     }
-                } else {
-                    std::ptr::null_mut()
                 }
+            } else {
+                std::ptr::null_mut()
             };
 
             if !sym_ptr.is_null() {
@@ -907,11 +918,43 @@ pub fn compile_expr<M: Module>(
                     builder.ins().iconst(types::I64, 0)
                 }
             } else {
-                let callee = module
-                    .declare_function(&target_symbol_name, Linkage::Import, &sig)
-                    .unwrap();
+                let linkage = if target_symbol_name.starts_with("intrinsic_") {
+                    Linkage::Import
+                } else {
+                    Linkage::Export
+                };
+
+                let callee = match module.get_name(&target_symbol_name) {
+                    Some(cranelift_module::FuncOrDataId::Func(id)) => id,
+                    _ => module
+                        .declare_function(&target_symbol_name, linkage, &sig)
+                        .unwrap(),
+                };
+                let decl_sig = module.declarations().get_function_decl(callee);
+                let mut matched_args = Vec::new();
+                for (i, &arg_val) in compiled_args.iter().enumerate() {
+                    if i < decl_sig.signature.params.len() {
+                        let expected_ty = decl_sig.signature.params[i].value_type;
+                        let actual_ty = builder.func.dfg.value_type(arg_val);
+                        let coerced = if actual_ty == expected_ty {
+                            arg_val
+                        } else if actual_ty == types::F64 && expected_ty == types::I64 {
+                            builder.ins().bitcast(types::I64, MemFlags::new(), arg_val)
+                        } else if actual_ty == types::F32 && expected_ty == types::I64 {
+                            let promoted = builder.ins().fpromote(types::F64, arg_val);
+                            builder.ins().bitcast(types::I64, MemFlags::new(), promoted)
+                        } else if actual_ty == types::I64 && expected_ty == types::F64 {
+                            builder.ins().bitcast(types::F64, MemFlags::new(), arg_val)
+                        } else {
+                            arg_val
+                        };
+                        matched_args.push(coerced);
+                    } else {
+                        matched_args.push(arg_val);
+                    }
+                }
                 let local_callee = module.declare_func_in_func(callee, builder.func);
-                let call_inst = builder.ins().call(local_callee, &compiled_args);
+                let call_inst = builder.ins().call(local_callee, &matched_args);
                 if *ret_ty != Type::Unit {
                     builder.inst_results(call_inst)[0]
                 } else {

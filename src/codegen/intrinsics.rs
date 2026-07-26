@@ -27,6 +27,31 @@ pub extern "C" fn intrinsic_arg_count() -> i64 {
     guard.len() as i64
 }
 
+pub extern "C" fn intrinsic_execvp(path_ptr: *const std::os::raw::c_char) -> i32 {
+    if path_ptr.is_null() {
+        unsafe { libc::_exit(-1) };
+    }
+    let argv: [*const std::os::raw::c_char; 2] = [path_ptr, std::ptr::null()];
+    unsafe {
+        libc::execvp(path_ptr, argv.as_ptr());
+        libc::_exit(-1);
+    }
+}
+
+pub extern "C" fn intrinsic_waitpid(pid: i32) -> i32 {
+    let mut status: i32 = 0;
+    let res = unsafe { libc::waitpid(pid, &mut status as *mut i32, 0) };
+    if res < 0 {
+        return -1;
+    }
+    if libc::WIFEXITED(status) {
+        let code = libc::WEXITSTATUS(status);
+        if code == 255 { -1 } else { code }
+    } else {
+        -1
+    }
+}
+
 pub extern "C" fn intrinsic_arg_at(idx: i64) -> *const std::os::raw::c_char {
     let guard = JIT_ARGS.lock().unwrap();
     if idx < 0 || (idx as usize) >= guard.len() {

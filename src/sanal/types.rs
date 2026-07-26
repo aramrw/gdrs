@@ -235,6 +235,17 @@ pub fn type_check_expr<'a>(
         Expr::Add(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+            if let Type::Obj(struct_name) = t_lhs.ty() {
+                let mangled = format!("{}_add", struct_name);
+                if let Some(fn_info) = type_ctx.fn_map.get(&mangled) {
+                    return Some(TypedExpr::Call(
+                        mangled,
+                        vec![t_lhs, t_rhs],
+                        fn_info.return_type,
+                        span.clone(),
+                    ));
+                }
+            }
             let ty = check_binary_op("+", &t_lhs, &t_rhs, true, span, errors);
             Some(TypedExpr::Add(
                 Box::new(t_lhs),
@@ -247,6 +258,17 @@ pub fn type_check_expr<'a>(
         Expr::Sub(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+            if let Type::Obj(struct_name) = t_lhs.ty() {
+                let mangled = format!("{}_sub", struct_name);
+                if let Some(fn_info) = type_ctx.fn_map.get(&mangled) {
+                    return Some(TypedExpr::Call(
+                        mangled,
+                        vec![t_lhs, t_rhs],
+                        fn_info.return_type,
+                        span.clone(),
+                    ));
+                }
+            }
             let ty = check_binary_op("-", &t_lhs, &t_rhs, true, span, errors);
             Some(TypedExpr::Sub(
                 Box::new(t_lhs),
@@ -259,6 +281,17 @@ pub fn type_check_expr<'a>(
         Expr::Mul(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+            if let Type::Obj(struct_name) = t_lhs.ty() {
+                let mangled = format!("{}_mul", struct_name);
+                if let Some(fn_info) = type_ctx.fn_map.get(&mangled) {
+                    return Some(TypedExpr::Call(
+                        mangled,
+                        vec![t_lhs, t_rhs],
+                        fn_info.return_type,
+                        span.clone(),
+                    ));
+                }
+            }
             let ty = check_binary_op("*", &t_lhs, &t_rhs, true, span, errors);
             Some(TypedExpr::Mul(
                 Box::new(t_lhs),
@@ -271,6 +304,17 @@ pub fn type_check_expr<'a>(
         Expr::Div(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+            if let Type::Obj(struct_name) = t_lhs.ty() {
+                let mangled = format!("{}_div", struct_name);
+                if let Some(fn_info) = type_ctx.fn_map.get(&mangled) {
+                    return Some(TypedExpr::Call(
+                        mangled,
+                        vec![t_lhs, t_rhs],
+                        fn_info.return_type,
+                        span.clone(),
+                    ));
+                }
+            }
             let ty = check_binary_op("/", &t_lhs, &t_rhs, true, span, errors);
             Some(TypedExpr::Div(
                 Box::new(t_lhs),
@@ -1054,14 +1098,27 @@ pub fn type_check_expr<'a>(
                         ));
                     }
 
-                    let normalized_target = target_name.replace("::", "_");
+                    let normalized_target = match typed_args[0].ty() {
+                        Type::Obj(s_name) | Type::Enum(s_name) => s_name.to_string(),
+                        _ => {
+                            if let TypedExpr::Ident(target_name, _, _) = &typed_args[0] {
+                                target_name.replace("::", "_")
+                            } else {
+                                "".to_string()
+                            }
+                        }
+                    };
                     let mangled = format!("{}_{}", normalized_target, name);
                     if type_ctx.fn_map.contains_key(&mangled) {
-                        resolved_name = mangled;
+                        resolved_name = mangled.clone();
                         if type_ctx.struct_map.contains_key(&normalized_target)
                             || type_ctx.enum_map.contains_key(&normalized_target)
                         {
-                            typed_args.remove(0);
+                            if let TypedExpr::Ident(id, _, _) = &typed_args[0] {
+                                if id == &normalized_target {
+                                    typed_args.remove(0);
+                                }
+                            }
                         }
                     }
                 }
@@ -1145,22 +1202,7 @@ pub fn type_check_expr<'a>(
                 }
             }
 
-            if let Some(target_func) = type_ctx.fn_map.get(&resolved_name) {
-                if target_func.where_clause.is_some()
-                    || target_func
-                        .params
-                        .iter()
-                        .any(|p| matches!(p.ty, Type::Generic(_)))
-                {
-                    if !typed_args.is_empty() {
-                        let tn = typed_args[0].ty().name_or_default();
-                        let mono_mangled = format!("{}_{}", resolved_name, tn);
-                        if type_ctx.fn_map.contains_key(&mono_mangled) {
-                            resolved_name = mono_mangled;
-                        }
-                    }
-                }
-            }
+
 
             if type_ctx.extern_fn_names.contains(&resolved_name) && !type_ctx.is_unsafe {
                 errors.push(SemanticError {
@@ -1176,6 +1218,13 @@ pub fn type_check_expr<'a>(
             let ret_ty = if scopes.lookup(&resolved_name).is_some() {
                 Type::Int
             } else if let Some(target_func) = type_ctx.fn_map.get(&resolved_name) {
+                if target_func.params.len() != typed_args.len() && !typed_args.is_empty() {
+                    if (target_func.params.is_empty() || target_func.params[0].name != "self")
+                        && target_func.params.len() == typed_args.len() - 1
+                    {
+                        typed_args.remove(0);
+                    }
+                }
                 if target_func.params.len() != typed_args.len() {
                     errors.push(SemanticError {
                         message: format!(
@@ -1190,6 +1239,19 @@ pub fn type_check_expr<'a>(
                 }
                 if target_func.params.len() == typed_args.len() {
                     for (param, arg) in target_func.params.iter().zip(typed_args.iter_mut()) {
+                        match (param.ty, arg.ty()) {
+                            (Type::F32, Type::Int | Type::I32 | Type::Float | Type::F32) => {
+                                if arg.ty() != Type::F32 {
+                                    *arg = TypedExpr::CastF32(Box::new(arg.clone()), span.clone());
+                                }
+                            }
+                            (Type::I32, Type::Int | Type::I32) => {
+                                if arg.ty() != Type::I32 {
+                                    *arg = TypedExpr::CastI32(Box::new(arg.clone()), span.clone());
+                                }
+                            }
+                            _ => {}
+                        }
                         if let Type::DynTrait(t_name) = param.ty {
                             *arg =
                                 TypedExpr::CoerceToDyn(Box::new(arg.clone()), t_name, span.clone());
@@ -1360,16 +1422,16 @@ pub fn type_check_expr<'a>(
                 // B. Check field types and unknown fields
                 for (f_name, f_expr) in &typed_fields {
                     if let Some((_, expected_ty)) = layout.field_offsets.get(f_name) {
-                        if expected_ty != &f_expr.ty() {
+                        if !is_obj_field_type_compatible(expected_ty, &f_expr.ty()) {
                             errors.push(SemanticError {
-                        message: format!(
-                            "Field '{f_name}' in struct '{name}' expects type `{:?}`, found `{:?}`",
-                            expected_ty, f_expr.ty()
-                        ),
-                        label: format!("Expected `{:?}`", expected_ty),
-                        help: None,
-                        span: f_expr.span().clone(),
-                    });
+                                message: format!(
+                                    "Field '{f_name}' in struct '{name}' expects type `{:?}`, found `{:?}`",
+                                    expected_ty, f_expr.ty()
+                                ),
+                                label: format!("Expected `{:?}`", expected_ty),
+                                help: None,
+                                span: f_expr.span().clone(),
+                            });
                         }
                     } else {
                         errors.push(SemanticError {
@@ -1612,6 +1674,19 @@ fn is_float(ty: Type) -> bool {
     matches!(ty, Type::F32 | Type::Float)
 }
 
+fn is_obj_field_type_compatible(expected: &Type, found: &Type) -> bool {
+    if expected == found {
+        return true;
+    }
+    match (expected, found) {
+        (Type::Generic(_), _) | (_, Type::Generic(_)) => true,
+        (Type::Int | Type::I32, Type::Int | Type::I32) => true,
+        (Type::Float | Type::F32, Type::Float | Type::F32) => true,
+        (Type::Float | Type::F32, Type::Int | Type::I32) => true,
+        _ => false,
+    }
+}
+
 fn check_binary_op(
     op_name: &str,
     t_lhs: &TypedExpr,
@@ -1639,6 +1714,8 @@ fn check_binary_op(
         // Int promoted into float
         _ if allow_float && is_int(l_ty) && is_float(r_ty) => r_ty,
         _ if allow_float && is_float(l_ty) && is_int(r_ty) => l_ty,
+        // Generic types (e.g. $T + $T)
+        (Type::Generic(g), _) | (_, Type::Generic(g)) => Type::Generic(g),
 
         // Invalid types for math/bitwise
         _ => {

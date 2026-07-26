@@ -6,23 +6,13 @@ type ExprOp = fn(Box<Expr>, Box<Expr>, Span) -> Expr;
 
 pub fn stmt_parser<'a>(
     math: impl Parser<Token, Expr, Error = Simple<Token>> + Clone + 'a,
+    type_parser: impl Parser<Token, Type, Error = Simple<Token>> + Clone + 'a,
 ) -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone + 'a {
     let stmt = recursive(|stmt| {
         let let_stmt = just(Token::Let)
             .ignore_then(just(Token::Mut).or_not())
             .then(select! { Token::Ident(s) => s })
-            .then(
-                just(Token::Colon)
-                    .ignore_then(select! {
-                        Token::TypeI32 => Type::I32,
-                        Token::TypeI64 => Type::Int,
-                        Token::TypeF32 => Type::F32,
-                        Token::TypeFloat => Type::Float,
-                        Token::TypeBool => Type::Bool,
-                        Token::TypeStr => Type::Str,
-                    })
-                    .or_not(),
-            )
+            .then(just(Token::Colon).ignore_then(type_parser.clone()).or_not())
             .then_ignore(just(Token::Assign))
             .then(math.clone())
             .map_with_span(|(((is_mut, name), ty), expr), span| {

@@ -1,0 +1,7 @@
+trait Add:
+	fn add(self, other: $T) -> $T
+	where T: Add:
+
+trait Sub:
+	fn sub(self, other: $T) -> $T
+	where T: Sub:
