@@ -8,9 +8,9 @@ use cranelift_native::builder as native_builder;
 use crate::codegen::intrinsics::{
     intrinsic_arc_clone, intrinsic_arc_drop, intrinsic_arc_new, intrinsic_arg_at,
     intrinsic_arg_count, intrinsic_execvp, intrinsic_iter_for_each, intrinsic_iter_map,
-    intrinsic_log, intrinsic_map_for_each, intrinsic_push_str, intrinsic_rc_clone,
-    intrinsic_rc_drop, intrinsic_rc_new, intrinsic_spawn_thread, intrinsic_vec_pop,
-    intrinsic_vec_push, intrinsic_waitpid,
+    intrinsic_log, intrinsic_map_for_each, intrinsic_panic, intrinsic_push_str,
+    intrinsic_rc_clone, intrinsic_rc_drop, intrinsic_rc_new, intrinsic_spawn_thread,
+    intrinsic_vec_pop, intrinsic_vec_push, intrinsic_waitpid,
 };
 
 /// Creates a new Cranelift JITModule configured for the host CPU architecture.
@@ -23,6 +23,7 @@ pub fn create_jit_module() -> JITModule {
 
     let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
     builder.symbol("intrinsic_log", intrinsic_log as *const u8);
+    builder.symbol("intrinsic_panic", intrinsic_panic as *const u8);
     builder.symbol("intrinsic_push_str", intrinsic_push_str as *const u8);
     builder.symbol("intrinsic_vec_push", intrinsic_vec_push as *const u8);
     builder.symbol("intrinsic_vec_pop", intrinsic_vec_pop as *const u8);

@@ -1,0 +1,15 @@
+// main.gdrs
+use std::sys::unix::process::Command
+
+fn main():
+	log!("--- Testing Process Spawning ---")
+
+	// 1. Test a valid system command
+	log!("1. Executing /bin/date:")
+	let status1 = Command.spawn("/bin/date")
+	log!("Exit status (expect 0):", status1)
+
+	// 2. Test a command that does not exist
+	log!("2. Executing bad command:")
+	let status2 = Command.spawn("nonexistent_binary_xyz")
+	log!("Exit status (expect -1):", status2)

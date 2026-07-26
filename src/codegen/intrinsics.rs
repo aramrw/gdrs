@@ -22,6 +22,16 @@ pub fn set_jit_args(args: Vec<String>) {
     *guard = args;
 }
 
+pub extern "C" fn intrinsic_panic(msg_ptr: *const std::os::raw::c_char) -> ! {
+    let msg = if msg_ptr.is_null() {
+        "explicit panic"
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(msg_ptr).to_str().unwrap_or("explicit panic") }
+    };
+    eprintln!("thread 'main' panicked at '{msg}'");
+    std::process::exit(101);
+}
+
 pub extern "C" fn intrinsic_arg_count() -> i64 {
     let guard = JIT_ARGS.lock().unwrap();
     guard.len() as i64
@@ -349,6 +359,33 @@ pub fn compile_macro_call<M: Module>(
     struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
     match name {
+        "panic" => {
+            let msg_ptr = if !args.is_empty() {
+                compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts)
+            } else {
+                builder.ins().iconst(types::I64, 0)
+            };
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let callee = module
+                .declare_function("intrinsic_panic", Linkage::Import, &sig)
+                .unwrap();
+            let local_callee = module.declare_func_in_func(callee, builder.func);
+            builder.ins().call(local_callee, &[msg_ptr]);
+            builder
+                .ins()
+                .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+
+            let dead_block = builder.create_block();
+            builder.switch_to_block(dead_block);
+            builder.seal_block(dead_block);
+
+            let dummy = builder.ins().iconst(types::I64, 0);
+            builder
+                .ins()
+                .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+            dummy
+        }
         "arg_count" | "args_count" => {
             let mut sig = module.make_signature();
             sig.returns.push(AbiParam::new(types::I64));

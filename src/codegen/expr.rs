@@ -678,8 +678,11 @@ pub fn compile_expr<M: Module>(
                 builder.block_params(exit_block)[0]
             }
         }
-        TypedExpr::Match(target, arms, _, _) => {
+        TypedExpr::Match(target, arms, ty, _) => {
             use cranelift_codegen::ir::condcodes::IntCC;
+
+            let is_unit = *ty == Type::Unit;
+            let cranelift_ty = cranelift_type_of(ty);
 
             let target_ptr =
                 compile_expr(builder, target, vars, var_counter, module, struct_layouts);
@@ -688,6 +691,9 @@ pub fn compile_expr<M: Module>(
                 .load(types::I64, MemFlags::new(), target_ptr, 0);
 
             let exit_block = builder.create_block();
+            if !is_unit {
+                builder.append_block_param(exit_block, cranelift_ty);
+            }
 
             for arm in arms {
                 let arm_block = builder.create_block();
@@ -708,24 +714,32 @@ pub fn compile_expr<M: Module>(
                 builder.seal_block(arm_block);
 
                 for (idx, (b_name, _b_ty)) in arm.bindings.iter().enumerate() {
-                    let offset = ((idx + 1) * 8) as i32;
-                    let payload_val =
-                        builder
-                            .ins()
-                            .load(types::I64, MemFlags::new(), target_ptr, offset);
-                    let var = cranelift_frontend::Variable::from_u32(*var_counter as u32);
-                    *var_counter += 1;
-                    builder.declare_var(var, types::I64);
-                    builder.def_var(var, payload_val);
-                    vars.insert(b_name.clone(), var);
+                    if b_name != "_" {
+                        let offset = ((idx + 1) * 8) as i32;
+                        let payload_val =
+                            builder
+                                .ins()
+                                .load(types::I64, MemFlags::new(), target_ptr, offset);
+                        let var = cranelift_frontend::Variable::from_u32(*var_counter as u32);
+                        *var_counter += 1;
+                        builder.declare_var(var, types::I64);
+                        builder.def_var(var, payload_val);
+                        vars.insert(b_name.clone(), var);
+                    }
                 }
 
+                let mut arm_val = builder.ins().iconst(types::I64, 0);
                 for stmt in &arm.body {
-                    compile_expr(builder, stmt, vars, var_counter, module, struct_layouts);
+                    arm_val = compile_expr(builder, stmt, vars, var_counter, module, struct_layouts);
                 }
 
                 if !builder.is_unreachable() {
-                    builder.ins().jump(exit_block, &[]);
+                    if is_unit {
+                        builder.ins().jump(exit_block, &[]);
+                    } else {
+                        let coerced = coerce_val(builder, arm_val, cranelift_ty);
+                        builder.ins().jump(exit_block, &[coerced]);
+                    }
                 }
 
                 // Switch to Next Check Block
@@ -733,12 +747,18 @@ pub fn compile_expr<M: Module>(
                 builder.seal_block(next_check_block);
             }
 
-            builder.ins().jump(exit_block, &[]);
+            if !builder.is_unreachable() {
+                builder.ins().trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+            }
 
             builder.switch_to_block(exit_block);
             builder.seal_block(exit_block);
 
-            builder.ins().iconst(types::I64, 0)
+            if is_unit {
+                builder.ins().iconst(types::I64, 0)
+            } else {
+                builder.block_params(exit_block)[0]
+            }
         }
 
         TypedExpr::While(cond, body, _) => {
@@ -964,7 +984,7 @@ pub fn compile_expr<M: Module>(
         }
 
         // Boolean literal (1 for true, 0 for false)
-        TypedExpr::Bool(b, _) => builder.ins().iconst(types::I64, if *b { 1 } else { 0 }),
+        TypedExpr::Bool(b, _) => builder.ins().iconst(types::I8, if *b { 1 } else { 0 }),
 
         TypedExpr::ObjInit(_struct_name, fields, _ty, _) => {
             let slot_size = (fields.len() * 8) as u32;
@@ -1108,8 +1128,9 @@ pub fn compile_expr<M: Module>(
             // Store payload fields at offsets 8, 16, ...
             for (i, expr) in payload_exprs.iter().enumerate() {
                 let val = compile_expr(builder, expr, vars, var_counter, module, struct_layouts);
+                let val_i64 = coerce_val(builder, val, types::I64);
                 let offset = ((i + 1) * 8) as i32;
-                builder.ins().store(MemFlags::new(), val, base_ptr, offset);
+                builder.ins().store(MemFlags::new(), val_i64, base_ptr, offset);
             }
 
             base_ptr
@@ -1329,6 +1350,14 @@ fn coerce_val(
         builder.ins().sextend(types::I64, val)
     } else if val_ty == types::I64 && target_ty == types::I32 {
         builder.ins().ireduce(types::I32, val)
+    } else if val_ty == types::I64 && target_ty == types::I8 {
+        builder.ins().ireduce(types::I8, val)
+    } else if val_ty == types::I32 && target_ty == types::I8 {
+        builder.ins().ireduce(types::I8, val)
+    } else if val_ty == types::I8 && target_ty == types::I64 {
+        builder.ins().uextend(types::I64, val)
+    } else if val_ty == types::I8 && target_ty == types::I32 {
+        builder.ins().uextend(types::I32, val)
     } else {
         val
     }

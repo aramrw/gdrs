@@ -1,15 +1,20 @@
-// main.gdrs
-use std::sys::unix::process::Command
+use std::core::{Result as Res, Option as Opt}
+
+fn find_even(val: i64) -> Opt:
+	if val % 2 == 0:
+		return Opt::Some(val)
+	else:
+		return Opt::None
+
+fn double_even(val: i64) -> Opt:
+	let even = find_even(val)?
+	return Opt::Some(even * 2)
 
 fn main():
-	log!("--- Testing Process Spawning ---")
+	log!("--- Testing Multi Imports with aliases ---")
 
-	// 1. Test a valid system command
-	log!("1. Executing /bin/date:")
-	let status1 = Command.spawn("/bin/date")
-	log!("Exit status (expect 0):", status1)
+	let d1 = double_even(15)
+	log!("double_even(15).is_none():", d1.is_none())
 
-	// 2. Test a command that does not exist
-	log!("2. Executing bad command:")
-	let status2 = Command.spawn("nonexistent_binary_xyz")
-	log!("Exit status (expect -1):", status2)
+	let res = Res::Ok(777)
+	log!("res.unwrap():", res.unwrap())

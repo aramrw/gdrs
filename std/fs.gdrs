@@ -1,0 +1,50 @@
+// std/fs.gdrs
+
+extern "C":
+	// Opens a file ("r" for read, "w" for write)
+	fn fopen(filename: str, mode: str) -> i64
+
+	// Moves file pointer (used for finding file size)
+	// Note: whence for fseek is usually 2 for end-of-file, 
+	// or can use constants: SEEK_SET = 0, SEEK_CUR = 1, SEEK_END = 2)
+	fn fseek(stream: i64, offset: i64, whence: i32) -> i32
+
+	// Gets current file pointer position (used to get file length)
+	fn ftell(stream: i64) -> i64
+
+	// Reads raw bytes into a buffer
+	fn fread(ptr: i64, size: i64, nmemb: i64, stream: i64) -> i64
+
+	// Closes the file pointer
+	fn fclose(stream: i64) -> i32
+
+obj File:
+	handle: i64
+
+impl File:
+	fn open(path: str) -> File:
+		unsafe:
+			let ptr = fopen(path, "r")
+			return File{handle: ptr}
+
+	fn read_to_string(self) -> String:
+		unsafe:
+			let stream = self.handle
+			if stream == 0:
+				return ""
+
+			// 1. Seek to end of file to find size
+			fseek(stream, 0, 2)
+			let size = ftell(stream)
+
+			// 2. Seek back to the beginning to read
+			fseek(stream, 0, 0)
+
+			// 3. Allocate buffer (using your heap/string allocation mechanism)
+			// (Or read into a byte buffer block)
+			
+			// 4. Read data
+			// fread(buffer_ptr, 1, size, stream)
+
+			fclose(stream)
+			return "content_placeholder"

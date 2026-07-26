@@ -1,0 +1,41 @@
+// std/core.gdrs - Core standard library types and traits
+
+enum Option:
+	Some($T)
+	None
+
+impl Option:
+	fn is_some(self) -> bool:
+		match self:
+			Option::Some(_) => true
+			Option::None => false
+
+	fn is_none(self) -> bool:
+		match self:
+			Option::Some(_) => false
+			Option::None => true
+
+	fn unwrap(self) -> $T:
+		match self:
+			Option::Some(val) => val
+			Option::None => panic!("called `Option::unwrap()` on a `None` value")
+
+enum Result:
+	Ok($T)
+	Err($E)
+
+impl Result:
+	fn is_ok(self) -> bool:
+		match self:
+			Result::Ok(_) => true
+			Result::Err(_) => false
+
+	fn is_err(self) -> bool:
+		match self:
+			Result::Ok(_) => false
+			Result::Err(_) => true
+
+	fn unwrap(self) -> $T:
+		match self:
+			Result::Ok(val) => val
+			Result::Err(err) => panic!("called `Result::unwrap()` on an `Err` value")

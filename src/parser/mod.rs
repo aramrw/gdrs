@@ -272,10 +272,51 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         .then_ignore(just(Token::Newline).or_not())
         .map_with_span(|path, span| ModDecl { path, span });
 
+    let as_keyword = select! { Token::Ident(s) if s == "as" => s };
+
+    let item_with_alias = select! { Token::Ident(s) => s }
+        .then(as_keyword.clone().ignore_then(select! { Token::Ident(s) => s }).or_not());
+
+    let multi_import_items = item_with_alias
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .delimited_by(just(Token::LBrace), just(Token::RBrace));
+
+    let multi_use_path = path_parser
+        .clone()
+        .then_ignore(just(Token::ColonColon))
+        .then(multi_import_items)
+        .map(|(prefix_path, items)| {
+            items
+                .into_iter()
+                .map(|(item, alias)| {
+                    let mut p = prefix_path.clone();
+                    p.push(item);
+                    (p, alias)
+                })
+                .collect::<Vec<_>>()
+        });
+
+    let single_use_path = path_parser
+        .clone()
+        .then(as_keyword.ignore_then(select! { Token::Ident(s) => s }).or_not())
+        .map(|(path, alias)| vec![(path, alias)]);
+
     let use_decl = just(Token::Use)
-        .ignore_then(path_parser)
+        .ignore_then(multi_use_path.or(single_use_path))
         .then_ignore(just(Token::Newline).or_not())
-        .map_with_span(|path, span| UseDecl { path, alias: None, span });
+        .map_with_span(|entries, span: Span| {
+            Item::Uses(
+                entries
+                    .into_iter()
+                    .map(|(path, alias)| UseDecl {
+                        path,
+                        alias,
+                        span: span.clone(),
+                    })
+                    .collect(),
+            )
+        });
 
     let extern_fn_sig = just(Token::Fn)
         .ignore_then(select! { Token::Ident(s) => s })
@@ -312,7 +353,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         .ignore_then(
             mod_decl
                 .map(Item::Mod)
-                .or(use_decl.map(Item::Use))
+                .or(use_decl)
                 .or(trait_decl.map(Item::Trait))
                 .or(trait_alias_decl.map(Item::TraitAlias))
                 .or(extern_decl.map(Item::Extern))
@@ -336,7 +377,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         for item in items {
             match item {
                 Item::Mod(m) => mods.push(m),
-                Item::Use(u) => uses.push(u),
+                Item::Uses(u_list) => uses.extend(u_list),
                 Item::Trait(t) => traits.push(t),
                 Item::TraitAlias(ta) => trait_aliases.push(ta),
                 Item::Extern(ext) => externs.push(ext),
@@ -362,7 +403,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
 
 enum Item {
     Mod(ModDecl),
-    Use(UseDecl),
+    Uses(Vec<UseDecl>),
     Trait(TraitDecl),
     TraitAlias(TraitAliasDecl),
     Extern(ExternDecl),

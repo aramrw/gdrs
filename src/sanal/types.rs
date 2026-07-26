@@ -78,6 +78,20 @@ pub fn type_check_expr<'a>(
                 }
             } else {
                 let normalized = name.replace("::", "_");
+                if let Some((enum_part, variant_part)) = normalized.rsplit_once('_') {
+                    if let Some((mangled_enum, v_map)) = type_ctx.enum_map.get(enum_part) {
+                        if let Some((tag, _p_types)) = v_map.get(variant_part) {
+                            return Some(TypedExpr::EnumConstruct(
+                                mangled_enum.to_string(),
+                                variant_part.to_string(),
+                                *tag as usize,
+                                Vec::new(),
+                                Type::Enum(mangled_enum),
+                                span.clone(),
+                            ));
+                        }
+                    }
+                }
                 if type_ctx.struct_map.contains_key(&normalized) {
                     Some(TypedExpr::Ident(
                         name.clone(),
@@ -674,6 +688,7 @@ pub fn type_check_expr<'a>(
             let t_target = type_check_expr(scopes, errors, type_ctx, target_expr)?;
             let enum_name = match t_target.ty() {
                 Type::Enum(name) => name,
+                Type::Obj(name) if type_ctx.enum_map.contains_key(name) => name,
                 other => {
                     errors.push(SemanticError {
                         message: format!("`match` target must be an `enum`, found `{:?}`", other),
@@ -703,7 +718,9 @@ pub fn type_check_expr<'a>(
                     if let Some((_, v_map)) = &variant_info {
                         if let Some((v_tag, p_types)) = v_map.get(short_v_name) {
                             for (b_name, p_ty) in arm.bindings.iter().zip(p_types.iter()) {
-                                scopes.declare(b_name.clone(), false, *p_ty);
+                                if b_name != "_" {
+                                    scopes.declare(b_name.clone(), false, *p_ty);
+                                }
                                 typed_bindings.push((b_name.clone(), *p_ty));
                             }
                             *v_tag
@@ -751,6 +768,82 @@ pub fn type_check_expr<'a>(
                 match_ty,
                 span.clone(),
             ))
+        }
+
+        Expr::Try(inner_expr, span) => {
+            let t_inner = type_check_expr(scopes, errors, type_ctx, inner_expr)?;
+            let inner_ty = t_inner.ty();
+            let enum_name_opt = match inner_ty {
+                Type::Enum(name) | Type::Obj(name) if name.ends_with("Option") => Some(name.to_string()),
+                _ => None,
+            };
+            let enum_name_res = match inner_ty {
+                Type::Enum(name) | Type::Obj(name) if name.ends_with("Result") => Some(name.to_string()),
+                _ => None,
+            };
+
+            if let Some(enum_name) = enum_name_opt {
+                let match_expr = Expr::Match(
+                    inner_expr.clone(),
+                    vec![
+                        crate::ast::MatchArm {
+                            variant_name: format!("{enum_name}::Some"),
+                            bindings: vec!["val".to_string()],
+                            body: vec![Expr::Ident("val".to_string(), span.clone())],
+                            span: span.clone(),
+                        },
+                        crate::ast::MatchArm {
+                            variant_name: format!("{enum_name}::None"),
+                            bindings: vec![],
+                            body: vec![Expr::Return(
+                                Some(Box::new(Expr::Ident(format!("{enum_name}_None"), span.clone()))),
+                                span.clone(),
+                            )],
+                            span: span.clone(),
+                        },
+                    ],
+                    span.clone(),
+                );
+                type_check_expr(scopes, errors, type_ctx, &match_expr)
+            } else if let Some(enum_name) = enum_name_res {
+                let match_expr = Expr::Match(
+                    inner_expr.clone(),
+                    vec![
+                        crate::ast::MatchArm {
+                            variant_name: format!("{enum_name}::Ok"),
+                            bindings: vec!["val".to_string()],
+                            body: vec![Expr::Ident("val".to_string(), span.clone())],
+                            span: span.clone(),
+                        },
+                        crate::ast::MatchArm {
+                            variant_name: format!("{enum_name}::Err"),
+                            bindings: vec!["err".to_string()],
+                            body: vec![Expr::Return(
+                                Some(Box::new(Expr::Call(
+                                    format!("{enum_name}_Err"),
+                                    vec![Expr::Ident("err".to_string(), span.clone())],
+                                    span.clone(),
+                                ))),
+                                span.clone(),
+                            )],
+                            span: span.clone(),
+                        },
+                    ],
+                    span.clone(),
+                );
+                type_check_expr(scopes, errors, type_ctx, &match_expr)
+            } else {
+                errors.push(SemanticError {
+                    message: format!(
+                        "The `?` operator can only be applied to `Option` or `Result`, found `{:?}`",
+                        inner_ty
+                    ),
+                    label: "Cannot apply `?` operator".into(),
+                    help: Some("Ensure expression returns an Option or Result type".into()),
+                    span: span.clone(),
+                });
+                None
+            }
         }
 
         Expr::While(cond, body, span) => {
@@ -903,29 +996,18 @@ pub fn type_check_expr<'a>(
                 }
             }
 
-            let split_sep = if raw_name.contains("::") {
-                Some("::")
-            } else if raw_name.contains('.') {
-                Some(".")
-            } else {
-                None
-            };
-            if let Some(sep) = split_sep {
-                if let Some((target_or_var, method_name)) = raw_name.split_once(sep) {
-                    let normalized_enum = target_or_var.replace("::", "_");
-                    if let Some((static_enum_name, variants)) =
-                        type_ctx.enum_map.get(&normalized_enum)
-                    {
-                        if let Some((disc, _)) = variants.get(method_name) {
-                            return Some(TypedExpr::EnumConstruct(
-                                static_enum_name.to_string(),
-                                method_name.to_string(),
-                                *disc as usize,
-                                typed_args,
-                                Type::Enum(static_enum_name),
-                                span.clone(),
-                            ));
-                        }
+            let normalized_name = raw_name.replace("::", "_");
+            if let Some((enum_name, variant_name)) = normalized_name.rsplit_once('_') {
+                if let Some((static_enum_name, variants)) = type_ctx.enum_map.get(enum_name) {
+                    if let Some((disc, _)) = variants.get(variant_name) {
+                        return Some(TypedExpr::EnumConstruct(
+                            static_enum_name.to_string(),
+                            variant_name.to_string(),
+                            *disc as usize,
+                            typed_args,
+                            Type::Enum(static_enum_name),
+                            span.clone(),
+                        ));
                     }
                 }
             }

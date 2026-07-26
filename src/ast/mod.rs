@@ -48,6 +48,8 @@ pub enum Token {
     NotEqual,
     #[token("!")]
     Exclamation,
+    #[token("?")]
+    Question,
     #[token("not")]
     Not,
     #[token("&&")]
@@ -310,6 +312,7 @@ pub enum Expr {
     Return(Option<Box<Expr>>, Span),
     MacroCall(String, Vec<Expr>, Span),
     Call(String, Vec<Expr>, Span),
+    Try(Box<Expr>, Span),
 
     ObjInit(String, Vec<(String, Expr)>, Span),
     FieldAccess(Box<Expr>, String, Span),
@@ -399,6 +402,7 @@ impl Expr {
             Expr::DerefAssign(_, _, s) => s.clone(),
             Expr::Closure(_, _, s) => s.clone(),
             Expr::Range(_, _, s) => s.clone(),
+            Expr::Try(_, s) => s.clone(),
         }
     }
 }

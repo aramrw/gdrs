@@ -211,7 +211,7 @@ pub fn stmt_parser<'a>(
         let match_arm = arm_pattern
             .then_ignore(just(Token::FatArrow))
             .then_ignore(just(Token::Newline).or_not())
-            .then(block.clone())
+            .then(math.clone().or(block.clone()))
             .map_with_span(|((variant_name, bindings), body_expr), span| {
                 let body = match body_expr {
                     Expr::Block(stmts, _) => stmts,
@@ -223,7 +223,8 @@ pub fn stmt_parser<'a>(
                     body,
                     span,
                 }
-            });
+            })
+            .then_ignore(just(Token::Newline).repeated());
 
         let match_stmt = just(Token::Match)
             .ignore_then(math.clone())

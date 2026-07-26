@@ -136,6 +136,7 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
             DotCall(String, Vec<Expr>, Span),
             Dot(String, Span),
             Index(Expr, Span),
+            Try(Span),
         }
 
         let dot_call_post = just(Token::Dot)
@@ -157,8 +158,11 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
             .delimited_by(just(Token::LBracket), just(Token::RBracket))
             .map_with_span(|idx, span: Span| Postfix::Index(idx, span));
 
+        let try_post = just(Token::Question)
+            .map_with_span(|_, span: Span| Postfix::Try(span));
+
         let postfix_atom = atom
-            .then(dot_call_post.or(dot_post).or(index_post).repeated())
+            .then(dot_call_post.or(dot_post).or(index_post).or(try_post).repeated())
             .foldl(|target, post| match post {
                 Postfix::DotCall(method, args, method_span) => {
                     let span = target.span().start..method_span.end;
@@ -173,6 +177,10 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
                 Postfix::Index(idx, idx_span) => {
                     let span = target.span().start..idx_span.end;
                     Expr::IndexAccess(Box::new(target), Box::new(idx), span)
+                }
+                Postfix::Try(try_span) => {
+                    let span = target.span().start..try_span.end;
+                    Expr::Try(Box::new(target), span)
                 }
             });
 
