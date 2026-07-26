@@ -1587,7 +1587,7 @@ pub fn type_check_expr<'a>(
             let t_idx = type_check_expr(scopes, errors, type_ctx, idx)?;
 
             // 1. Validate index is an integer
-            if t_idx.ty() != Type::Int {
+            if !matches!(t_idx.ty(), Type::Int | Type::I32) {
                 errors.push(SemanticError {
                     message: format!("Array index must be an `Int`, found `{:?}`", t_idx.ty()),
                     label: "Invalid index type".into(),
@@ -1623,7 +1623,7 @@ pub fn type_check_expr<'a>(
             let t_idx = type_check_expr(scopes, errors, type_ctx, idx)?;
             let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
 
-            if t_idx.ty() != Type::Int {
+            if !matches!(t_idx.ty(), Type::Int | Type::I32) {
                 errors.push(SemanticError {
                     message: format!("Array index must be an `Int`, found `{:?}`", t_idx.ty()),
                     label: "Invalid index type".into(),

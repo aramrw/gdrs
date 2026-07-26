@@ -1,0 +1,92 @@
+use std::math::Vec2
+
+extern "C":
+	fn dlopen(filename: str, flags: i32) -> i64
+
+	fn InitWindow(width: i32, height: i32, title: str)
+	fn WindowShouldClose() -> bool
+	fn BeginDrawing()
+	fn ClearBackground(color_hex: i64)
+	fn DrawCircle(centerX: f32, centerY: f32, radius: f32, color_hex: i64)
+	fn EndDrawing()
+	fn CloseWindow()
+	fn SetTargetFPS(fps: i32)
+	fn GetScreenWidth() -> i32
+	fn GetScreenHeight() -> i32
+
+obj Ball:
+	pos: Vec2
+	speed: Vec2
+	r: f32
+	color: i64
+
+impl Ball:
+	fn update(mut self) -> Ball:
+		self.pos.x += self.speed.x
+		self.pos.y += self.speed.y
+		return self
+
+	fn bounds_check_x(mut self, bounds: Vec2) -> Ball:
+		if self.pos.x >= (bounds.x - self.r):
+			self.pos.x = bounds.x - self.r
+			self.speed.x = -self.speed.x
+
+		if self.pos.x <= self.r:
+			self.pos.x = self.r
+			self.speed.x = -self.speed.x
+
+		return self
+
+	fn bounds_check_y(mut self, bounds: Vec2) -> Ball:
+		if self.pos.y >= (bounds.y - self.r):
+			self.pos.y = bounds.y - self.r
+			self.speed.y = -self.speed.y
+
+		if self.pos.y <= self.r:
+			self.pos.y = self.r
+			self.speed.y = -self.speed.y
+
+		return self
+
+fn main():
+	unsafe:
+		let handle = dlopen("/opt/homebrew/lib/libraylib.dylib", 9)
+		if handle == 0:
+			log!("Failed to load Raylib!")
+			return
+
+		InitWindow(800, 600, "GDRS Bouncing Circle!")
+		SetTargetFPS(60)
+
+		let bg = 2294467295
+		let bounds = Vec2.new(GetScreenWidth(), GetScreenHeight())
+
+		let pos1 = Vec2.new(400.0, 300.0)
+		let speed1 = Vec2.new(5.0, 5.0)
+		let mut ball1 = Ball{pos: pos1, speed: speed1, r: 50.0, color: 4278190335}
+
+		let pos2 = Vec2.new(200.0, 150.0)
+		let speed2 = Vec2.new(-3.0, 4.0)
+		let mut ball2 = Ball{pos: pos2, speed: speed2, r: 30.0, color: 4294902015}
+
+		while !WindowShouldClose():
+			BeginDrawing()
+			ClearBackground(bg)
+
+			// Ball 1 update & bounds
+			ball1 = ball1.update()
+			ball1 = ball1.bounds_check_x(bounds)
+			ball1 = ball1.bounds_check_y(bounds)
+
+			// Ball 2 update & bounds
+			ball2 = ball2.update()
+			ball2 = ball2.bounds_check_x(bounds)
+			ball2 = ball2.bounds_check_y(bounds)
+
+			// Render both
+			DrawCircle(ball1.pos.x, ball1.pos.y, ball1.r, ball1.color)
+			DrawCircle(ball2.pos.x, ball2.pos.y, ball2.r, ball2.color)
+
+			EndDrawing()
+
+		CloseWindow()

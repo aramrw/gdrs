@@ -1056,7 +1056,8 @@ pub fn compile_expr<M: Module>(
                 },
                 _ => base_ptr,
             };
-            let idx_val = compile_expr(builder, idx, vars, var_counter, module, struct_layouts);
+            let raw_idx_val = compile_expr(builder, idx, vars, var_counter, module, struct_layouts);
+            let idx_val = coerce_val(builder, raw_idx_val, types::I64);
             let elem_size = builder.ins().iconst(types::I64, 8);
             let offset = builder.ins().imul(idx_val, elem_size);
             let elem_addr = builder.ins().iadd(buffer_ptr, offset);
@@ -1079,7 +1080,8 @@ pub fn compile_expr<M: Module>(
                 },
                 _ => base_ptr,
             };
-            let idx_val = compile_expr(builder, idx, vars, var_counter, module, struct_layouts);
+            let raw_idx_val = compile_expr(builder, idx, vars, var_counter, module, struct_layouts);
+            let idx_val = coerce_val(builder, raw_idx_val, types::I64);
             let new_val = compile_expr(builder, val, vars, var_counter, module, struct_layouts);
 
             let elem_size = builder.ins().iconst(types::I64, 8);
