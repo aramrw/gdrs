@@ -94,7 +94,7 @@ fn main():
 
 		let mut i2 = 0
 		while i2 < 10:
-			log!(balls[i2].r)
+			log!(balls[i2].color)
 			i2 += 1
 
 		balls.iter().for_each(|ball| log!(ball.r))
