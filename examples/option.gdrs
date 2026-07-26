@@ -20,19 +20,18 @@ fn main():
 	log!("let none = None: ", none.is_none())
 
 	let some = Some(1)
-	log!("let some = Some(1): ", none.is_some())
+	log!("some.is_some(): ", some.is_some())
 
 	let res = Res::Ok(777)
-	log!("res.unwrap():", res.is_err())
+	log!("res.unwrap():", res.unwrap())
 
-// none is returning the wrong values.
-
+// Output:
+// --- Testing Multi Imports with aliases ---
 // double_even(15).is_none():
 // true
 // let none = None: 
 // true
-// let some = Some(1): 
-// false
+// some.is_some(): 
+// true
 // res.unwrap():
-// false
-// ~/Programming/newlang>     
+// 777
