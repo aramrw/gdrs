@@ -1152,6 +1152,10 @@ pub fn type_check_expr<'a>(
                     | "format!"
                     | "vec"
                     | "vec!"
+                    | "push"
+                    | "push_str"
+                    | "pop"
+                    | "len"
                     | "arg_count"
                     | "arg_at"
                     | "args_count"
@@ -1165,7 +1169,7 @@ pub fn type_check_expr<'a>(
                 if name == "push" || name == "push_str" || name == "pop" {
                     if let Some(first_arg) = typed_args.first() {
                         if let TypedExpr::Ident(var_name, _, _) = first_arg {
-                            if let Some(var_info) = scopes.lookup(var_name) {
+                            if let Some(var_info) = scopes.lookup_mut(var_name) {
                                 if !var_info.is_mutable {
                                     errors.push(SemanticError {
                                         message: format!("Cannot call mutating macro '{name}' on immutable variable '{var_name}'"),
@@ -1173,6 +1177,10 @@ pub fn type_check_expr<'a>(
                                         help: Some(format!("Declare as mutable: 'let mut {var_name}'")),
                                         span: span.clone(),
                                     });
+                                }
+                                if name == "push" && typed_args.len() > 1 {
+                                    let elem_ty = typed_args[1].ty();
+                                    var_info.ty = Type::Vec(crate::ast::intern_type(elem_ty));
                                 }
                             }
                         }

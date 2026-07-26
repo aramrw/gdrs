@@ -341,41 +341,49 @@ pub extern "C" fn intrinsic_push_str(header_ptr: *mut u64, append_str_ptr: *cons
     }
 }
 
+#[repr(C)]
+pub struct VecHeader {
+    pub data: *mut u64,
+    pub len: u64,
+    pub cap: u64,
+}
+
 #[unsafe(no_mangle)]
-pub extern "C" fn intrinsic_vec_push(header_ptr: *mut u64, elem_val: u64) {
+pub unsafe extern "C" fn intrinsic_vec_push(header_ptr: *mut u64, elem_val: u64) {
     if header_ptr.is_null() {
         return;
     }
+
     unsafe {
-        let ptr_slot = header_ptr as *mut *mut u64;
-        let len_slot = header_ptr.add(1);
-        let cap_slot = header_ptr.add(2);
+        let header = &mut *(header_ptr as *mut VecHeader);
 
-        let cur_len = *len_slot as usize;
-        let cur_cap = *cap_slot as usize;
+        if header.len >= header.cap {
+            let new_cap = if header.cap == 0 {
+                8
+            } else {
+                header.cap.saturating_mul(2)
+            };
 
-        let needed_cap = cur_len + 1;
-        if cur_cap == 0 {
-            let new_cap = if needed_cap < 8 { 8 } else { needed_cap.next_power_of_two() };
-            let new_ptr = malloc(new_cap * 8) as *mut u64;
-            if !(*ptr_slot).is_null() && cur_len > 0 {
-                std::ptr::copy_nonoverlapping(*ptr_slot, new_ptr, cur_len);
+            let new_bytes = (new_cap as usize) * std::mem::size_of::<u64>();
+
+            // ✅ CRITICAL: If cap is 0 OR data is null, always malloc a fresh heap block.
+            // Never pass uninitialized stack pointers to realloc.
+            let new_data = if header.cap == 0 || header.data.is_null() {
+                malloc(new_bytes) as *mut u64
+            } else {
+                realloc(header.data as *mut std::ffi::c_void, new_bytes) as *mut u64
+            };
+
+            if new_data.is_null() {
+                return;
             }
-            *new_ptr.add(cur_len) = elem_val;
-            *ptr_slot = new_ptr;
-            *len_slot = (cur_len + 1) as u64;
-            *cap_slot = new_cap as u64;
-        } else if needed_cap > cur_cap {
-            let new_cap = needed_cap.next_power_of_two();
-            let new_ptr = realloc(*ptr_slot as *mut std::ffi::c_void, new_cap * 8) as *mut u64;
-            *new_ptr.add(cur_len) = elem_val;
-            *ptr_slot = new_ptr;
-            *len_slot = (cur_len + 1) as u64;
-            *cap_slot = new_cap as u64;
-        } else {
-            *(*ptr_slot).add(cur_len) = elem_val;
-            *len_slot = (cur_len + 1) as u64;
+
+            header.data = new_data;
+            header.cap = new_cap;
         }
+
+        *header.data.add(header.len as usize) = elem_val;
+        header.len += 1;
     }
 }
 
@@ -541,7 +549,8 @@ pub fn compile_macro_call<M: Module>(
             if args.is_empty() {
                 return builder.ins().iconst(types::I64, 0);
             }
-            let idx_val = compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
+            let raw_idx_val = compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
+            let idx_val = crate::codegen::expr::coerce_val(builder, raw_idx_val, types::I64);
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64));
             sig.returns.push(AbiParam::new(types::I64));
@@ -556,12 +565,14 @@ pub fn compile_macro_call<M: Module>(
             if args.is_empty() {
                 return builder.ins().iconst(types::I64, 0);
             }
-            let func_ptr = compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
-            let arg_val = if args.len() > 1 {
+            let raw_func_ptr = compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
+            let func_ptr = crate::codegen::expr::coerce_val(builder, raw_func_ptr, types::I64);
+            let raw_arg_val = if args.len() > 1 {
                 compile_expr(builder, &args[1], vars, var_counter, module, struct_layouts)
             } else {
                 builder.ins().iconst(types::I64, 0)
             };
+            let arg_val = crate::codegen::expr::coerce_val(builder, raw_arg_val, types::I64);
 
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64));
@@ -707,8 +718,10 @@ pub fn compile_macro_call<M: Module>(
         }
         "push_str" => {
             if args.len() == 2 {
-                let target_ptr = compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
-                let append_ptr = compile_expr(builder, &args[1], vars, var_counter, module, struct_layouts);
+                let raw_target_ptr = compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
+                let target_ptr = crate::codegen::expr::coerce_val(builder, raw_target_ptr, types::I64);
+                let raw_append_ptr = compile_expr(builder, &args[1], vars, var_counter, module, struct_layouts);
+                let append_ptr = crate::codegen::expr::coerce_val(builder, raw_append_ptr, types::I64);
 
                 let mut sig = module.make_signature();
                 sig.params.push(AbiParam::new(types::I64)); // header_ptr
@@ -724,8 +737,10 @@ pub fn compile_macro_call<M: Module>(
         }
         "push" => {
             if args.len() == 2 {
-                let target_ptr = compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
-                let elem_val = compile_expr(builder, &args[1], vars, var_counter, module, struct_layouts);
+                let raw_target_ptr = compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
+                let target_ptr = crate::codegen::expr::coerce_val(builder, raw_target_ptr, types::I64);
+                let raw_elem_val = compile_expr(builder, &args[1], vars, var_counter, module, struct_layouts);
+                let elem_val = crate::codegen::expr::coerce_val(builder, raw_elem_val, types::I64);
 
                 let mut sig = module.make_signature();
                 sig.params.push(AbiParam::new(types::I64)); // header_ptr
@@ -741,7 +756,8 @@ pub fn compile_macro_call<M: Module>(
         }
         "pop" => {
             if args.len() == 1 {
-                let target_ptr = compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
+                let raw_target_ptr = compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
+                let target_ptr = crate::codegen::expr::coerce_val(builder, raw_target_ptr, types::I64);
 
                 let mut sig = module.make_signature();
                 sig.params.push(AbiParam::new(types::I64)); // header_ptr
@@ -759,7 +775,8 @@ pub fn compile_macro_call<M: Module>(
         }
         "len" => {
             if args.len() == 1 {
-                let target_ptr = compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
+                let raw_target_ptr = compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
+                let target_ptr = crate::codegen::expr::coerce_val(builder, raw_target_ptr, types::I64);
                 builder.ins().load(types::I64, MemFlags::new(), target_ptr, 8)
             } else {
                 builder.ins().iconst(types::I64, 0)
@@ -776,7 +793,8 @@ pub fn compile_macro_call<M: Module>(
             let vec_ptr = builder.inst_results(call_inst)[0];
 
             for arg in args {
-                let elem_val = compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
+                let raw_elem_val = compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
+                let elem_val = crate::codegen::expr::coerce_val(builder, raw_elem_val, types::I64);
                 let mut sig_push = module.make_signature();
                 sig_push.params.push(AbiParam::new(types::I64));
                 sig_push.params.push(AbiParam::new(types::I64));

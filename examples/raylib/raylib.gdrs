@@ -62,20 +62,43 @@ fn main():
 		let mut balls = []
 
 		let mut i = 0
-		while i < 5:
-			let pos = Vec2.new(100.0 + (120.0 + i), 100.0 + (120.0 + i))
-			let speed = Vec2.new(3.0 + i, 5.0 - i)
-			let mut r = 10.0
-			if (i % 2) == 0:
-				r = 20.0
-			else:
-				r = 10.0 + i
-			let ball = Ball{pos: pos, speed: speed, r: 50.0, color: 4278190335 + (120 * i)}
-			balls.push(ball)
-			i += 1
+		while i < 10:
+				// Spread starting positions out across the window
+				let pos = Vec2.new(50.0 + (70.0 * i), 100.0 + (40.0 * i))
+				
+				// Mix up positive and negative speeds so they move in different directions
+				let mut vx = 3.0 + i
+				let mut vy = 4.0 - i
+				if (i % 2) == 0:
+						vx = -vx
+				
+				let speed = Vec2.new(vx, vy)
+				
+				// Vary radius (use the variable, don't hardcode 50.0)
+				let mut radius = 15.0
+				if (i % 2) == 0:
+						radius = 25.0
+				else:
+						radius = 10.0 + (2.0 * i)
 
-			log!("starting drawing at: ", now.ms())
+				// Distinct colors (Red, Green, Blue, Yellow, Magenta, Cyan, etc.)
+				let mut col = 4278190335 // Red
+				if (i % 3) == 1:
+						col = 16711935   // Blue/Magenta
+				if (i % 3) == 2:
+						col = 65535      // Cyan/Green
 
+				let ball = Ball{pos: pos, speed: speed, r: radius, color: col}
+				balls.push(ball)
+				i += 1
+
+		let mut i2 = 0
+		while i2 < 10:
+			log!(balls[i2].r)
+			i2 += 1
+
+		balls.iter().for_each(|ball| log!(ball.r))
+		
 		while !WindowShouldClose():
 			BeginDrawing()
 			ClearBackground(2294467295)

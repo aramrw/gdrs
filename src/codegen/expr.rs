@@ -543,16 +543,6 @@ pub fn compile_expr<M: Module>(
             }
         }
 
-        TypedExpr::Return(opt_expr, _) => {
-            let ret_val = if let Some(expr) = opt_expr {
-                compile_expr(builder, expr, vars, var_counter, module, struct_layouts)
-            } else {
-                builder.ins().iconst(types::I64, 0)
-            };
-            builder.ins().return_(&[ret_val]);
-            ret_val
-        }
-
         // Nested Block -> Evaluate statements in sequence
         TypedExpr::Block(stmts, _, _) | TypedExpr::Unsafe(stmts, _, _) => {
             let mut last = builder.ins().iconst(types::I64, 0);
@@ -1045,33 +1035,56 @@ pub fn compile_expr<M: Module>(
             new_val
         }
 
-        TypedExpr::ArrayInit(elems, _, _) => {
-            let slot_bytes = (elems.len() * 8) as u32;
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                if slot_bytes == 0 { 8 } else { slot_bytes },
-                0,
-            ));
-            let base_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+        TypedExpr::ArrayInit(elems, arr_ty, _) => {
+            if matches!(arr_ty, Type::Vec(_)) {
+                let mut sig = module.make_signature();
+                sig.returns.push(AbiParam::new(types::I64));
+                let callee = module
+                    .declare_function("intrinsic_vec_new", Linkage::Import, &sig)
+                    .unwrap();
+                let local_callee = module.declare_func_in_func(callee, builder.func);
+                let call_inst = builder.ins().call(local_callee, &[]);
+                let vec_ptr = builder.inst_results(call_inst)[0];
 
-            for (i, elem) in elems.iter().enumerate() {
-                let val = compile_expr(builder, elem, vars, var_counter, module, struct_layouts);
-                let offset = (i * 8) as i32;
-                builder.ins().store(MemFlags::new(), val, base_ptr, offset);
+                for elem in elems {
+                    let raw_elem_val = compile_expr(builder, elem, vars, var_counter, module, struct_layouts);
+                    let elem_val = coerce_val(builder, raw_elem_val, types::I64);
+                    let mut sig_push = module.make_signature();
+                    sig_push.params.push(AbiParam::new(types::I64));
+                    sig_push.params.push(AbiParam::new(types::I64));
+                    let callee_push = module
+                        .declare_function("intrinsic_vec_push", Linkage::Import, &sig_push)
+                        .unwrap();
+                    let local_push = module.declare_func_in_func(callee_push, builder.func);
+                    builder.ins().call(local_push, &[vec_ptr, elem_val]);
+                }
+
+                vec_ptr
+            } else {
+                let slot_bytes = (elems.len() * 8) as u32;
+                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    if slot_bytes == 0 { 8 } else { slot_bytes },
+                    0,
+                ));
+                let base_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+
+                for (i, elem) in elems.iter().enumerate() {
+                    let val = compile_expr(builder, elem, vars, var_counter, module, struct_layouts);
+                    let offset = (i * 8) as i32;
+                    builder.ins().store(MemFlags::new(), val, base_ptr, offset);
+                }
+
+                base_ptr
             }
-
-            base_ptr
         }
 
         TypedExpr::IndexAccess(target, idx, elem_ty, _) => {
             let base_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
-            let buffer_ptr = match target.as_ref() {
-                TypedExpr::Ident(_, _, _) => match target.ty() {
-                    Type::Slice(_) | Type::Vec(_) => {
-                        builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
-                    }
-                    _ => base_ptr,
-                },
+            let buffer_ptr = match target.ty() {
+                Type::Slice(_) | Type::Vec(_) => {
+                    builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
+                }
                 _ => base_ptr,
             };
             let raw_idx_val = compile_expr(builder, idx, vars, var_counter, module, struct_layouts);
@@ -1089,13 +1102,10 @@ pub fn compile_expr<M: Module>(
 
         TypedExpr::IndexAssign(target, idx, val, _) => {
             let base_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
-            let buffer_ptr = match target.as_ref() {
-                TypedExpr::Ident(_, _, _) => match target.ty() {
-                    Type::Slice(_) | Type::Vec(_) => {
-                        builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
-                    }
-                    _ => base_ptr,
-                },
+            let buffer_ptr = match target.ty() {
+                Type::Slice(_) | Type::Vec(_) => {
+                    builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
+                }
                 _ => base_ptr,
             };
             let raw_idx_val = compile_expr(builder, idx, vars, var_counter, module, struct_layouts);
@@ -1405,7 +1415,7 @@ pub fn compile_expr<M: Module>(
 }
 
 /// Helper to coerce Cranelift SSA values to match target block parameter types
-fn coerce_val(
+pub(crate) fn coerce_val(
     builder: &mut cranelift_frontend::FunctionBuilder,
     val: cranelift_codegen::ir::Value,
     target_ty: cranelift_codegen::ir::Type,
