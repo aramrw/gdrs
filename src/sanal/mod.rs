@@ -1,7 +1,13 @@
 //! sanal.rs
 //! Semantic analysis & Type Checking pass converting untyped AST into Typed AST.
 
+pub mod binops;
+pub mod calls;
+pub mod control_flow;
+pub mod objects;
+pub mod refs;
 pub mod types;
+pub mod vars;
 
 use crate::{
     ast::{intern_str, FuncDecl, Param, Program, Span, Type, TypedFuncDecl, TypedProgram},
