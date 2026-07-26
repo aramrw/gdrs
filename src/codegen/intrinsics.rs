@@ -22,6 +22,32 @@ pub fn set_jit_args(args: Vec<String>) {
     *guard = args;
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gdrs_resolve_symbol(name_ptr: *const std::os::raw::c_char) -> *mut std::ffi::c_void {
+    if name_ptr.is_null() {
+        eprintln!("[RUNTIME ERROR] Attempted to resolve NULL symbol name");
+        std::process::exit(1);
+    }
+    let c_str = unsafe { std::ffi::CStr::from_ptr(name_ptr) };
+    let name = c_str.to_string_lossy();
+
+    let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name_ptr) };
+    if !p.is_null() {
+        return p;
+    }
+
+    let mangled = format!("_{}", name);
+    if let Ok(c_mangled) = std::ffi::CString::new(mangled) {
+        let p_mangled = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c_mangled.as_ptr()) };
+        if !p_mangled.is_null() {
+            return p_mangled;
+        }
+    }
+
+    eprintln!("[RUNTIME ERROR] Unable to resolve symbol: '{}'", name);
+    std::process::exit(1);
+}
+
 pub extern "C" fn intrinsic_panic(msg_ptr: *const std::os::raw::c_char) -> ! {
     let msg = if msg_ptr.is_null() {
         "explicit panic"

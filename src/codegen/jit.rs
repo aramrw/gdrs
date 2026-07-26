@@ -6,7 +6,7 @@ use cranelift_module::default_libcall_names;
 use cranelift_native::builder as native_builder;
 
 use crate::codegen::intrinsics::{
-    intrinsic_arc_clone, intrinsic_arc_drop, intrinsic_arc_new, intrinsic_arg_at,
+    gdrs_resolve_symbol, intrinsic_arc_clone, intrinsic_arc_drop, intrinsic_arc_new, intrinsic_arg_at,
     intrinsic_arg_count, intrinsic_args_str, intrinsic_execvp, intrinsic_iter_for_each,
     intrinsic_iter_map, intrinsic_log, intrinsic_map_for_each, intrinsic_panic, intrinsic_push_str,
     intrinsic_rc_clone, intrinsic_rc_drop, intrinsic_rc_new, intrinsic_spawn_thread,
@@ -22,6 +22,7 @@ pub fn create_jit_module() -> JITModule {
         .expect("Failed to build target ISA");
 
     let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
+    builder.symbol("gdrs_resolve_symbol", gdrs_resolve_symbol as *const u8);
     builder.symbol("intrinsic_log", intrinsic_log as *const u8);
     builder.symbol("intrinsic_panic", intrinsic_panic as *const u8);
     builder.symbol("intrinsic_push_str", intrinsic_push_str as *const u8);

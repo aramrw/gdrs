@@ -11,8 +11,8 @@ extern "C":
 	fn EndDrawing()
 	fn CloseWindow()
 	fn SetTargetFPS(fps: i32)
-	fn GetWindowWidth()
-	fn GetWindowHeight()
+	fn GetScreenWidth() -> f32
+	fn GetScreenHeight() -> f32
 
 fn main():
 	unsafe:
@@ -24,14 +24,15 @@ fn main():
 		InitWindow(800, 600, "GDRS Bouncing Circle!")
 		SetTargetFPS(60)
 
-		let mut x = 400.0
-		let mut y = 300.0
+		let mut x = 400
+		let mut y = 300
 		let mut speed_x = 5
 		let mut speed_y = 5
-		let radius = 50.0
+		let radius = 50
 
 		while !WindowShouldClose():
-			let bounds = Vec2.new(GetWindowWidth(), GetWindowHeight())
+			//let bounds = Vec2.new(GetScreenWidth(), GetScreenHeight())
+			let bounds = Vec2.new(800, 600)
 
 			x += speed_x
 			y += speed_y

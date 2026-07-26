@@ -22,6 +22,11 @@ fn is_float_ty(ty: &Type) -> bool {
     matches!(ty, Type::Float | Type::F32)
 }
 
+#[inline]
+fn is_float_val(builder: &FunctionBuilder, val: Value) -> bool {
+    builder.func.dfg.value_type(val).is_float()
+}
+
 /// True for any integer Type variant.
 #[inline]
 fn is_int_ty(ty: &Type) -> bool {
@@ -129,7 +134,7 @@ pub fn compile_expr<M: Module>(
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
             let (left, right) = coerce_operands(builder, left, right);
-            if is_float_ty(ty) {
+            if is_float_ty(ty) || is_float_val(builder, left) {
                 builder.ins().fadd(left, right)
             } else {
                 builder.ins().iadd(left, right)
@@ -141,7 +146,7 @@ pub fn compile_expr<M: Module>(
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
             let (left, right) = coerce_operands(builder, left, right);
-            if is_float_ty(ty) {
+            if is_float_ty(ty) || is_float_val(builder, left) {
                 builder.ins().fsub(left, right)
             } else {
                 builder.ins().isub(left, right)
@@ -153,7 +158,7 @@ pub fn compile_expr<M: Module>(
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
             let (left, right) = coerce_operands(builder, left, right);
-            if is_float_ty(ty) {
+            if is_float_ty(ty) || is_float_val(builder, left) {
                 builder.ins().fmul(left, right)
             } else {
                 builder.ins().imul(left, right)
@@ -165,7 +170,7 @@ pub fn compile_expr<M: Module>(
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
             let (left, right) = coerce_operands(builder, left, right);
-            if is_float_ty(ty) {
+            if is_float_ty(ty) || is_float_val(builder, left) {
                 builder.ins().fdiv(left, right)
             } else {
                 builder.ins().sdiv(left, right)
@@ -212,7 +217,7 @@ pub fn compile_expr<M: Module>(
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
             let (left, right) = coerce_operands(builder, left, right);
-            if is_float_ty(ty) {
+            if is_float_ty(ty) || is_float_val(builder, left) {
                 let div = builder.ins().fdiv(left, right);
                 let flr = builder.ins().floor(div);
                 let mul = builder.ins().fmul(flr, right);
@@ -225,7 +230,7 @@ pub fn compile_expr<M: Module>(
         // Unary Negation
         TypedExpr::Neg(val, ty, _) => {
             let inner = compile_expr(builder, val, vars, var_counter, module, struct_layouts);
-            if is_float_ty(ty) {
+            if is_float_ty(ty) || is_float_val(builder, inner) {
                 builder.ins().fneg(inner)
             } else {
                 builder.ins().ineg(inner)
@@ -244,7 +249,7 @@ pub fn compile_expr<M: Module>(
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
             let (left, right) = coerce_operands(builder, left, right);
-            let cmp = if is_float_ty(&lhs.ty()) {
+            let cmp = if is_float_ty(&lhs.ty()) || is_float_val(builder, left) {
                 builder.ins().fcmp(FloatCC::GreaterThanOrEqual, left, right)
             } else {
                 builder
@@ -259,7 +264,7 @@ pub fn compile_expr<M: Module>(
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
             let (left, right) = coerce_operands(builder, left, right);
-            let cmp = if is_float_ty(&lhs.ty()) {
+            let cmp = if is_float_ty(&lhs.ty()) || is_float_val(builder, left) {
                 builder.ins().fcmp(FloatCC::LessThanOrEqual, left, right)
             } else {
                 builder
@@ -284,7 +289,7 @@ pub fn compile_expr<M: Module>(
                 coerce_operands(builder, left_raw, right_raw)
             };
 
-            let cmp = if is_float_ty(&lhs.ty()) {
+            let cmp = if is_float_ty(&lhs.ty()) || is_float_val(builder, left) {
                 builder.ins().fcmp(FloatCC::NotEqual, left, right)
             } else {
                 builder.ins().icmp(IntCC::NotEqual, left, right)
@@ -333,7 +338,7 @@ pub fn compile_expr<M: Module>(
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
             let (left, right) = coerce_operands(builder, left, right);
-            let cmp = if is_float_ty(&lhs.ty()) {
+            let cmp = if is_float_ty(&lhs.ty()) || is_float_val(builder, left) {
                 builder.ins().fcmp(FloatCC::GreaterThan, left, right)
             } else {
                 builder.ins().icmp(IntCC::SignedGreaterThan, left, right)
@@ -346,7 +351,7 @@ pub fn compile_expr<M: Module>(
             let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
             let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
             let (left, right) = coerce_operands(builder, left, right);
-            let cmp = if is_float_ty(&lhs.ty()) {
+            let cmp = if is_float_ty(&lhs.ty()) || is_float_val(builder, left) {
                 builder.ins().fcmp(FloatCC::LessThan, left, right)
             } else {
                 builder.ins().icmp(IntCC::SignedLessThan, left, right)
@@ -368,7 +373,7 @@ pub fn compile_expr<M: Module>(
                 coerce_operands(builder, left_raw, right_raw)
             };
 
-            let cmp = if is_float_ty(&lhs.ty()) {
+            let cmp = if is_float_ty(&lhs.ty()) || is_float_val(builder, left) {
                 builder.ins().fcmp(FloatCC::Equal, left, right)
             } else {
                 builder.ins().icmp(IntCC::Equal, left, right)
@@ -812,7 +817,7 @@ pub fn compile_expr<M: Module>(
         }
 
         // Function Call -> Invoke compiled user-defined function
-        TypedExpr::Call(name, args, ret_ty, _) => {
+        TypedExpr::Call(name, args, ret_ty, span) => {
             use cranelift_codegen::ir::AbiParam;
             let mut compiled_args = Vec::new();
             let mut sig = module.make_signature();
@@ -920,12 +925,12 @@ pub fn compile_expr<M: Module>(
                     builder.ins().iconst(types::I64, 0)
                 }
             } else {
-                let callee = match module.get_name(&target_symbol_name) {
-                    Some(cranelift_module::FuncOrDataId::Func(id)) => id,
-                    _ => module
-                        .declare_function(&target_symbol_name, Linkage::Import, &sig)
-                        .unwrap(),
-                };
+                let known_func_id = match module.get_name(&target_symbol_name) {
+                Some(cranelift_module::FuncOrDataId::Func(id)) => Some(id),
+                _ => None,
+            };
+
+            if let Some(callee) = known_func_id {
                 let decl_sig = module.declarations().get_function_decl(callee);
                 let mut matched_args = Vec::new();
                 for (i, &arg_val) in compiled_args.iter().enumerate() {
@@ -956,7 +961,28 @@ pub fn compile_expr<M: Module>(
                 } else {
                     builder.ins().iconst(types::I64, 0)
                 }
+            } else {
+                let sym_str_expr = TypedExpr::String(target_symbol_name.clone(), span.clone());
+                let str_ptr = compile_expr(builder, &sym_str_expr, vars, var_counter, module, struct_layouts);
+
+                let mut resolve_sig = module.make_signature();
+                resolve_sig.params.push(AbiParam::new(types::I64));
+                resolve_sig.returns.push(AbiParam::new(types::I64));
+
+                let resolve_callee = module.declare_function("gdrs_resolve_symbol", Linkage::Import, &resolve_sig).unwrap();
+                let local_resolve = module.declare_func_in_func(resolve_callee, builder.func);
+                let call_resolve = builder.ins().call(local_resolve, &[str_ptr]);
+                let fn_ptr = builder.inst_results(call_resolve)[0];
+
+                let sig_ref = builder.import_signature(sig);
+                let call_inst = builder.ins().call_indirect(sig_ref, fn_ptr, &compiled_args);
+                if *ret_ty != Type::Unit {
+                    builder.inst_results(call_inst)[0]
+                } else {
+                    builder.ins().iconst(types::I64, 0)
+                }
             }
+        }
         }
 
         // Boolean literal (1 for true, 0 for false)

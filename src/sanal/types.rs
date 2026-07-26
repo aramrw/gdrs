@@ -50,22 +50,31 @@ pub fn type_check_expr<'a>(
                     }
                 }
                 let normalized = name.replace("::", "_");
-                if type_ctx.struct_map.contains_key(&normalized) {
+                let found_struct = type_ctx
+                    .struct_map
+                    .iter()
+                    .find(|(k, _)| **k == normalized || k.ends_with(&format!("_{normalized}")));
+                let found_enum = type_ctx
+                    .enum_map
+                    .iter()
+                    .find(|(k, _)| **k == normalized || k.ends_with(&format!("_{normalized}")));
+                if let Some((mangled_struct, _)) = found_struct {
                     Some(TypedExpr::Ident(
                         name.clone(),
-                        Type::Obj(intern_str(&normalized)),
+                        Type::Obj(intern_str(mangled_struct)),
                         span.clone(),
                     ))
-                } else if type_ctx.enum_map.contains_key(&normalized) {
+                } else if let Some((mangled_enum, _)) = found_enum {
                     Some(TypedExpr::Ident(
                         name.clone(),
-                        Type::Enum(intern_str(&normalized)),
+                        Type::Enum(intern_str(mangled_enum)),
                         span.clone(),
                     ))
                 } else if name == "rc"
                     || name == "arc"
                     || type_ctx.fn_map.contains_key(name)
                     || type_ctx.fn_map.contains_key(&normalized)
+                    || type_ctx.fn_map.iter().any(|(k, _)| **k == normalized || k.ends_with(&format!("_{normalized}")))
                 {
                     Some(TypedExpr::Ident(name.clone(), Type::Int, span.clone()))
                 } else {
@@ -97,22 +106,31 @@ pub fn type_check_expr<'a>(
                         }
                     }
                 }
-                if type_ctx.struct_map.contains_key(&normalized) {
+                let found_struct = type_ctx
+                    .struct_map
+                    .iter()
+                    .find(|(k, _)| **k == normalized || k.ends_with(&format!("_{normalized}")));
+                let found_enum = type_ctx
+                    .enum_map
+                    .iter()
+                    .find(|(k, _)| **k == normalized || k.ends_with(&format!("_{normalized}")));
+                if let Some((mangled_struct, _)) = found_struct {
                     Some(TypedExpr::Ident(
                         name.clone(),
-                        Type::Obj(intern_str(&normalized)),
+                        Type::Obj(intern_str(mangled_struct)),
                         span.clone(),
                     ))
-                } else if type_ctx.enum_map.contains_key(&normalized) {
+                } else if let Some((mangled_enum, _)) = found_enum {
                     Some(TypedExpr::Ident(
                         name.clone(),
-                        Type::Enum(intern_str(&normalized)),
+                        Type::Enum(intern_str(mangled_enum)),
                         span.clone(),
                     ))
                 } else if name == "rc"
                     || name == "arc"
                     || type_ctx.fn_map.contains_key(name)
                     || type_ctx.fn_map.contains_key(&normalized)
+                    || type_ctx.fn_map.iter().any(|(k, _)| **k == normalized || k.ends_with(&format!("_{normalized}")))
                 {
                     Some(TypedExpr::Ident(name.clone(), Type::Int, span.clone()))
                 } else {
@@ -221,6 +239,9 @@ pub fn type_check_expr<'a>(
                     (Type::F32 | Type::Float, Type::F32 | Type::Float) => true,
                     // Int literal into float slot (implicit widening)
                     (Type::F32 | Type::Float, Type::I32 | Type::Int) => true,
+                    (Type::F32 | Type::Float | Type::I32 | Type::Int, Type::Generic(_)) => true,
+                    (Type::Generic(_), Type::F32 | Type::Float | Type::I32 | Type::Int) => true,
+                    (Type::Generic(_), Type::Generic(_)) => true,
                     _ => false,
                 };
 
@@ -452,6 +473,24 @@ pub fn type_check_expr<'a>(
         Expr::GreaterThan(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+
+            let l_ty = t_lhs.ty();
+            let r_ty = t_rhs.ty();
+
+            if !matches!(l_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
+                || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
+            {
+                errors.push(SemanticError {
+                    message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '>'"),
+                    label: "Invalid comparison operator".into(),
+                    help: Some(
+                        "Ordering comparisons can only be used on numbers (`Int` or `Float`)"
+                            .into(),
+                    ),
+                    span: span.clone(),
+                });
+            }
+
             Some(TypedExpr::GreaterThan(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -462,6 +501,24 @@ pub fn type_check_expr<'a>(
         Expr::LessThan(lhs, rhs, span) => {
             let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
             let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+
+            let l_ty = t_lhs.ty();
+            let r_ty = t_rhs.ty();
+
+            if !matches!(l_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
+                || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
+            {
+                errors.push(SemanticError {
+                    message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '<'"),
+                    label: "Invalid comparison operator".into(),
+                    help: Some(
+                        "Ordering comparisons can only be used on numbers (`Int` or `Float`)"
+                            .into(),
+                    ),
+                    span: span.clone(),
+                });
+            }
+
             Some(TypedExpr::LessThan(
                 Box::new(t_lhs),
                 Box::new(t_rhs),
@@ -477,8 +534,8 @@ pub fn type_check_expr<'a>(
             let r_ty = t_rhs.ty();
 
             // Ensure both sides are numeric (Int or Float)
-            if !matches!(l_ty, Type::Int | Type::I32 | Type::Float | Type::F32)
-                || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32)
+            if !matches!(l_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
+                || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
             {
                 errors.push(SemanticError {
                     message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '>='"),
@@ -506,8 +563,8 @@ pub fn type_check_expr<'a>(
             let r_ty = t_rhs.ty();
 
             // Ensure both sides are numeric (Int or Float)
-            if !matches!(l_ty, Type::Int | Type::I32 | Type::Float | Type::F32)
-                || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32)
+            if !matches!(l_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
+                || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
             {
                 errors.push(SemanticError {
                     message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '<='"),
