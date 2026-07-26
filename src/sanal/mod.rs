@@ -71,6 +71,16 @@ impl ScopeStack {
         None
     }
 
+    /// Looks up mutable variable info from innermost scope up to parent scopes.
+    pub fn lookup_mut(&mut self, name: &str) -> Option<&mut VarInfo> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(info) = scope.get_mut(name) {
+                return Some(info);
+            }
+        }
+        None
+    }
+
     /// Checks if a variable is declared in the current scope or any parent scope.
     pub fn contains(&self, name: &str) -> bool {
         self.lookup(name).is_some()

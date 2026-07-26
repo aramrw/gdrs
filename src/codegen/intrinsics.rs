@@ -48,6 +48,7 @@ pub unsafe extern "C" fn gdrs_resolve_symbol(name_ptr: *const std::os::raw::c_ch
     std::process::exit(1);
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_panic(msg_ptr: *const std::os::raw::c_char) -> ! {
     let msg = if msg_ptr.is_null() {
         "explicit panic"
@@ -58,11 +59,13 @@ pub extern "C" fn intrinsic_panic(msg_ptr: *const std::os::raw::c_char) -> ! {
     std::process::exit(101);
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_arg_count() -> i64 {
     let guard = JIT_ARGS.lock().unwrap();
     guard.len() as i64
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_execvp(path_ptr: *const std::os::raw::c_char) -> i32 {
     if path_ptr.is_null() {
         unsafe { libc::_exit(-1) };
@@ -74,6 +77,7 @@ pub extern "C" fn intrinsic_execvp(path_ptr: *const std::os::raw::c_char) -> i32
     }
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_waitpid(pid: i32) -> i32 {
     let mut status: i32 = 0;
     let res = unsafe { libc::waitpid(pid, &mut status as *mut i32, 0) };
@@ -88,6 +92,7 @@ pub extern "C" fn intrinsic_waitpid(pid: i32) -> i32 {
     }
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_arg_at(idx: i64) -> *const std::os::raw::c_char {
     let guard = JIT_ARGS.lock().unwrap();
     if idx < 0 || (idx as usize) >= guard.len() {
@@ -98,6 +103,7 @@ pub extern "C" fn intrinsic_arg_at(idx: i64) -> *const std::os::raw::c_char {
     c_str.into_raw() as *const std::os::raw::c_char
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_args_str() -> i64 {
     let guard = JIT_ARGS.lock().unwrap();
     let joined = guard.join(" ");
@@ -113,6 +119,7 @@ pub extern "C" fn intrinsic_args_str() -> i64 {
 /// 0 = Int (i64)
 /// 1 = Bool (1 = true, 0 = false)
 /// 2 = String (*const c_char pointer)
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_log(type_tag: u64, value_bits: u64) -> i64 {
     match type_tag {
         0 => println!("{}", value_bits as i64),
@@ -138,6 +145,7 @@ unsafe extern "C" {
     fn free(ptr: *mut std::ffi::c_void);
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_rc_new(val_bits: u64) -> *mut u64 {
     unsafe {
         let ptr = malloc(16) as *mut u64;
@@ -149,6 +157,7 @@ pub extern "C" fn intrinsic_rc_new(val_bits: u64) -> *mut u64 {
     }
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_arc_new(val_bits: u64) -> *mut u64 {
     unsafe {
         let ptr = malloc(16) as *mut u64;
@@ -160,6 +169,7 @@ pub extern "C" fn intrinsic_arc_new(val_bits: u64) -> *mut u64 {
     }
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_rc_clone(ptr: *mut u64) -> *mut u64 {
     if !ptr.is_null() {
         unsafe {
@@ -169,6 +179,7 @@ pub extern "C" fn intrinsic_rc_clone(ptr: *mut u64) -> *mut u64 {
     ptr
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_arc_clone(ptr: *mut u64) -> *mut u64 {
     if !ptr.is_null() {
         let atomic_ref = unsafe { &*(ptr as *const std::sync::atomic::AtomicU64) };
@@ -177,6 +188,7 @@ pub extern "C" fn intrinsic_arc_clone(ptr: *mut u64) -> *mut u64 {
     ptr
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_rc_drop(ptr: *mut u64) {
     if !ptr.is_null() {
         unsafe {
@@ -188,6 +200,7 @@ pub extern "C" fn intrinsic_rc_drop(ptr: *mut u64) {
     }
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_arc_drop(ptr: *mut u64) {
     if !ptr.is_null() {
         let atomic_ref = unsafe { &*(ptr as *const std::sync::atomic::AtomicU64) };
@@ -199,6 +212,7 @@ pub extern "C" fn intrinsic_arc_drop(ptr: *mut u64) {
     }
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_spawn_thread(func_ptr: u64, arg: u64) {
     if func_ptr == 0 {
         return;
@@ -209,6 +223,26 @@ pub extern "C" fn intrinsic_spawn_thread(func_ptr: u64, arg: u64) {
     });
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn intrinsic_vec_for_each(vec_header_ptr: *mut u64, func_ptr: u64) {
+    if vec_header_ptr.is_null() || func_ptr == 0 {
+        return;
+    }
+    unsafe {
+        let data_ptr = *vec_header_ptr as *mut u64;
+        let len = *vec_header_ptr.add(1);
+        if data_ptr.is_null() || len == 0 {
+            return;
+        }
+        let f: extern "C" fn(u64) -> u64 = std::mem::transmute(func_ptr as *const ());
+        for i in 0..len {
+            let elem_val = *data_ptr.add(i as usize);
+            f(elem_val);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_iter_for_each(range_ptr: *mut u64, func_ptr: u64) {
     if range_ptr.is_null() || func_ptr == 0 {
         return;
@@ -223,6 +257,7 @@ pub extern "C" fn intrinsic_iter_for_each(range_ptr: *mut u64, func_ptr: u64) {
     }
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_iter_map(range_ptr: *mut u64, closure_ptr: u64) -> *mut u64 {
     if range_ptr.is_null() {
         return std::ptr::null_mut();
@@ -236,6 +271,7 @@ pub extern "C" fn intrinsic_iter_map(range_ptr: *mut u64, closure_ptr: u64) -> *
     }
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_map_for_each(map_iter_ptr: *mut u64, consumer_func_ptr: u64) {
     if map_iter_ptr.is_null() {
         return;
@@ -263,6 +299,7 @@ pub extern "C" fn intrinsic_map_for_each(map_iter_ptr: *mut u64, consumer_func_p
     }
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_push_str(header_ptr: *mut u64, append_str_ptr: *const std::os::raw::c_char) {
     if header_ptr.is_null() || append_str_ptr.is_null() {
         return;
@@ -304,6 +341,7 @@ pub extern "C" fn intrinsic_push_str(header_ptr: *mut u64, append_str_ptr: *cons
     }
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_vec_push(header_ptr: *mut u64, elem_val: u64) {
     if header_ptr.is_null() {
         return;
@@ -341,6 +379,7 @@ pub extern "C" fn intrinsic_vec_push(header_ptr: *mut u64, elem_val: u64) {
     }
 }
 
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_vec_pop(header_ptr: *mut u64) -> u64 {
     if header_ptr.is_null() {
         return 0;
@@ -726,7 +765,44 @@ pub fn compile_macro_call<M: Module>(
                 builder.ins().iconst(types::I64, 0)
             }
         }
+        "vec" => {
+            let mut sig = module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let callee = module
+                .declare_function("intrinsic_vec_new", Linkage::Import, &sig)
+                .unwrap();
+            let local_callee = module.declare_func_in_func(callee, builder.func);
+            let call_inst = builder.ins().call(local_callee, &[]);
+            let vec_ptr = builder.inst_results(call_inst)[0];
+
+            for arg in args {
+                let elem_val = compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
+                let mut sig_push = module.make_signature();
+                sig_push.params.push(AbiParam::new(types::I64));
+                sig_push.params.push(AbiParam::new(types::I64));
+                let callee_push = module
+                    .declare_function("intrinsic_vec_push", Linkage::Import, &sig_push)
+                    .unwrap();
+                let local_push = module.declare_func_in_func(callee_push, builder.func);
+                builder.ins().call(local_push, &[vec_ptr, elem_val]);
+            }
+
+            vec_ptr
+        }
         _ => panic!("Unknown intrinsic macro: '{name}!'"),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn intrinsic_vec_new() -> *mut u64 {
+    unsafe {
+        let header = malloc(24) as *mut u64;
+        if !header.is_null() {
+            *header = std::ptr::null_mut::<u64>() as u64;
+            *header.add(1) = 0;
+            *header.add(2) = 0;
+        }
+        header
     }
 }
 

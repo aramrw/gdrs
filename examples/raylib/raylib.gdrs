@@ -25,23 +25,27 @@ impl Ball:
 		self.pos.x += self.speed.x
 		self.pos.y += self.speed.y
 
-	fn bounds_check_x(&mut self, bounds: Vec2):
-		if self.pos.x >= (bounds.x - self.r):
-			self.pos.x = bounds.x - self.r
-			self.speed.x = -self.speed.x
+	fn bounds_check_x(&mut self):
+		unsafe:
+			let screen_w = GetScreenWidth()
+			if self.pos.x >= (screen_w - self.r):
+				self.pos.x = screen_w - self.r
+				self.speed.x = -self.speed.x
 
-		if self.pos.x <= self.r:
-			self.pos.x = self.r
-			self.speed.x = -self.speed.x
+			if self.pos.x <= self.r:
+				self.pos.x = self.r
+				self.speed.x = -self.speed.x
 
-	fn bounds_check_y(&mut self, bounds: Vec2):
-		if self.pos.y >= (bounds.y - self.r):
-			self.pos.y = bounds.y - self.r
-			self.speed.y = -self.speed.y
+	fn bounds_check_y(&mut self):
+		unsafe:
+			let screen_h = GetScreenHeight()
+			if self.pos.y >= (screen_h - self.r):
+				self.pos.y = screen_h - self.r
+				self.speed.y = -self.speed.y
 
-		if self.pos.y <= self.r:
-			self.pos.y = self.r
-			self.speed.y = -self.speed.y
+			if self.pos.y <= self.r:
+				self.pos.y = self.r
+				self.speed.y = -self.speed.y
 
 fn main():
 	unsafe:
@@ -53,31 +57,32 @@ fn main():
 		InitWindow(800, 600, "GDRS Bouncing Circle!")
 		SetTargetFPS(60)
 
-		let bounds = Vec2.new(GetScreenWidth(), GetScreenHeight())
+		let mut balls = []
 
-		let pos1 = Vec2.new(400.0, 300.0)
-		let speed1 = Vec2.new(5.0, 5.0)
-		let ball1 = Ball{pos: pos1, speed: speed1, r: 50.0, color: 4278190335}
-
-		let pos2 = Vec2.new(200.0, 150.0)
-		let speed2 = Vec2.new(-3.0, 4.0)
-		let ball2 = Ball{pos: pos2, speed: speed2, r: 30.0, color: 4294902015}
-
-		let mut balls = [ball1, ball2]
+		let mut i = 0
+		while i < 5:
+			let pos = Vec2.new(100.0 + (120.0 * i), 100.0 + (120.0 * i))
+			let speed = Vec2.new(3.0 + i, 5.0 - i)
+			let mut r = 10.0
+			if (i % 2) == 0:
+				r = 20.0
+			else:
+				r = 10.0 + i
+			let ball = Ball{pos: pos, speed: speed, r: 50.0, color: 4278190335 + (120 * i)}
+			balls.push(ball)
+			i += 1
 
 		while !WindowShouldClose():
 			BeginDrawing()
 			ClearBackground(2294467295)
 
-			let mut i = 0
-			while i < 2:
-				// Call methods directly on the indexed array element
-				balls[i].update()
-				balls[i].bounds_check_x(bounds)
-				balls[i].bounds_check_y(bounds)
+			balls.iter().for_each(|ball|:
+				ball.update()
+				ball.bounds_check_x()
+				ball.bounds_check_y()
 
-				DrawCircle(balls[i].pos.x, balls[i].pos.y, balls[i].r, balls[i].color)
-				i += 1
+				DrawCircle(ball.pos.x, ball.pos.y, ball.r, ball.color)
+			)
 
 			EndDrawing()
 

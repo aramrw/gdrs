@@ -1058,9 +1058,55 @@ pub fn type_check_expr<'a>(
 
         Expr::Call(raw_name, args, span) => {
             let mut typed_args = Vec::new();
-            for arg in args {
-                if let Some(t_arg) = type_check_expr(scopes, errors, type_ctx, arg) {
-                    typed_args.push(t_arg);
+            if !args.is_empty() {
+                if let Some(first_arg) = type_check_expr(scopes, errors, type_ctx, &args[0]) {
+                    let first_ty = first_arg.ty();
+                    typed_args.push(first_arg);
+
+                    let elem_ty = match &first_ty {
+                        Type::Vec(inner) => Some((**inner).clone()),
+                        Type::Ref(inner) | Type::MutRef(inner) => match &**inner {
+                            Type::Vec(elem) => Some((**elem).clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+
+                    for arg in &args[1..] {
+                        if let (Some(closure_elem_ty), Expr::Closure(params, body, c_span)) = (
+                            elem_ty.clone(),
+                            arg,
+                        ) {
+                            static CLOSURE_COUNTER: std::sync::atomic::AtomicUsize =
+                                std::sync::atomic::AtomicUsize::new(0);
+                            let closure_name = format!(
+                                "__closure_{}",
+                                CLOSURE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            );
+
+                            scopes.push_scope();
+                            let mut typed_params = Vec::new();
+                            for p in params {
+                                scopes.declare(p.clone(), false, closure_elem_ty.clone());
+                                typed_params.push((p.clone(), closure_elem_ty.clone()));
+                            }
+
+                            let t_body = type_check_expr(scopes, errors, type_ctx, body)
+                                .unwrap_or(TypedExpr::Int(0, c_span.clone()));
+                            scopes.pop_scope();
+
+                            let ret_ty = t_body.ty();
+                            typed_args.push(TypedExpr::Closure(
+                                closure_name,
+                                typed_params,
+                                Box::new(t_body),
+                                ret_ty,
+                                c_span.clone(),
+                            ));
+                        } else if let Some(t_arg) = type_check_expr(scopes, errors, type_ctx, arg) {
+                            typed_args.push(t_arg);
+                        }
+                    }
                 }
             }
 
@@ -1087,7 +1133,7 @@ pub fn type_check_expr<'a>(
                 }
             }
 
-            let name = raw_name.replace("::", "_");
+            let mut name = raw_name.replace("::", "_");
             let is_intrinsic_macro = matches!(
                 name.as_str(),
                 "log"
@@ -1135,6 +1181,14 @@ pub fn type_check_expr<'a>(
                 let macro_ret_ty = match name.trim_end_matches('!') {
                     "format" | "arg_at" | "args_at" | "args" => Type::Str,
                     "arg_count" | "args_count" | "thread" | "spawn" | "len" => Type::Int,
+                    "vec" => {
+                        let elem_ty = if !typed_args.is_empty() {
+                            typed_args[0].ty()
+                        } else {
+                            Type::Int
+                        };
+                        Type::Vec(crate::ast::intern_type(elem_ty))
+                    }
                     _ => Type::Unit,
                 };
                 return Some(TypedExpr::MacroCall(name.clone(), typed_args, macro_ret_ty, span.clone()));
@@ -1148,14 +1202,19 @@ pub fn type_check_expr<'a>(
                 None
             };
             if let Some(sep) = split_sep {
-                if let Some((target_or_var, method_name)) = name.split_once(sep) {
+                let split_res = if sep == "." {
+                    name.rsplit_once('.')
+                } else {
+                    name.split_once(sep)
+                };
+                if let Some((target_or_var, method_name)) = split_res {
                     let mangled = format!("{}_{}", target_or_var, method_name);
                     if method_name == "len"
                         || method_name == "push"
                         || method_name == "pop"
                         || method_name == "push_str"
                     {
-                        if let Some(target_info) = scopes.lookup(target_or_var) {
+                        if let Some(target_info) = scopes.lookup_mut(target_or_var) {
                             if (method_name == "push"
                                 || method_name == "push_str"
                                 || method_name == "pop")
@@ -1168,12 +1227,22 @@ pub fn type_check_expr<'a>(
                                 span: span.clone(),
                             });
                             }
+
+                            if method_name == "push" && !typed_args.is_empty() {
+                                let arg_ty = typed_args[0].ty();
+                                target_info.ty = Type::Vec(crate::ast::intern_type(arg_ty));
+                            }
                         }
+                        let target_ast = if target_or_var.contains('.') {
+                            Expr::Call(target_or_var.to_string(), vec![], span.clone())
+                        } else {
+                            Expr::Ident(target_or_var.to_string(), span.clone())
+                        };
                         if let Some(target_expr) = type_check_expr(
                             scopes,
                             errors,
                             type_ctx,
-                            &Expr::Ident(target_or_var.to_string(), span.clone()),
+                            &target_ast,
                         ) {
                             typed_args.insert(0, target_expr);
                             let macro_ret_ty = match method_name {
@@ -1198,67 +1267,37 @@ pub fn type_check_expr<'a>(
                         resolved_name = mangled_fn_name.clone();
                         let expects_self = target_func.params.first().map(|p| p.name == "self").unwrap_or(false);
                         if expects_self {
+                            let target_ast = if target_or_var.contains('.') {
+                                Expr::Call(target_or_var.to_string(), vec![], span.clone())
+                            } else {
+                                Expr::Ident(target_or_var.to_string(), span.clone())
+                            };
                             if let Some(target_expr) = type_check_expr(
                                 scopes,
                                 errors,
                                 type_ctx,
-                                &Expr::Ident(target_or_var.to_string(), span.clone()),
+                                &target_ast,
                             ) {
                                 typed_args.insert(0, target_expr);
                             }
                         }
-                    } else if let Some(var_info) = scopes.lookup(target_or_var) {
-                        match var_info.ty {
-                            Type::DynTrait(trait_name) => {
-                                let target_expr =
-                                    Expr::Ident(target_or_var.to_string(), span.clone());
-                                if let Some(t_target) =
-                                    type_check_expr(scopes, errors, type_ctx, &target_expr)
-                                {
-                                    return Some(TypedExpr::DynCall(
-                                        Box::new(t_target),
-                                        method_name.to_string(),
-                                        typed_args,
-                                        Type::Bool,
-                                        span.clone(),
-                                    ));
-                                }
+                    } else {
+                        let target_ast = if target_or_var.contains('.') {
+                            Expr::Call(target_or_var.to_string(), vec![], span.clone())
+                        } else {
+                            Expr::Ident(target_or_var.to_string(), span.clone())
+                        };
+                        if let Some(target_expr) = type_check_expr(
+                            scopes,
+                            errors,
+                            type_ctx,
+                            &target_ast,
+                        ) {
+                            if typed_args.is_empty() || typed_args[0].span() != target_expr.span() {
+                                typed_args.insert(0, target_expr);
                             }
-                            Type::Generic(_g_name) => {
-                                let target_expr =
-                                    Expr::Ident(target_or_var.to_string(), span.clone());
-                                if let Some(t_target) =
-                                    type_check_expr(scopes, errors, type_ctx, &target_expr)
-                                {
-                                    typed_args.insert(0, t_target);
-                                    return Some(TypedExpr::Call(
-                                        method_name.to_string(),
-                                        typed_args,
-                                        Type::Bool,
-                                        span.clone(),
-                                    ));
-                                }
-                            }
-                            Type::Obj(tn) | Type::Enum(tn) => {
-                                let var_mangled = format!("{}_{}", tn, method_name);
-                                let found_var_fn = type_ctx.fn_map.iter().find(|(k, _)| **k == var_mangled || k.ends_with(&format!("_{var_mangled}")));
-                                if let Some((mangled_fn_name, target_func)) = found_var_fn {
-                                    resolved_name = mangled_fn_name.clone();
-                                    let expects_self = target_func.params.first().map(|p| p.name == "self").unwrap_or(false);
-                                    if expects_self {
-                                        if let Some(target_expr) = type_check_expr(
-                                            scopes,
-                                            errors,
-                                            type_ctx,
-                                            &Expr::Ident(target_or_var.to_string(), span.clone()),
-                                        ) {
-                                            typed_args.insert(0, target_expr);
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
                         }
+                        name = method_name.to_string();
                     }
                 }
             } else if !type_ctx.fn_map.contains_key(&name) && !typed_args.is_empty() {
@@ -1388,10 +1427,36 @@ pub fn type_check_expr<'a>(
                     }
                 }
 
+                if name == "push" && !typed_args.is_empty() {
+                    let elem_ty = typed_args.last().unwrap().ty();
+                    if let TypedExpr::Ident(var_name, _, _) = &typed_args[0] {
+                        if let Some(target_info) = scopes.lookup_mut(var_name) {
+                            if !target_info.is_mutable {
+                                errors.push(SemanticError {
+                                    message: format!("Cannot call mutating method 'push' on immutable variable '{var_name}'"),
+                                    label: format!("'{var_name}' is immutable"),
+                                    help: Some(format!("Declare as mutable: 'let mut {var_name}'")),
+                                    span: span.clone(),
+                                });
+                            }
+                            target_info.ty = Type::Vec(crate::ast::intern_type(elem_ty));
+                        }
+                    }
+                    return Some(TypedExpr::MacroCall(
+                        "push".to_string(),
+                        typed_args,
+                        Type::Unit,
+                        span.clone(),
+                    ));
+                }
+
                 if name == "iter" && !typed_args.is_empty() {
                     let target_ty = typed_args[0].ty();
                     match target_ty {
                         Type::Obj(s_name) if s_name == "Range" => {
+                            return Some(typed_args.remove(0));
+                        }
+                        Type::Vec(_) | Type::Ref(_) | Type::MutRef(_) => {
                             return Some(typed_args.remove(0));
                         }
                         _ => {}
@@ -1409,9 +1474,20 @@ pub fn type_check_expr<'a>(
 
                 if name == "for_each" && !typed_args.is_empty() {
                     let target_ty = typed_args[0].ty();
-                    if target_ty == Type::Obj(crate::ast::intern_str("MapIter")) {
+                    let deref_ty = match &target_ty {
+                        Type::Ref(inner) | Type::MutRef(inner) => (**inner).clone(),
+                        other => other.clone(),
+                    };
+                    if deref_ty == Type::Obj(crate::ast::intern_str("MapIter")) {
                         return Some(TypedExpr::Call(
                             "intrinsic_map_for_each".to_string(),
+                            typed_args,
+                            Type::Unit,
+                            span.clone(),
+                        ));
+                    } else if matches!(deref_ty, Type::Vec(_)) {
+                        return Some(TypedExpr::Call(
+                            "intrinsic_vec_for_each".to_string(),
                             typed_args,
                             Type::Unit,
                             span.clone(),
@@ -1541,7 +1617,7 @@ pub fn type_check_expr<'a>(
                 *ext_ret_ty
             } else {
                 errors.push(SemanticError {
-                    message: format!("Undefined function '{resolved_name}'"),
+                    message: format!("Undefined function '{resolved_name}' (raw: '{raw_name}')"),
                     label: "Function does not exist".to_string(),
                     help: None,
                     span: span.clone(),

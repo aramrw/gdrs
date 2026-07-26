@@ -14,7 +14,7 @@ use stmt::{stmt_parser};
 // ==========================================
 // 4. PARSER (Chumsky)
 // ==========================================
-pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
+pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
     let type_parser = recursive(|type_parser| {
         let array_type = just(Token::LBracket)
             .ignore_then(type_parser.clone())
@@ -88,7 +88,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
         .or(array_type)
         .or(rc_type)
         .or(arc_type)
-    });
+    }).boxed();
 
     // 3. Math Expression parser with operator precedence hierarchy
     let math = math_parser();
@@ -469,6 +469,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
             functions,
         }
     })
+    .boxed()
 }
 
 enum Item {

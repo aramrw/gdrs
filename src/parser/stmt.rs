@@ -176,6 +176,7 @@ pub fn stmt_parser<'a>(
             .map_with_span(|(name, args), span| Expr::MacroCall(name, args, span))
             .then_ignore(just(Token::Newline).or_not());
 
+        // this is also no used!
         let method_call_stmt = select! { Token::Ident(target) => target }
             .then_ignore(just(Token::Dot))
             .then(select! { Token::Ident(method) => method })
@@ -192,6 +193,7 @@ pub fn stmt_parser<'a>(
             })
             .then_ignore(just(Token::Newline).or_not());
 
+        // why is this not used?
         let call_stmt = path
             .clone()
             .then(
@@ -285,13 +287,11 @@ pub fn stmt_parser<'a>(
                     .or(if_stmt)
                     .or(while_stmt)
                     .or(macro_call)
-                    .or(method_call_stmt)
-                    .or(call_stmt)
                     .or(math_stmt)
                     .or(block),
             )
             .then_ignore(just(Token::Newline).repeated())
     });
 
-    stmt
+    stmt.boxed()
 }

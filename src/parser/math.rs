@@ -67,14 +67,19 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
             )
             .map_with_span(|(name, fields), span| Expr::ObjInit(name, fields, span));
 
-        let call_expr = path
-            .clone()
-            .then(
+        let parenthesized_args = just(Token::Newline)
+            .repeated()
+            .ignore_then(
                 math.clone()
                     .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+                    .allow_trailing(),
             )
+            .then_ignore(just(Token::Newline).repeated())
+            .delimited_by(just(Token::LParen), just(Token::RParen));
+
+        let call_expr = path
+            .clone()
+            .then(parenthesized_args.clone())
             .map_with_span(|(name, args), span| Expr::Call(name, args, span));
 
         let array_init = math
@@ -84,16 +89,17 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
             .delimited_by(just(Token::LBracket), just(Token::RBracket))
             .map_with_span(|elems, span| Expr::ArrayInit(elems, span));
 
+        let macro_args = parenthesized_args.clone().or(math
+            .clone()
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .delimited_by(just(Token::LBracket), just(Token::RBracket)));
+
         let macro_call = select! { Token::MacroIdent(name) => name }
-            .then(
-                math.clone()
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .delimited_by(just(Token::LParen), just(Token::RParen)),
-            )
+            .then(macro_args)
             .map_with_span(|(name, args), span| Expr::MacroCall(name, args, span));
 
-        let ident = path.map_with_span(|name, span| Expr::Ident(name, span));
+        let ident = path.clone().map_with_span(|name, span| Expr::Ident(name, span));
 
         let closure_params = select! { Token::Ident(s) => s }
             .separated_by(just(Token::Comma))
@@ -101,15 +107,122 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
             .delimited_by(just(Token::Pipe), just(Token::Pipe))
             .or(just(Token::Pipe).then(just(Token::Pipe)).to(Vec::new()));
 
+        type ExprOp = fn(Box<Expr>, Box<Expr>, Span) -> Expr;
+
+        let assign_op = just(Token::Assign)
+            .to(None)
+            .or(just(Token::PlusEqual).to(Some(Expr::Add as ExprOp)))
+            .or(just(Token::MinusEqual).to(Some(Expr::Sub as ExprOp)))
+            .or(just(Token::StarEqual).to(Some(Expr::Mul as ExprOp)))
+            .or(just(Token::SlashEqual).to(Some(Expr::Div as ExprOp)));
+
+        let simple_assign_stmt = select! { Token::Ident(s) => s }
+            .then(assign_op.clone())
+            .then(math.clone())
+            .map_with_span(|((name, op), rhs), span: Span| {
+                let final_rhs = match op {
+                    Some(make_expr) => {
+                        let lhs = Expr::Ident(name.clone(), span.clone());
+                        make_expr(Box::new(lhs), Box::new(rhs), span.clone())
+                    }
+                    None => rhs,
+                };
+                Expr::Assign(name, Box::new(final_rhs), span)
+            });
+
+        let target_expr = path
+            .clone()
+            .map_with_span(|name, span: Span| Expr::Ident(name, span))
+            .then(
+                just(Token::Dot)
+                    .ignore_then(select! { Token::Ident(f) => f })
+                    .repeated()
+                    .at_least(1),
+            )
+            .foldl(|target, field| {
+                let span = target.span().clone();
+                Expr::FieldAccess(Box::new(target), field, span)
+            });
+
+        let index_assign_stmt = target_expr
+            .clone()
+            .then_ignore(just(Token::LBracket))
+            .then(math.clone())
+            .then_ignore(just(Token::RBracket))
+            .then(assign_op.clone())
+            .then(math.clone())
+            .map_with_span(|(((target, idx), op), rhs), span: Span| {
+                let final_rhs = match op {
+                    Some(make_expr) => {
+                        let lhs = Expr::IndexAccess(
+                            Box::new(target.clone()),
+                            Box::new(idx.clone()),
+                            span.clone(),
+                        );
+                        make_expr(Box::new(lhs), Box::new(rhs), span.clone())
+                    }
+                    None => rhs,
+                };
+                Expr::IndexAssign(Box::new(target), Box::new(idx), Box::new(final_rhs), span)
+            });
+
+        let field_assign_stmt = target_expr
+            .clone()
+            .then(assign_op.clone())
+            .then(math.clone())
+            .map_with_span(|((target, op), rhs), span: Span| {
+                if let Expr::FieldAccess(inner_target, field, _) = target {
+                    let final_rhs = match op {
+                        Some(make_expr) => {
+                            let lhs = Expr::FieldAccess(
+                                inner_target.clone(),
+                                field.clone(),
+                                span.clone(),
+                            );
+                            make_expr(Box::new(lhs), Box::new(rhs), span.clone())
+                        }
+                        None => rhs,
+                    };
+                    Expr::FieldAssign(inner_target, field, Box::new(final_rhs), span)
+                } else {
+                    unreachable!()
+                }
+            });
+
+        let let_stmt = just(Token::Let)
+            .ignore_then(just(Token::Mut).or_not())
+            .then(select! { Token::Ident(s) => s })
+            .then_ignore(just(Token::Assign))
+            .then(math.clone())
+            .map_with_span(|((is_mut, name), rhs), span: Span| {
+                Expr::Let(name, None, is_mut.is_some(), Box::new(rhs), span)
+            });
+
+        let closure_stmt = let_stmt
+            .or(index_assign_stmt)
+            .or(field_assign_stmt)
+            .or(simple_assign_stmt)
+            .or(math.clone());
+
+        let closure_block_body = closure_stmt
+            .then_ignore(just(Token::Newline).repeated())
+            .repeated()
+            .at_least(1)
+            .delimited_by(just(Token::Indent), just(Token::Dedent))
+            .map_with_span(|exprs, span: Span| {
+                if exprs.len() == 1 {
+                    exprs.into_iter().next().unwrap()
+                } else {
+                    Expr::Block(exprs, span)
+                }
+            })
+            .or(math.clone());
+
         let closure_block = closure_params
             .clone()
             .then_ignore(just(Token::Colon))
             .then_ignore(just(Token::Newline).or_not())
-            .then(
-                math.clone()
-                    .delimited_by(just(Token::Indent), just(Token::Dedent))
-                    .or(math.clone()),
-            )
+            .then(closure_block_body)
             .map_with_span(|(params, body), span| Expr::Closure(params, Box::new(body), span));
 
         let closure_expr = closure_params
@@ -141,12 +254,7 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
 
         let dot_call_post = just(Token::Dot)
             .ignore_then(select! { Token::Ident(s) => s })
-            .then(
-                math.clone()
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .delimited_by(just(Token::LParen), just(Token::RParen)),
-            )
+            .then(parenthesized_args.clone())
             .map_with_span(|(method, args), span: Span| Postfix::DotCall(method, args, span));
 
         let dot_post = just(Token::Dot)
@@ -269,4 +377,5 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
                 make_expr(Box::new(lhs), Box::new(rhs), span)
             })
     })
+    .boxed()
 }

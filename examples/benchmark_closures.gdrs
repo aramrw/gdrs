@@ -1,0 +1,3 @@
+fn main():
+	log!("Benchmarking 1,000,000 closure iterations...")
+	(0..1000000).iter().for_each(|x| x + x)
