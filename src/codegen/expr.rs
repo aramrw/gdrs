@@ -45,7 +45,7 @@ pub fn cranelift_type_of(ty: &Type) -> cranelift_codegen::ir::Type {
         Type::F32 => types::F32,
         Type::Float => types::F64,
         Type::Bool => types::I8,
-        Type::Generic(_) => types::F64,
+        Type::Generic(_) => types::I64,
         _ => types::I64, // pointers / heap handles
     }
 }
