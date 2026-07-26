@@ -4,6 +4,7 @@
 pub mod binops;
 pub mod calls;
 pub mod control_flow;
+pub mod mono;
 pub mod objects;
 pub mod refs;
 pub mod types;
@@ -11,8 +12,10 @@ pub mod vars;
 
 use crate::{
     ast::{intern_str, FuncDecl, Param, Program, Span, Type, TypedFuncDecl, TypedProgram},
+    sanal::mono::{extract_generic_params_enum, extract_generic_params_struct, Monomorphizer},
     sanal::types::{type_check_expr, TypeCtx},
 };
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 // A custom struct to hold the error message, label, error code, optional help message, AND where it happened
@@ -95,59 +98,67 @@ impl ScopeStack {
     }
 }
 
-pub fn check_semantics(program: &Program) -> Result<(TypedProgram, HashMap<String, StructLayout>), Vec<SemanticError>> {
+pub fn check_semantics(
+    program: &Program,
+) -> Result<(TypedProgram, HashMap<String, StructLayout>), Vec<SemanticError>> {
     let mut errors = Vec::new();
     let mut typed_functions = Vec::new();
 
-    let mut fn_map = HashMap::new();
-    for func in &program.functions {
-        fn_map.insert(func.name.clone(), func);
-    }
+    let mut mono = Monomorphizer::default();
+    mono.impl_templates = program.impls.clone();
 
     let mut struct_map = HashMap::new();
     for s in &program.structs {
-        let mut total_size = 0u32;
-        let mut field_offsets = HashMap::new();
-
-        for field in &s.fields {
-            field_offsets.insert(field.name.clone(), (total_size, field.ty));
-            total_size += 8; // Each primitive or pointer field occupies 8 bytes (i64 stack aligned)
+        let is_generic = !extract_generic_params_struct(s).is_empty();
+        if is_generic {
+            mono.struct_templates.insert(s.name.clone(), s.clone());
+        } else {
+            let mut total_size = 0u32;
+            let mut field_offsets = HashMap::new();
+            for field in &s.fields {
+                field_offsets.insert(field.name.clone(), (total_size, field.ty));
+                total_size += 8;
+            }
+            struct_map.insert(
+                s.name.clone(),
+                StructLayout {
+                    name: s.name.clone(),
+                    total_size,
+                    field_offsets,
+                },
+            );
         }
-
-        struct_map.insert(
-            s.name.clone(),
-            StructLayout {
-                name: s.name.clone(),
-                total_size,
-                field_offsets,
-            },
-        );
     }
 
     let mut enum_names: std::collections::HashSet<String> =
         program.enums.iter().map(|e| e.name.clone()).collect();
     let mut enum_map = HashMap::new();
     for e in &program.enums {
-        let mut variant_map = HashMap::new();
-        for (i, variant) in e.variants.iter().enumerate() {
-            variant_map.insert(
-                variant.name.clone(),
-                (i as i64, variant.payload_types.clone()),
-            );
+        let is_generic = !extract_generic_params_enum(e).is_empty();
+        if is_generic {
+            mono.enum_templates.insert(e.name.clone(), e.clone());
+        } else {
+            let mut variant_map = HashMap::new();
+            for (i, variant) in e.variants.iter().enumerate() {
+                variant_map.insert(
+                    variant.name.clone(),
+                    (i as i64, variant.payload_types.clone()),
+                );
+            }
+            enum_map.insert(e.name.clone(), (intern_str(&e.name), variant_map));
         }
-        enum_map.insert(e.name.clone(), (intern_str(&e.name), variant_map));
     }
 
     let mut all_functions = Vec::new();
 
-fn resolve_self_type(param_ty: Type, target_ty: Type) -> Type {
-    match param_ty {
-        Type::Unit => target_ty,
-        Type::Ref(inner) if *inner == Type::Unit => Type::Ref(crate::ast::intern_type(target_ty)),
-        Type::MutRef(inner) if *inner == Type::Unit => Type::MutRef(crate::ast::intern_type(target_ty)),
-        _ => param_ty,
+    fn resolve_self_type(param_ty: Type, target_ty: Type) -> Type {
+        match param_ty {
+            Type::Unit => target_ty,
+            Type::Ref(inner) if *inner == Type::Unit => Type::Ref(crate::ast::intern_type(target_ty)),
+            Type::MutRef(inner) if *inner == Type::Unit => Type::MutRef(crate::ast::intern_type(target_ty)),
+            _ => param_ty,
+        }
     }
-}
 
     for impl_block in &program.impls {
         let target_ty = resolve_type(Type::Obj(intern_str(&impl_block.target_type)), &enum_names, 0..1, &mut errors);
@@ -222,7 +233,8 @@ fn resolve_self_type(param_ty: Type, target_ty: Type) -> Type {
 
     let mut fn_map = HashMap::new();
     for func in &all_functions {
-        fn_map.insert(func.name.clone(), func);
+        fn_map.insert(func.name.clone(), func.clone());
+        mono.fn_templates.insert(func.name.clone(), func.clone());
     }
 
     let mut extern_fn_names = std::collections::HashSet::new();
@@ -232,23 +244,45 @@ fn resolve_self_type(param_ty: Type, target_ty: Type) -> Type {
         for ef in &ext.functions {
             extern_fn_names.insert(ef.name.clone());
             let res_ret = resolve_type(ef.return_type, &enum_names, 0..1, &mut errors);
-            let res_params: Vec<Type> = ef.params.iter().map(|p| resolve_type(p.ty, &enum_names, p.span.clone(), &mut errors)).collect();
+            let res_params: Vec<Type> = ef
+                .params
+                .iter()
+                .map(|p| resolve_type(p.ty, &enum_names, p.span.clone(), &mut errors))
+                .collect();
             extern_map.insert(ef.name.clone(), res_ret);
             extern_signatures.insert(ef.name.clone(), (res_params, res_ret));
         }
     }
 
+    let mono_cell = RefCell::new(mono);
+    let struct_map_cell = RefCell::new(struct_map);
+    let enum_map_cell = RefCell::new(enum_map);
+    let fn_map_cell = RefCell::new(fn_map);
+    let worklist_cell = RefCell::new(all_functions);
+
     let type_ctx = TypeCtx {
-        fn_map: &fn_map,
-        struct_map: &struct_map,
-        enum_map: &enum_map,
+        fn_map: &fn_map_cell,
+        struct_map: &struct_map_cell,
+        enum_map: &enum_map_cell,
         extern_fn_names: &extern_fn_names,
         extern_map: &extern_map,
         extern_signatures: &extern_signatures,
         is_unsafe: false,
+        mono: &mono_cell,
+        worklist: &worklist_cell,
     };
 
-    for func in &all_functions {
+    let mut processed_fn_names = std::collections::HashSet::new();
+
+    while let Some(func) = {
+        let mut wl = worklist_cell.borrow_mut();
+        wl.pop()
+    } {
+        if processed_fn_names.contains(&func.name) {
+            continue;
+        }
+        processed_fn_names.insert(func.name.clone());
+
         let mut scope_stack = ScopeStack::new();
         let mut typed_body = Vec::new();
 
@@ -283,6 +317,8 @@ fn resolve_self_type(param_ty: Type, target_ty: Type) -> Type {
         });
     }
 
+    let final_struct_map = struct_map_cell.into_inner();
+
     if errors.is_empty() {
         typed_functions.sort_by_key(|f| if f.name == "main" { 1 } else { 0 });
         Ok((
@@ -295,16 +331,21 @@ fn resolve_self_type(param_ty: Type, target_ty: Type) -> Type {
                 impls: program.impls.clone(),
                 functions: typed_functions,
             },
-            struct_map,
+            final_struct_map,
         ))
     } else {
         Err(errors)
     }
 }
 
-fn resolve_type(ty: Type, enum_names: &std::collections::HashSet<String>, span: Span, errors: &mut Vec<SemanticError>) -> Type {
+fn resolve_type(
+    ty: Type,
+    enum_names: &std::collections::HashSet<String>,
+    span: Span,
+    errors: &mut Vec<SemanticError>,
+) -> Type {
     match ty {
-        Type::Obj("Result_bare") => {
+        Type::Obj("Result_bare") | Type::Obj("std_core_Result_bare") => {
             errors.push(SemanticError {
                 code: "E0107",
                 message: "Type `Result` requires generic parameter(s), e.g. `Result<T>` or `Result<T, E>`".to_string(),
@@ -315,7 +356,7 @@ fn resolve_type(ty: Type, enum_names: &std::collections::HashSet<String>, span: 
             });
             Type::Enum(intern_str("std_core_Result"))
         }
-        Type::Obj("Option_bare") => {
+        Type::Obj("Option_bare") | Type::Obj("std_core_Option_bare") => {
             errors.push(SemanticError {
                 code: "E0107",
                 message: "Type `Option` requires a generic parameter, e.g. `Option<T>`".to_string(),
@@ -326,9 +367,11 @@ fn resolve_type(ty: Type, enum_names: &std::collections::HashSet<String>, span: 
             });
             Type::Enum(intern_str("std_core_Option"))
         }
-        Type::Obj("Option") => Type::Enum(intern_str("std_core_Option")),
-        Type::Obj("Result") => Type::Enum(intern_str("std_core_Result")),
-        Type::Obj(name) if enum_names.contains(name) => Type::Enum(intern_str(name)),
+        Type::Obj("Option") | Type::Obj("Opt") => Type::Enum(intern_str("std_core_Option")),
+        Type::Obj("Result") | Type::Obj("Res") => Type::Enum(intern_str("std_core_Result")),
+        Type::Obj(name) if name.contains("Option") || name.contains("Result") || enum_names.contains(name) => {
+            Type::Enum(intern_str(name))
+        }
         Type::Array(elem_ty, len) => Type::Array(
             crate::ast::intern_type(resolve_type(*elem_ty, enum_names, span, errors)),
             len,

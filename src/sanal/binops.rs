@@ -70,7 +70,7 @@ pub fn type_check_add<'a>(
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
     if let Type::Obj(struct_name) = t_lhs.ty() {
         let mangled = format!("{}_add", struct_name);
-        if let Some(fn_info) = type_ctx.fn_map.get(&mangled) {
+        if let Some(fn_info) = type_ctx.get_fn(&mangled) {
             return Some(TypedExpr::Call(
                 mangled,
                 vec![t_lhs, t_rhs],
@@ -100,7 +100,7 @@ pub fn type_check_sub<'a>(
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
     if let Type::Obj(struct_name) = t_lhs.ty() {
         let mangled = format!("{}_sub", struct_name);
-        if let Some(fn_info) = type_ctx.fn_map.get(&mangled) {
+        if let Some(fn_info) = type_ctx.get_fn(&mangled) {
             return Some(TypedExpr::Call(
                 mangled,
                 vec![t_lhs, t_rhs],
@@ -130,7 +130,7 @@ pub fn type_check_mul<'a>(
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
     if let Type::Obj(struct_name) = t_lhs.ty() {
         let mangled = format!("{}_mul", struct_name);
-        if let Some(fn_info) = type_ctx.fn_map.get(&mangled) {
+        if let Some(fn_info) = type_ctx.get_fn(&mangled) {
             return Some(TypedExpr::Call(
                 mangled,
                 vec![t_lhs, t_rhs],
@@ -160,7 +160,7 @@ pub fn type_check_div<'a>(
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
     if let Type::Obj(struct_name) = t_lhs.ty() {
         let mangled = format!("{}_div", struct_name);
-        if let Some(fn_info) = type_ctx.fn_map.get(&mangled) {
+        if let Some(fn_info) = type_ctx.get_fn(&mangled) {
             return Some(TypedExpr::Call(
                 mangled,
                 vec![t_lhs, t_rhs],

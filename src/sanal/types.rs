@@ -4,20 +4,133 @@
 use crate::{
     ast::{Expr, FuncDecl, Span, Type, TypedExpr},
     sanal::{
-        binops, calls, control_flow, objects, refs, vars, ScopeStack, SemanticError, StructLayout,
+        binops, calls, control_flow, mono::Monomorphizer, objects, refs, vars, ScopeStack,
+        SemanticError, StructLayout,
     },
 };
+use std::cell::RefCell;
 use std::collections::HashMap;
+
+fn parse_suffix_to_type(s: &str) -> Option<Type> {
+    match s {
+        "i64" | "int" => Some(Type::Int),
+        "i32" => Some(Type::I32),
+        "f64" | "float" => Some(Type::Float),
+        "f32" => Some(Type::F32),
+        "bool" => Some(Type::Bool),
+        "str" | "string" => Some(Type::Str),
+        "unit" => Some(Type::Unit),
+        _ => None,
+    }
+}
 
 #[derive(Clone)]
 pub struct TypeCtx<'a> {
-    pub fn_map: &'a HashMap<String, &'a FuncDecl>,
-    pub struct_map: &'a HashMap<String, StructLayout>,
-    pub enum_map: &'a HashMap<String, (&'static str, HashMap<String, (i64, Vec<Type>)>)>,
+    pub fn_map: &'a RefCell<HashMap<String, FuncDecl>>,
+    pub struct_map: &'a RefCell<HashMap<String, StructLayout>>,
+    pub enum_map: &'a RefCell<HashMap<String, (&'static str, HashMap<String, (i64, Vec<Type>)>)>>,
     pub extern_fn_names: &'a std::collections::HashSet<String>,
     pub extern_map: &'a HashMap<String, Type>,
     pub extern_signatures: &'a HashMap<String, (Vec<Type>, Type)>,
     pub is_unsafe: bool,
+    pub mono: &'a RefCell<Monomorphizer>,
+    pub worklist: &'a RefCell<Vec<FuncDecl>>,
+}
+
+impl<'a> TypeCtx<'a> {
+    pub fn get_struct(&self, name: &str) -> Option<StructLayout> {
+        let res = self.struct_map.borrow().get(name).cloned().or_else(|| {
+            self.struct_map
+                .borrow()
+                .iter()
+                .find(|(k, _)| **k == name || k.starts_with(&format!("{name}_")) || k.ends_with(&format!("_{name}")))
+                .map(|(_, v)| v.clone())
+        });
+        if let Some(s) = res {
+            return Some(s);
+        }
+
+        if let Some((base_name, suffix)) = name.rsplit_once('_') {
+            let type_args: Vec<Type> = suffix.split('_').filter_map(parse_suffix_to_type).collect();
+            if !type_args.is_empty() {
+                if let Some(mangled) = crate::sanal::mono::monomorphize_struct(
+                    self.mono,
+                    base_name,
+                    &type_args,
+                    self.struct_map,
+                    self.fn_map,
+                    self.worklist,
+                ) {
+                    return self.struct_map.borrow().get(&mangled).cloned();
+                }
+            }
+        }
+        None
+    }
+
+    pub fn contains_struct(&self, name: &str) -> bool {
+        self.get_struct(name).is_some()
+    }
+
+    pub fn get_enum(&self, name: &str) -> Option<(&'static str, HashMap<String, (i64, Vec<Type>)>)> {
+        if let Some(res) = self.enum_map.borrow().get(name).cloned().or_else(|| {
+            self.enum_map
+                .borrow()
+                .iter()
+                .find(|(k, _)| **k == name || k.ends_with(&format!("_{name}")))
+                .map(|(_, v)| v.clone())
+        }) {
+            return Some(res);
+        }
+
+        if name.starts_with("std_core_Option") || name.starts_with("std_core_Result") {
+            let base_name = if name.starts_with("std_core_Option") {
+                "std_core_Option"
+            } else {
+                "std_core_Result"
+            };
+            let rest = if name.len() > base_name.len() {
+                &name[base_name.len() + 1..]
+            } else {
+                "i64"
+            };
+            let type_args: Vec<Type> = rest.split('_').filter_map(parse_suffix_to_type).collect();
+            let final_args = if type_args.is_empty() {
+                vec![Type::Int]
+            } else {
+                type_args
+            };
+            if let Some(mangled) = crate::sanal::mono::monomorphize_enum(
+                self.mono,
+                base_name,
+                &final_args,
+                self.enum_map,
+                self.fn_map,
+                self.worklist,
+            ) {
+                return self.enum_map.borrow().get(&mangled).cloned();
+            }
+        }
+        None
+    }
+
+    pub fn contains_enum(&self, name: &str) -> bool {
+        self.get_enum(name).is_some()
+    }
+
+    pub fn get_fn(&self, name: &str) -> Option<FuncDecl> {
+        self.fn_map.borrow().get(name).cloned().or_else(|| {
+            self.fn_map
+                .borrow()
+                .iter()
+                .find(|(k, _)| **k == name || k.ends_with(&format!("_{name}")))
+                .map(|(_, v)| v.clone())
+        })
+    }
+
+    pub fn contains_fn(&self, name: &str) -> bool {
+        self.get_fn(name).is_some()
+    }
 }
 
 /// Type checks an untyped Expr and produces a TypedExpr
@@ -28,7 +141,6 @@ pub fn type_check_expr<'a>(
     expr: &Expr,
 ) -> Option<TypedExpr> {
     match expr {
-        // Small one-liners kept inline in types.rs
         Expr::Int(n, span) => Some(TypedExpr::Int(*n, span.clone())),
         Expr::Float(f, span) => Some(TypedExpr::Float(*f, span.clone())),
         Expr::Bool(b, span) => Some(TypedExpr::Bool(*b, span.clone())),

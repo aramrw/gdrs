@@ -72,19 +72,6 @@ pub fn compile_call<M: Module>(
         sig.returns.push(AbiParam::new(ret_cranelift_ty));
     }
 
-    if let Some(var) = vars.get(name) {
-        let func_ptr = builder.use_var(*var);
-        let sig_ref = builder.import_signature(sig);
-        let call_inst = builder
-            .ins()
-            .call_indirect(sig_ref, func_ptr, &compiled_args);
-        if *ret_ty != Type::Unit {
-            return builder.inst_results(call_inst)[0];
-        } else {
-            return builder.ins().iconst(types::I64, 0);
-        }
-    }
-
     let target_symbol_name = if name == "rc_new"
         || name == "arc_new"
         || name == "rc_clone"
@@ -94,6 +81,21 @@ pub fn compile_call<M: Module>(
     } else {
         name.to_string()
     };
+
+    if module.get_name(&target_symbol_name).is_none() {
+        if let Some(var) = vars.get(name) {
+            let func_ptr = builder.use_var(*var);
+            let sig_ref = builder.import_signature(sig.clone());
+            let call_inst = builder
+                .ins()
+                .call_indirect(sig_ref, func_ptr, &compiled_args);
+            if *ret_ty != Type::Unit {
+                return builder.inst_results(call_inst)[0];
+            } else {
+                return builder.ins().iconst(types::I64, 0);
+            }
+        }
+    }
 
     let known_in_module = module.get_name(&target_symbol_name).is_some();
     let sym_ptr = if !known_in_module {
@@ -114,6 +116,7 @@ pub fn compile_call<M: Module>(
     } else {
         std::ptr::null_mut()
     };
+
 
     if !sym_ptr.is_null() {
         let sig_ref = builder.import_signature(sig);

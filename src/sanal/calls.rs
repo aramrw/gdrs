@@ -135,33 +135,47 @@ pub fn type_check_call<'a>(
         }
     }
 
-    let normalized_name = match raw_name {
-        "Some" => "std_core_Option_Some".to_string(),
-        "None" => "std_core_Option_None".to_string(),
-        "Ok" => "std_core_Result_Ok".to_string(),
-        "Err" => "std_core_Result_Err".to_string(),
-        _ => raw_name.replace("::", "_"),
-    };
-    if let Some((enum_name, variant_name)) = normalized_name.rsplit_once('_') {
-        let found_enum = type_ctx
-            .enum_map
-            .iter()
-            .find(|(k, _)| *k == enum_name || k.ends_with(&format!("_{enum_name}")));
-        if let Some((_, (static_enum_name, variants))) = found_enum {
-            if let Some((disc, _)) = variants.get(variant_name) {
-                return Some(TypedExpr::EnumConstruct(
-                    static_enum_name.to_string(),
-                    variant_name.to_string(),
-                    *disc as usize,
-                    typed_args,
-                    Type::Enum(static_enum_name),
-                    span.clone(),
-                ));
+    let is_enum_candidate = raw_name.contains("::")
+        || matches!(raw_name, "Some" | "None" | "Ok" | "Err")
+        || raw_name.starts_with("Opt_")
+        || raw_name.starts_with("Res_")
+        || raw_name.starts_with("std_core_");
+
+    if is_enum_candidate {
+        let normalized_name = match raw_name {
+            "Some" => "std_core_Option_Some".to_string(),
+            "None" => "std_core_Option_None".to_string(),
+            "Ok" => "std_core_Result_Ok".to_string(),
+            "Err" => "std_core_Result_Err".to_string(),
+            _ => {
+                let n = raw_name.replace("::", "_");
+                if n.starts_with("Opt_") {
+                    n.replacen("Opt_", "std_core_Option_", 1)
+                } else if n.starts_with("Res_") {
+                    n.replacen("Res_", "std_core_Result_", 1)
+                } else {
+                    n
+                }
+            }
+        };
+        if let Some((enum_name, variant_name)) = normalized_name.rsplit_once('_') {
+            if type_ctx.contains_enum(enum_name)
+                || enum_name.starts_with("std_core_")
+                || enum_name == "Opt"
+                || enum_name == "Res"
+            {
+                if let Some(te) = super::objects::type_check_enum_construct(
+                    scopes, errors, type_ctx, enum_name, variant_name, args, span,
+                ) {
+                    if matches!(te, TypedExpr::EnumConstruct(..)) {
+                        return Some(te);
+                    }
+                }
             }
         }
     }
 
-    let mut name = raw_name.replace("::", "_");
+    let name = raw_name.replace("::", "_");
     let is_intrinsic_macro = matches!(
         name.as_str(),
         "log"
@@ -192,35 +206,34 @@ pub fn type_check_call<'a>(
             | "thread"
             | "thread!"
             | "spawn!"
+            | "iter"
+            | "iter!"
+            | "for_each"
+            | "for_each!"
     );
     if is_intrinsic_macro {
-        if name == "push" || name == "push_str" || name == "pop" {
-            if let Some(first_arg) = typed_args.first() {
-                if let TypedExpr::Ident(var_name, _, _) = first_arg {
-                    if let Some(var_info) = scopes.lookup_mut(var_name) {
-                        if !var_info.is_mutable {
-                            errors.push(SemanticError {
-                                code: "E0382",
-                                message: format!(
-                                    "Cannot call mutating macro '{name}' on immutable variable '{var_name}'"
-                                ),
-                                label: format!("'{var_name}' is immutable"),
-                                secondary_label: None,
-                                help: Some(format!("Declare as mutable: 'let mut {var_name}'")),
-                                span: span.clone(),
-                            });
-                        }
-                        if name == "push" && typed_args.len() > 1 {
-                            let elem_ty = typed_args[1].ty();
-                            var_info.ty = Type::Vec(crate::ast::intern_type(elem_ty));
-                        }
+        let clean_macro = name.trim_end_matches('!');
+        if (clean_macro == "push" || clean_macro == "push_str") && typed_args.len() >= 2 {
+            if let TypedExpr::Ident(vec_var_name, _, _) = &typed_args[0] {
+                let elem_ty = typed_args[1].ty();
+                if elem_ty != Type::Int && elem_ty != Type::Unit {
+                    if let Some(info) = scopes.lookup_mut(vec_var_name) {
+                        info.ty = Type::Vec(crate::ast::intern_type(elem_ty));
                     }
                 }
             }
         }
+
         let macro_ret_ty = match name.trim_end_matches('!') {
             "format" | "arg_at" | "args_at" | "args" => Type::Str,
             "arg_count" | "args_count" | "thread" | "spawn" | "len" => Type::Int,
+            "iter" => {
+                if !typed_args.is_empty() {
+                    typed_args[0].ty()
+                } else {
+                    Type::Int
+                }
+            }
             "vec" => {
                 let elem_ty = if !typed_args.is_empty() {
                     typed_args[0].ty()
@@ -240,350 +253,91 @@ pub fn type_check_call<'a>(
     }
 
     let mut resolved_name = name.clone();
-    let split_sep = if name.contains("::") {
-        Some("::")
-    } else if name.contains('.') {
-        Some(".")
-    } else {
-        None
-    };
-    if let Some(sep) = split_sep {
-        let split_res = if sep == "." {
-            name.rsplit_once('.')
-        } else {
-            name.split_once(sep)
-        };
-        if let Some((target_or_var, method_name)) = split_res {
-            if method_name == "len"
-                || method_name == "push"
-                || method_name == "pop"
-                || method_name == "push_str"
-            {
-                if let Some(target_info) = scopes.lookup_mut(target_or_var) {
-                    if (method_name == "push" || method_name == "push_str" || method_name == "pop")
-                        && !target_info.is_mutable
-                    {
-                        errors.push(SemanticError {
-                            code: "E0382",
-                            message: format!(
-                                "Cannot call mutating method '{method_name}' on immutable variable '{target_or_var}'"
-                            ),
-                            label: format!("'{target_or_var}' is immutable"),
-                            secondary_label: None,
-                            help: Some(format!("Declare as mutable: 'let mut {target_or_var}'")),
-                            span: span.clone(),
-                        });
-                    }
 
-                    if method_name == "push" && !typed_args.is_empty() {
-                        let arg_ty = typed_args[0].ty();
-                        target_info.ty = Type::Vec(crate::ast::intern_type(arg_ty));
-                    }
-                }
-                let target_ast = if target_or_var.contains('.') {
-                    Expr::Call(target_or_var.to_string(), vec![], span.clone())
-                } else {
-                    Expr::Ident(target_or_var.to_string(), span.clone())
-                };
-                if let Some(target_expr) =
-                    type_check_expr(scopes, errors, type_ctx, &target_ast)
-                {
-                    typed_args.insert(0, target_expr);
-                    let macro_ret_ty = match method_name {
-                        "len" => Type::Int,
-                        _ => Type::Unit,
-                    };
-                    return Some(TypedExpr::MacroCall(
-                        method_name.to_string(),
-                        typed_args,
-                        macro_ret_ty,
-                        span.clone(),
-                    ));
-                }
-            }
-            let short_target = target_or_var.split("::").last().unwrap_or(target_or_var);
-            let mangled = format!("{}_{}", target_or_var.replace("::", "_"), method_name);
-            let short_mangled = format!("{}_{}", short_target, method_name);
-            let found_fn = type_ctx.fn_map.iter().find(|(k, _)| {
-                **k == mangled
-                    || **k == short_mangled
-                    || k.ends_with(&format!("_{mangled}"))
-                    || k.ends_with(&format!("_{short_mangled}"))
-            });
-            if let Some((mangled_fn_name, target_func)) = found_fn {
-                resolved_name = mangled_fn_name.clone();
-                let expects_self = target_func
-                    .params
-                    .first()
-                    .map(|p| p.name == "self")
-                    .unwrap_or(false);
-                if expects_self {
-                    let target_ast = if target_or_var.contains('.') {
-                        Expr::Call(target_or_var.to_string(), vec![], span.clone())
-                    } else {
-                        Expr::Ident(target_or_var.to_string(), span.clone())
-                    };
-                    if let Some(target_expr) =
-                        type_check_expr(scopes, errors, type_ctx, &target_ast)
-                    {
-                        typed_args.insert(0, target_expr);
-                    }
-                }
-            } else {
-                let target_ast = if target_or_var.contains('.') {
-                    Expr::Call(target_or_var.to_string(), vec![], span.clone())
-                } else {
-                    Expr::Ident(target_or_var.to_string(), span.clone())
-                };
-                if let Some(target_expr) =
-                    type_check_expr(scopes, errors, type_ctx, &target_ast)
-                {
-                    if typed_args.is_empty() || typed_args[0].span() != target_expr.span() {
-                        typed_args.insert(0, target_expr);
-                    }
-                }
-                name = method_name.to_string();
-            }
-        }
-    } else if !type_ctx.fn_map.contains_key(&name) && !typed_args.is_empty() {
+    // 1. Check if first argument is a receiver target for method lookup `target.method(...)`
+    if !typed_args.is_empty() {
         let target_ty = typed_args[0].ty();
-        match target_ty {
-            Type::Obj(tn) | Type::Enum(tn) => {
-                let method_mangled = format!("{tn}_{name}");
-                if type_ctx.fn_map.contains_key(&method_mangled) {
-                    resolved_name = method_mangled;
-                }
-            }
-            _ => {}
-        }
-        if let Type::DynTrait(_trait_name) = typed_args[0].ty() {
-            let receiver = typed_args.remove(0);
-            return Some(TypedExpr::DynCall(
-                Box::new(receiver),
-                name,
-                typed_args,
-                Type::Bool,
-                span.clone(),
-            ));
-        }
-        if let TypedExpr::Ident(target_name, _, _) = &typed_args[0] {
-            if target_name == "rc" && name == "new" {
-                typed_args.remove(0);
-                if typed_args.len() != 1 {
-                    errors.push(SemanticError {
-                        code: "E0061",
-                        message: "rc.new expects exactly 1 argument".to_string(),
-                        label: "Invalid argument count".to_string(),
-                        secondary_label: None,
-                        help: None,
-                        span: span.clone(),
-                    });
-                    return Some(TypedExpr::Int(0, span.clone()));
-                }
-                let inner_ty = typed_args[0].ty();
-                let rc_ty = Type::Rc(crate::ast::intern_type(inner_ty));
-                return Some(TypedExpr::Call(
-                    "rc_new".to_string(),
-                    typed_args,
-                    rc_ty,
-                    span.clone(),
-                ));
-            }
+        let type_name = match &target_ty {
+            Type::Obj(s) | Type::Enum(s) => Some(s.to_string()),
+            Type::Ref(inner) | Type::MutRef(inner) => match &**inner {
+                Type::Obj(s) | Type::Enum(s) => Some(s.to_string()),
+                _ => None,
+            },
+            _ => None,
+        };
 
-            if target_name == "arc" && name == "new" {
-                typed_args.remove(0);
-                if typed_args.len() != 1 {
-                    errors.push(SemanticError {
-                        code: "E0061",
-                        message: "arc.new expects exactly 1 argument".to_string(),
-                        label: "Invalid argument count".to_string(),
-                        secondary_label: None,
-                        help: None,
-                        span: span.clone(),
-                    });
-                    return Some(TypedExpr::Int(0, span.clone()));
-                }
-                let inner_ty = typed_args[0].ty();
-                let arc_ty = Type::Arc(crate::ast::intern_type(inner_ty));
-                return Some(TypedExpr::Call(
-                    "arc_new".to_string(),
-                    typed_args,
-                    arc_ty,
-                    span.clone(),
-                ));
-            }
-
-            let normalized_target = match typed_args[0].ty() {
-                Type::Obj(s_name) | Type::Enum(s_name) => s_name.to_string(),
-                _ => {
-                    if let TypedExpr::Ident(target_name, _, _) = &typed_args[0] {
-                        target_name.replace("::", "_")
-                    } else {
-                        "".to_string()
-                    }
-                }
-            };
-            let mangled = format!("{}_{}", normalized_target, name);
-            let found_mangled = if type_ctx.fn_map.contains_key(&mangled) {
-                Some(mangled.clone())
-            } else if let Some((k, _)) = type_ctx.fn_map.iter().find(|(k, _)| {
-                let short_target = normalized_target.split('_').last().unwrap_or("");
-                let short_mangled = format!("{short_target}_{name}");
-                **k == short_mangled || k.ends_with(&format!("_{short_mangled}"))
-            }) {
-                Some(k.clone())
-            } else {
-                None
-            };
-
-            if let Some(mangled_fn) = found_mangled {
-                resolved_name = mangled_fn;
-                let short_target =
-                    normalized_target.split('_').last().unwrap_or(&normalized_target);
-                if type_ctx.struct_map.contains_key(&normalized_target)
-                    || type_ctx.enum_map.contains_key(&normalized_target)
-                    || type_ctx.struct_map.contains_key(short_target)
-                    || type_ctx.enum_map.contains_key(short_target)
-                {
-                    if let TypedExpr::Ident(id, _, _) = &typed_args[0] {
-                        let short_id = id.split("::").last().unwrap_or(id);
-                        if id == &normalized_target || short_id == short_target {
-                            typed_args.remove(0);
-                        }
-                    }
+        if let Some(tn) = type_name {
+            let mangled = format!("{tn}_{name}");
+            if let Some(target_func) = type_ctx.get_fn(&mangled) {
+                resolved_name = target_func.name;
+            } else if type_ctx.contains_struct(&tn) {
+                let _ = type_ctx.get_struct(&tn);
+                if let Some(target_func) = type_ctx.get_fn(&mangled) {
+                    resolved_name = target_func.name;
                 }
             }
         }
+    }
 
-        if name == "clone" && !typed_args.is_empty() {
+    let is_generic_fn = type_ctx
+        .get_fn(&resolved_name)
+        .map(|f| f.params.iter().any(|p| matches!(p.ty, Type::Generic(_))))
+        .unwrap_or(false);
+
+    // 2. Auto-monomorphize static method calls like `Vec2_new(1.0, 2.0)` or `Vec3_new(1.0, 2.0, 3.0)`
+    if resolved_name == name || !type_ctx.contains_fn(&resolved_name) || is_generic_fn {
+        let target_type = if !typed_args.is_empty() {
             match typed_args[0].ty() {
-                Type::Rc(inner_ty) => {
-                    return Some(TypedExpr::Call(
-                        "rc_clone".to_string(),
-                        typed_args,
-                        Type::Rc(inner_ty),
-                        span.clone(),
-                    ));
-                }
-                Type::Arc(inner_ty) => {
-                    return Some(TypedExpr::Call(
-                        "arc_clone".to_string(),
-                        typed_args,
-                        Type::Arc(inner_ty),
-                        span.clone(),
-                    ));
-                }
-                _ => {}
+                Type::Obj(s) | Type::Enum(s) => Some(s.to_string()),
+                _ => None,
             }
-        }
+        } else {
+            None
+        };
 
-        if name == "push" && !typed_args.is_empty() {
-            let elem_ty = typed_args.last().unwrap().ty();
-            if let TypedExpr::Ident(var_name, _, _) = &typed_args[0] {
-                if let Some(target_info) = scopes.lookup_mut(var_name) {
-                    if !target_info.is_mutable {
-                        errors.push(SemanticError {
-                            code: "E0382",
-                            message: format!(
-                                "Cannot call mutating method 'push' on immutable variable '{var_name}'"
-                            ),
-                            label: format!("'{var_name}' is immutable"),
-                            secondary_label: None,
-                            help: Some(format!("Declare as mutable: 'let mut {var_name}'")),
-                            span: span.clone(),
-                        });
-                    }
-                    target_info.ty = Type::Vec(crate::ast::intern_type(elem_ty));
-                }
-            }
-            return Some(TypedExpr::MacroCall(
-                "push".to_string(),
-                typed_args,
-                Type::Unit,
-                span.clone(),
-            ));
-        }
+        let (base_struct, method_name) = if let Some((bs, mn)) = name.rsplit_once('_') {
+            (bs.to_string(), mn.to_string())
+        } else if let Some(ref tt) = target_type {
+            (tt.clone(), name.clone())
+        } else {
+            (String::new(), String::new())
+        };
 
-        if name == "iter" && !typed_args.is_empty() {
-            let target_ty = typed_args[0].ty();
-            match target_ty {
-                Type::Obj(s_name) if s_name == "Range" => {
-                    return Some(typed_args.remove(0));
-                }
-                Type::Vec(_) | Type::Ref(_) | Type::MutRef(_) => {
-                    return Some(typed_args.remove(0));
-                }
-                _ => {}
-            }
-        }
-
-        if name == "map" && !typed_args.is_empty() {
-            return Some(TypedExpr::Call(
-                "intrinsic_iter_map".to_string(),
-                typed_args,
-                Type::Obj(crate::ast::intern_str("MapIter")),
-                span.clone(),
-            ));
-        }
-
-        if name == "for_each" && !typed_args.is_empty() {
-            let target_ty = typed_args[0].ty();
-            let deref_ty = match &target_ty {
-                Type::Ref(inner) | Type::MutRef(inner) => (**inner).clone(),
-                other => other.clone(),
-            };
-            if deref_ty == Type::Obj(crate::ast::intern_str("MapIter")) {
-                return Some(TypedExpr::Call(
-                    "intrinsic_map_for_each".to_string(),
-                    typed_args,
-                    Type::Unit,
-                    span.clone(),
-                ));
-            } else if matches!(deref_ty, Type::Vec(_)) {
-                return Some(TypedExpr::Call(
-                    "intrinsic_vec_for_each".to_string(),
-                    typed_args,
-                    Type::Unit,
-                    span.clone(),
-                ));
+        if !base_struct.is_empty() {
+            let actual_args = if !typed_args.is_empty() && matches!(typed_args[0].ty(), Type::Obj(_) | Type::Enum(_)) {
+                &typed_args[1..]
             } else {
-                return Some(TypedExpr::Call(
-                    "intrinsic_iter_for_each".to_string(),
-                    typed_args,
-                    Type::Unit,
-                    span.clone(),
-                ));
+                &typed_args[..]
+            };
+            let mut type_args = Vec::new();
+            for a in actual_args {
+                let t = a.ty();
+                if !matches!(t, Type::Unit) && !type_args.contains(&t) {
+                    type_args.push(t);
+                }
             }
-        }
-
-        if !type_ctx.extern_fn_names.contains(&resolved_name)
-            && !type_ctx.fn_map.contains_key(&resolved_name)
-        {
-            let norm = resolved_name.replace("::", "_");
-            if let Some((found_fn_name, _)) = type_ctx
-                .fn_map
-                .iter()
-                .find(|(k, _)| **k == norm || k.ends_with(&format!("_{norm}")))
-            {
-                resolved_name = found_fn_name.clone();
-            }
-            if !typed_args.is_empty() {
-                let first_arg_ty = typed_args[0].ty();
-                let type_name = match first_arg_ty {
-                    Type::Obj(n) => Some(n),
-                    Type::Enum(n) => Some(n),
-                    _ => None,
-                };
-                if let Some(tn) = type_name {
-                    let mangled = format!("{}_{}", tn, name);
-                    let mono_mangled = format!("{}_{}", name, tn);
-                    if type_ctx.fn_map.contains_key(&mangled) {
-                        resolved_name = mangled;
-                    } else if type_ctx.fn_map.contains_key(&mono_mangled) {
-                        resolved_name = mono_mangled;
+            if !type_args.is_empty() {
+                if let Some(mangled_struct) = crate::sanal::mono::monomorphize_struct(
+                    type_ctx.mono,
+                    &base_struct,
+                    &type_args,
+                    type_ctx.struct_map,
+                    type_ctx.fn_map,
+                    type_ctx.worklist,
+                ) {
+                    let mangled_fn = format!("{mangled_struct}_{method_name}");
+                    if let Some(target_func) = type_ctx.get_fn(&mangled_fn) {
+                        resolved_name = target_func.name;
                     }
                 }
             }
+        }
+    }
+
+    // 3. Fallback to direct fn_map lookup if not already resolved to a method
+    if resolved_name == name {
+        if let Some(target_func) = type_ctx.get_fn(&name) {
+            resolved_name = target_func.name;
         }
     }
 
@@ -602,7 +356,7 @@ pub fn type_check_call<'a>(
 
     let ret_ty = if scopes.lookup(&resolved_name).is_some() {
         Type::Int
-    } else if let Some(target_func) = type_ctx.fn_map.get(&resolved_name) {
+    } else if let Some(target_func) = type_ctx.get_fn(&resolved_name) {
         if target_func.params.len() != typed_args.len() && !typed_args.is_empty() {
             if (target_func.params.is_empty() || target_func.params[0].name != "self")
                 && target_func.params.len() == typed_args.len() - 1

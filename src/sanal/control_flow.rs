@@ -60,7 +60,7 @@ pub fn type_check_match<'a>(
     let t_target = type_check_expr(scopes, errors, type_ctx, target_expr)?;
     let enum_name = match t_target.ty() {
         Type::Enum(name) => name,
-        Type::Obj(name) if type_ctx.enum_map.contains_key(name) => name,
+        Type::Obj(name) if type_ctx.contains_enum(name) => name,
         other => {
             errors.push(SemanticError {
                 code: "E0308",
@@ -74,7 +74,7 @@ pub fn type_check_match<'a>(
         }
     };
 
-    let variant_info = type_ctx.enum_map.get(enum_name).cloned();
+    let variant_info = type_ctx.get_enum(enum_name);
     let mut typed_arms = Vec::new();
     let mut arm_types = Vec::new();
 
@@ -155,20 +155,17 @@ pub fn type_check_try<'a>(
 ) -> Option<TypedExpr> {
     let t_inner = type_check_expr(scopes, errors, type_ctx, inner_expr)?;
     let inner_ty = t_inner.ty();
-    let enum_name_opt = match inner_ty {
-        Type::Enum(name) | Type::Obj(name) if name.ends_with("Option") => {
-            Some("std_core_Option".to_string())
-        }
-        _ => None,
-    };
-    let enum_name_res = match inner_ty {
-        Type::Enum(name) | Type::Obj(name) if name.ends_with("Result") => {
-            Some("std_core_Result".to_string())
-        }
-        _ => None,
+
+    let (is_option, is_result, enum_name) = match inner_ty {
+        Type::Enum(name) | Type::Obj(name) => (
+            name.contains("Option"),
+            name.contains("Result"),
+            name.to_string(),
+        ),
+        _ => (false, false, String::new()),
     };
 
-    if let Some(enum_name) = enum_name_opt {
+    if is_option {
         let match_expr = Expr::Match(
             Box::new(inner_expr.clone()),
             vec![
@@ -182,8 +179,10 @@ pub fn type_check_try<'a>(
                     variant_name: format!("{enum_name}::None"),
                     bindings: vec![],
                     body: vec![Expr::Return(
-                        Some(Box::new(Expr::Ident(
-                            format!("{enum_name}_None"),
+                        Some(Box::new(Expr::EnumConstruct(
+                            enum_name.clone(),
+                            "None".to_string(),
+                            vec![],
                             span.clone(),
                         ))),
                         span.clone(),
@@ -194,7 +193,7 @@ pub fn type_check_try<'a>(
             span.clone(),
         );
         type_check_expr(scopes, errors, type_ctx, &match_expr)
-    } else if let Some(enum_name) = enum_name_res {
+    } else if is_result {
         let match_expr = Expr::Match(
             Box::new(inner_expr.clone()),
             vec![
@@ -208,8 +207,9 @@ pub fn type_check_try<'a>(
                     variant_name: format!("{enum_name}::Err"),
                     bindings: vec!["err".to_string()],
                     body: vec![Expr::Return(
-                        Some(Box::new(Expr::Call(
-                            format!("{enum_name}_Err"),
+                        Some(Box::new(Expr::EnumConstruct(
+                            enum_name.clone(),
+                            "Err".to_string(),
                             vec![Expr::Ident("err".to_string(), span.clone())],
                             span.clone(),
                         ))),

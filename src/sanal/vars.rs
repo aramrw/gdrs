@@ -19,52 +19,43 @@ pub fn type_check_ident<'a>(
     if let Some(info) = scopes.lookup(name) {
         Some(TypedExpr::Ident(name.to_string(), info.ty, span.clone()))
     } else if let Some((enum_part, variant_part)) = name.split_once("::") {
-        let normalized_enum = enum_part.replace("::", "_");
-        let found_enum = type_ctx
-            .enum_map
-            .iter()
-            .find(|(k, _)| **k == normalized_enum || k.ends_with(&format!("_{normalized_enum}")));
-        if let Some((_, (mangled_enum, v_map))) = found_enum {
-            if let Some((tag, _p_types)) = v_map.get(variant_part) {
-                return Some(TypedExpr::EnumConstruct(
-                    mangled_enum.to_string(),
-                    variant_part.to_string(),
-                    *tag as usize,
-                    Vec::new(),
-                    Type::Enum(mangled_enum),
-                    span.clone(),
-                ));
+        let normalized_enum = match enum_part {
+            "Opt" | "Option" => "std_core_Option",
+            "Res" | "Result" => "std_core_Result",
+            other => other,
+        };
+        if let Some(te) = super::objects::type_check_enum_construct(
+            scopes,
+            errors,
+            type_ctx,
+            normalized_enum,
+            variant_part,
+            &[],
+            span,
+        ) {
+            if matches!(te, TypedExpr::EnumConstruct(..)) {
+                return Some(te);
             }
         }
         let normalized = name.replace("::", "_");
-        let found_struct = type_ctx
-            .struct_map
-            .iter()
-            .find(|(k, _)| **k == normalized || k.ends_with(&format!("_{normalized}")));
-        let found_enum = type_ctx
-            .enum_map
-            .iter()
-            .find(|(k, _)| **k == normalized || k.ends_with(&format!("_{normalized}")));
-        if let Some((mangled_struct, _)) = found_struct {
+        let found_struct = type_ctx.get_struct(&normalized);
+        let found_enum = type_ctx.get_enum(&normalized);
+        if let Some(layout) = found_struct {
             Some(TypedExpr::Ident(
                 name.to_string(),
-                Type::Obj(intern_str(mangled_struct)),
+                Type::Obj(intern_str(&layout.name)),
                 span.clone(),
             ))
         } else if let Some((mangled_enum, _)) = found_enum {
             Some(TypedExpr::Ident(
                 name.to_string(),
-                Type::Enum(intern_str(mangled_enum)),
+                Type::Enum(mangled_enum),
                 span.clone(),
             ))
         } else if name == "rc"
             || name == "arc"
-            || type_ctx.fn_map.contains_key(name)
-            || type_ctx.fn_map.contains_key(&normalized)
-            || type_ctx
-                .fn_map
-                .iter()
-                .any(|(k, _)| **k == normalized || k.ends_with(&format!("_{normalized}")))
+            || type_ctx.fn_map.borrow().contains_key(name)
+            || type_ctx.fn_map.borrow().contains_key(&normalized)
         {
             Some(TypedExpr::Ident(name.to_string(), Type::Int, span.clone()))
         } else {
@@ -79,56 +70,75 @@ pub fn type_check_ident<'a>(
             None
         }
     } else {
-        let normalized = match name {
-            "None" => "std_core_Option_None".to_string(),
-            _ => name.replace("::", "_"),
-        };
-        if let Some((enum_part, variant_part)) = normalized.rsplit_once('_') {
-            let found_enum = type_ctx
-                .enum_map
-                .iter()
-                .find(|(k, _)| *k == enum_part || k.ends_with(&format!("_{enum_part}")));
-            if let Some((_, (mangled_enum, v_map))) = found_enum {
-                if let Some((tag, _p_types)) = v_map.get(variant_part) {
-                    return Some(TypedExpr::EnumConstruct(
-                        mangled_enum.to_string(),
-                        variant_part.to_string(),
-                        *tag as usize,
-                        Vec::new(),
-                        Type::Enum(mangled_enum),
-                        span.clone(),
-                    ));
+        if name == "None" || name == "Some" {
+            if let Some(te) = super::objects::type_check_enum_construct(
+                scopes,
+                errors,
+                type_ctx,
+                "std_core_Option",
+                name,
+                &[],
+                span,
+            ) {
+                if matches!(te, TypedExpr::EnumConstruct(..)) {
+                    return Some(te);
                 }
             }
         }
-        let found_struct = type_ctx
-            .struct_map
-            .iter()
-            .find(|(k, _)| **k == normalized || k.ends_with(&format!("_{normalized}")));
-        let found_enum = type_ctx
-            .enum_map
-            .iter()
-            .find(|(k, _)| **k == normalized || k.ends_with(&format!("_{normalized}")));
-        if let Some((mangled_struct, _)) = found_struct {
+        let normalized = name.replace("::", "_");
+        if let Some((enum_part, variant_part)) = normalized.rsplit_once('_') {
+            let norm_enum = match enum_part {
+                "Opt" | "Option" => "std_core_Option",
+                "Res" | "Result" => "std_core_Result",
+                other => other,
+            };
+            if let Some(te) = super::objects::type_check_enum_construct(
+                scopes,
+                errors,
+                type_ctx,
+                norm_enum,
+                variant_part,
+                &[],
+                span,
+            ) {
+                if matches!(te, TypedExpr::EnumConstruct(..)) {
+                    return Some(te);
+                }
+            }
+        }
+        let found_struct = type_ctx.get_struct(&normalized).or_else(|| {
+            let mono = type_ctx.mono.borrow();
+            mono.struct_templates
+                .get(&normalized)
+                .or_else(|| {
+                    mono.struct_templates
+                        .iter()
+                        .find(|(k, _)| k.as_str() == normalized || k.ends_with(&format!("_{normalized}")))
+                        .map(|(_, v)| v)
+                })
+                .map(|decl| crate::sanal::StructLayout {
+                    name: decl.name.clone(),
+                    total_size: 0,
+                    field_offsets: std::collections::HashMap::new(),
+                })
+        });
+        let found_enum = type_ctx.get_enum(&normalized);
+        if let Some(layout) = found_struct {
             Some(TypedExpr::Ident(
                 name.to_string(),
-                Type::Obj(intern_str(mangled_struct)),
+                Type::Obj(intern_str(&layout.name)),
                 span.clone(),
             ))
         } else if let Some((mangled_enum, _)) = found_enum {
             Some(TypedExpr::Ident(
                 name.to_string(),
-                Type::Enum(intern_str(mangled_enum)),
+                Type::Enum(mangled_enum),
                 span.clone(),
             ))
         } else if name == "rc"
             || name == "arc"
-            || type_ctx.fn_map.contains_key(name)
-            || type_ctx.fn_map.contains_key(&normalized)
-            || type_ctx
-                .fn_map
-                .iter()
-                .any(|(k, _)| **k == normalized || k.ends_with(&format!("_{normalized}")))
+            || type_ctx.fn_map.borrow().contains_key(name)
+            || type_ctx.fn_map.borrow().contains_key(&normalized)
         {
             Some(TypedExpr::Ident(name.to_string(), Type::Int, span.clone()))
         } else {

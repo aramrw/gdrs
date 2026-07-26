@@ -19,7 +19,16 @@ pub fn is_obj_field_type_compatible(expected: &Type, found: &Type) -> bool {
         (Type::Float | Type::F32, Type::Float | Type::F32) => true,
         (Type::Float | Type::F32, Type::Int | Type::I32) => true,
         (Type::Str | Type::Obj("String"), Type::Str | Type::Obj("String")) => true,
-        (Type::Obj(e1), Type::Enum(e2)) | (Type::Enum(e1), Type::Obj(e2)) if e1 == e2 => true,
+        (Type::Obj(e1), Type::Obj(e2))
+        | (Type::Enum(e1), Type::Enum(e2))
+        | (Type::Obj(e1), Type::Enum(e2))
+        | (Type::Enum(e1), Type::Obj(e2)) => {
+            e1 == e2
+                || e2.starts_with(&format!("{e1}_"))
+                || e1.starts_with(&format!("{e2}_"))
+                || e2.ends_with(&format!("_{e1}"))
+                || e1.ends_with(&format!("_{e2}"))
+        }
         _ => false,
     }
 }
@@ -179,11 +188,56 @@ pub fn type_check_obj_init<'a>(
         typed_fields.push((f_name.clone(), t_expr));
     }
 
-    let found_struct = type_ctx
-        .struct_map
-        .iter()
-        .find(|(k, _)| *k == name || k.ends_with(&format!("_{name}")));
-    let obj_ty_name = if let Some((mangled_name, layout)) = found_struct {
+    let mut found_struct = type_ctx.get_struct(name);
+
+    if found_struct.is_none() {
+        let opt_template = {
+            let mono = type_ctx.mono.borrow();
+            mono.struct_templates
+                .get(name)
+                .or_else(|| {
+                    mono.struct_templates
+                        .iter()
+                        .find(|(k, _)| k.as_str() == name || k.ends_with(&format!("_{name}")))
+                        .map(|(_, v)| v)
+                })
+                .cloned()
+        };
+
+        if let Some(decl) = opt_template {
+            let mut type_args = Vec::new();
+            let generic_params = crate::sanal::mono::extract_generic_params_struct(&decl);
+            for p in &generic_params {
+                let mut inferred_ty = Type::Int;
+                for f in &decl.fields {
+                    if let Type::Generic(g) = f.ty {
+                        if g.trim_start_matches('$') == p {
+                            if let Some((_, tf)) =
+                                typed_fields.iter().find(|(fn_name, _)| fn_name == &f.name)
+                            {
+                                inferred_ty = tf.ty();
+                                break;
+                            }
+                        }
+                    }
+                }
+                type_args.push(inferred_ty);
+            }
+
+            if let Some(mangled) = crate::sanal::mono::monomorphize_struct(
+                type_ctx.mono,
+                &decl.name,
+                &type_args,
+                type_ctx.struct_map,
+                type_ctx.fn_map,
+                type_ctx.worklist,
+            ) {
+                found_struct = type_ctx.get_struct(&mangled);
+            }
+        }
+    }
+
+    let obj_ty_name = if let Some(layout) = found_struct {
         for (expected_field, (_, expected_ty)) in &layout.field_offsets {
             if !typed_fields.iter().any(|(f, _)| f == expected_field) {
                 errors.push(SemanticError {
@@ -226,7 +280,7 @@ pub fn type_check_obj_init<'a>(
                 });
             }
         }
-        mangled_name.as_str()
+        layout.name
     } else {
         errors.push(SemanticError {
             code: "E0425",
@@ -236,12 +290,12 @@ pub fn type_check_obj_init<'a>(
             help: None,
             span: span.clone(),
         });
-        name.as_str()
+        name.to_string()
     };
 
-    let obj_ty = Type::Obj(intern_str(obj_ty_name));
+    let obj_ty = Type::Obj(intern_str(&obj_ty_name));
     Some(TypedExpr::ObjInit(
-        obj_ty_name.to_string(),
+        obj_ty_name,
         typed_fields,
         obj_ty,
         span.clone(),
@@ -257,7 +311,7 @@ pub fn type_check_field_access<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     if let Expr::Ident(ref enum_name, _) = *target {
-        if let Some((static_enum_name, variants)) = type_ctx.enum_map.get(enum_name) {
+        if let Some((static_enum_name, variants)) = type_ctx.get_enum(enum_name) {
             if let Some((disc, _)) = variants.get(field_name) {
                 return Some(TypedExpr::EnumConstruct(
                     enum_name.clone(),
@@ -285,7 +339,7 @@ pub fn type_check_field_access<'a>(
     };
 
     if let Some(struct_name) = struct_name_opt {
-        if let Some(layout) = type_ctx.struct_map.get(struct_name) {
+        if let Some(layout) = type_ctx.get_struct(struct_name) {
             if let Some((_, fty)) = layout.field_offsets.get(field_name) {
                 field_ty = *fty;
             } else {
@@ -374,18 +428,78 @@ pub fn type_check_enum_construct<'a>(
         }
     }
 
+    let mut found_enum = type_ctx.get_enum(enum_name);
+
+    if found_enum.is_none() {
+        let template_name = if enum_name.starts_with("std_core_Option") || enum_name.starts_with("Opt") || enum_name.starts_with("Option") {
+            "std_core_Option"
+        } else if enum_name.starts_with("std_core_Result") || enum_name.starts_with("Res") || enum_name.starts_with("Result") {
+            "std_core_Result"
+        } else {
+            enum_name.split('_').next().unwrap_or(enum_name)
+        };
+
+        let opt_template = {
+            let mono = type_ctx.mono.borrow();
+            mono.enum_templates
+                .get(template_name)
+                .or_else(|| mono.enum_templates.get(enum_name))
+                .or_else(|| {
+                    mono.enum_templates
+                        .iter()
+                        .find(|(k, _)| k.as_str() == enum_name || k.ends_with(&format!("_{enum_name}")))
+                        .map(|(_, v)| v)
+                })
+                .cloned()
+        };
+
+        if let Some(decl) = opt_template {
+            let mut type_args = Vec::new();
+            let generic_params = crate::sanal::mono::extract_generic_params_enum(&decl);
+            if let Some(v_decl) = decl.variants.iter().find(|v| v.name == variant_name) {
+                for p in &generic_params {
+                    let mut inferred_ty = Type::Int;
+                    for (pt, ta) in v_decl.payload_types.iter().zip(typed_args.iter()) {
+                        if let Type::Generic(g) = pt {
+                            if g.trim_start_matches('$') == p {
+                                inferred_ty = ta.ty();
+                                break;
+                            }
+                        }
+                    }
+                    type_args.push(inferred_ty);
+                }
+            } else {
+                for _ in &generic_params {
+                    type_args.push(Type::Int);
+                }
+            }
+
+            if let Some(mangled) = crate::sanal::mono::monomorphize_enum(
+                type_ctx.mono,
+                &decl.name,
+                &type_args,
+                type_ctx.enum_map,
+                type_ctx.fn_map,
+                type_ctx.worklist,
+            ) {
+                found_enum = type_ctx.get_enum(&mangled);
+            }
+        }
+    }
+
     let mut disc = 0;
     let mut static_enum_name = intern_str(enum_name);
 
-    if let Some((static_name, variants)) = type_ctx.enum_map.get(enum_name) {
-        static_enum_name = *static_name;
+    if let Some((static_name, variants)) = found_enum {
+        static_enum_name = static_name;
         if let Some((d, _)) = variants.get(variant_name) {
             disc = *d as usize;
         }
     }
 
     Some(TypedExpr::EnumConstruct(
-        enum_name.to_string(),
+        static_enum_name.to_string(),
         variant_name.to_string(),
         disc,
         typed_args,

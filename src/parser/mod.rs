@@ -53,11 +53,19 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
                     .or_not(),
             )
             .map(|(parts, opt_generics)| {
-                let name = parts.join("::");
-                if (name == "Result" || name == "Option") && opt_generics.is_none() {
-                    Type::Obj(intern_str(&format!("{}_bare", name)))
+                let base_name = parts.join("::");
+                let normalized_base = match base_name.as_str() {
+                    "Opt" | "Option" => "std_core_Option".to_string(),
+                    "Res" | "Result" => "std_core_Result".to_string(),
+                    _ => base_name.replace("::", "_"),
+                };
+                if let Some(generics) = opt_generics {
+                    let mangled = crate::sanal::mono::mangle_name(&normalized_base, &generics);
+                    Type::Obj(intern_str(&mangled))
+                } else if normalized_base == "std_core_Result" || normalized_base == "std_core_Option" {
+                    Type::Obj(intern_str(&format!("{}_bare", normalized_base)))
                 } else {
-                    Type::Obj(intern_str(&name))
+                    Type::Obj(intern_str(&normalized_base))
                 }
             });
 
