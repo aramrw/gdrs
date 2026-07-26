@@ -42,6 +42,7 @@ pub fn cranelift_type_of(ty: &Type) -> cranelift_codegen::ir::Type {
         Type::F32 => types::F32,
         Type::Float => types::F64,
         Type::Bool => types::I8,
+        Type::Generic(_) => types::F64,
         _ => types::I64, // pointers / heap handles
     }
 }
@@ -393,29 +394,7 @@ pub fn compile_expr<M: Module>(
 
             builder.declare_var(var, cranelift_ty);
 
-            // Coerce: widen or convert the value if the literal type != declared type
-            let val_ty = builder.func.dfg.value_type(val);
-            if val_ty != cranelift_ty {
-                val = match (val_ty, cranelift_ty) {
-                    // i32 literal widened to i64 variable
-                    (types::I32, types::I64) => builder.ins().sextend(types::I64, val),
-                    // i64 narrowed to i32 variable (explicit annotation)
-                    (types::I64, types::I32) => builder.ins().ireduce(types::I32, val),
-                    // i32 int to f32
-                    (types::I32, types::F32) => builder.ins().fcvt_from_sint(types::F32, val),
-                    // i32 int to f64
-                    (types::I32, types::F64) => builder.ins().fcvt_from_sint(types::F64, val),
-                    // i64 int to f32
-                    (types::I64, types::F32) => builder.ins().fcvt_from_sint(types::F32, val),
-                    // i64 int to f64
-                    (types::I64, types::F64) => builder.ins().fcvt_from_sint(types::F64, val),
-                    // f32 widened to f64
-                    (types::F32, types::F64) => builder.ins().fpromote(types::F64, val),
-                    // f64 demoted to f32 (explicit annotation)
-                    (types::F64, types::F32) => builder.ins().fdemote(types::F32, val),
-                    _ => val,
-                };
-            }
+            let val = coerce_val(builder, val, cranelift_ty);
 
             // 3. Handle stack slot layouts for composite types (Obj, Str, Vec, etc.)
             let stored_val = match ty {
@@ -664,7 +643,11 @@ pub fn compile_expr<M: Module>(
             builder.seal_block(exit_block);
 
             if then_term && else_term {
-                let dummy = builder.ins().iconst(cranelift_ty, 0);
+                let dummy = match cranelift_ty {
+                    types::F32 => builder.ins().f32const(0.0),
+                    types::F64 => builder.ins().f64const(0.0),
+                    _ => builder.ins().iconst(cranelift_ty, 0),
+                };
                 builder.ins().trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
                 dummy
             } else if is_unit {
@@ -937,28 +920,7 @@ pub fn compile_expr<M: Module>(
                     if i < decl_sig.signature.params.len() {
                         let expected_ty = decl_sig.signature.params[i].value_type;
                         let actual_ty = builder.func.dfg.value_type(arg_val);
-                        let coerced = if actual_ty == expected_ty {
-                            arg_val
-                        } else if actual_ty == types::I32 && expected_ty == types::I64 {
-                            builder.ins().sextend(types::I64, arg_val)
-                        } else if actual_ty == types::I64 && expected_ty == types::I32 {
-                            builder.ins().ireduce(types::I32, arg_val)
-                        } else if actual_ty == types::I32 && expected_ty == types::F32 {
-                            builder.ins().fcvt_from_sint(types::F32, arg_val)
-                        } else if actual_ty == types::I64 && expected_ty == types::F32 {
-                            builder.ins().fcvt_from_sint(types::F32, arg_val)
-                        } else if actual_ty == types::F32 && expected_ty == types::I32 {
-                            builder.ins().fcvt_to_sint(types::I32, arg_val)
-                        } else if actual_ty == types::F64 && expected_ty == types::I64 {
-                            builder.ins().bitcast(types::I64, MemFlags::new(), arg_val)
-                        } else if actual_ty == types::F32 && expected_ty == types::I64 {
-                            let promoted = builder.ins().fpromote(types::F64, arg_val);
-                            builder.ins().bitcast(types::I64, MemFlags::new(), promoted)
-                        } else if actual_ty == types::I64 && expected_ty == types::F64 {
-                            builder.ins().bitcast(types::F64, MemFlags::new(), arg_val)
-                        } else {
-                            arg_val
-                        };
+                        let coerced = coerce_val(builder, arg_val, expected_ty);
                         matched_args.push(coerced);
                     } else {
                         matched_args.push(arg_val);
@@ -1382,6 +1344,18 @@ fn coerce_val(
         builder.ins().uextend(types::I64, val)
     } else if val_ty == types::I8 && target_ty == types::I32 {
         builder.ins().uextend(types::I32, val)
+    } else if (val_ty == types::I32 || val_ty == types::I64) && target_ty == types::F32 {
+        builder.ins().fcvt_from_sint(types::F32, val)
+    } else if (val_ty == types::I32 || val_ty == types::I64) && target_ty == types::F64 {
+        builder.ins().fcvt_from_sint(types::F64, val)
+    } else if val_ty == types::F32 && (target_ty == types::I32 || target_ty == types::I64) {
+        builder.ins().fcvt_to_sint(target_ty, val)
+    } else if val_ty == types::F64 && (target_ty == types::I32 || target_ty == types::I64) {
+        builder.ins().fcvt_to_sint(target_ty, val)
+    } else if val_ty == types::F32 && target_ty == types::F64 {
+        builder.ins().fpromote(types::F64, val)
+    } else if val_ty == types::F64 && target_ty == types::F32 {
+        builder.ins().fdemote(types::F32, val)
     } else {
         val
     }

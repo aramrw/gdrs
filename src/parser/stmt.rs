@@ -33,26 +33,41 @@ pub fn stmt_parser<'a>(
             .or(just(Token::StarEqual).to(Some(Expr::Mul as ExprOp)))
             .or(just(Token::SlashEqual).to(Some(Expr::Div as ExprOp)));
 
-        // Field assignment statement: p.x = 42 or p.x += 10
-        let field_assign_stmt = select! { Token::Ident(target) => target }
-            .then_ignore(just(Token::Dot))
-            .then(select! { Token::Ident(field) => field })
+        let field_target_expr = path
+            .clone()
+            .map_with_span(|name, span| Expr::Ident(name, span))
+            .then(
+                just(Token::Dot)
+                    .ignore_then(select! { Token::Ident(f) => f })
+                    .repeated()
+                    .at_least(1),
+            )
+            .foldl(|target, field| {
+                let span = target.span().clone();
+                Expr::FieldAccess(Box::new(target), field, span)
+            });
+
+        // Field assignment statement: p.x = 42 or p.pos.x += 10
+        let field_assign_stmt = field_target_expr
             .then(assign_op.clone())
             .then(math.clone())
-            .map_with_span(|(((target, field), op), rhs), span| {
-                let target_ident = Expr::Ident(target.clone(), span.clone());
-                let final_rhs = match op {
-                    Some(make_expr) => {
-                        let lhs = Expr::FieldAccess(
-                            Box::new(target_ident.clone()),
-                            field.clone(),
-                            span.clone(),
-                        );
-                        make_expr(Box::new(lhs), Box::new(rhs), span.clone())
-                    }
-                    None => rhs,
-                };
-                Expr::FieldAssign(Box::new(target_ident), field, Box::new(final_rhs), span)
+            .map_with_span(|((target_expr, op), rhs), span| {
+                if let Expr::FieldAccess(inner_target, field, _) = target_expr {
+                    let final_rhs = match op {
+                        Some(make_expr) => {
+                            let lhs = Expr::FieldAccess(
+                                inner_target.clone(),
+                                field.clone(),
+                                span.clone(),
+                            );
+                            make_expr(Box::new(lhs), Box::new(rhs), span.clone())
+                        }
+                        None => rhs,
+                    };
+                    Expr::FieldAssign(inner_target, field, Box::new(final_rhs), span)
+                } else {
+                    unreachable!()
+                }
             })
             .then_ignore(just(Token::Newline).or_not());
 

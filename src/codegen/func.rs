@@ -68,9 +68,9 @@ pub fn compile_func<M: Module>(
         let v = Variable::from_u32(var_counter as u32);
         var_counter += 1;
         builder.declare_var(v, ret_cranelift_ty);
-        let zero = match func.return_type {
-            Type::Float => builder.ins().f64const(0.0),
-            Type::F32 => builder.ins().f32const(0.0),
+        let zero = match ret_cranelift_ty {
+            types::F32 => builder.ins().f32const(0.0),
+            types::F64 => builder.ins().f64const(0.0),
             _ => builder.ins().iconst(ret_cranelift_ty, 0),
         };
         builder.def_var(v, zero);

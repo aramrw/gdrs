@@ -440,7 +440,7 @@ pub fn type_check_expr<'a>(
             let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
             let ty = t_val.ty();
 
-            if !matches!(ty, Type::Int | Type::I32 | Type::Float | Type::F32) {
+            if !matches!(ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_)) {
                 errors.push(SemanticError {
                     message: format!("Cannot negate non-numeric type `{:?}`", ty),
                     label: "Invalid negation".into(),
@@ -1777,7 +1777,11 @@ pub fn type_check_expr<'a>(
             let t_target = type_check_expr(scopes, errors, type_ctx, target)?;
             let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
 
-            if let Expr::Ident(var_name, _) = target.as_ref() {
+            let mut curr = target.as_ref();
+            while let Expr::FieldAccess(inner, _, _) = curr {
+                curr = inner.as_ref();
+            }
+            if let Expr::Ident(var_name, _) = curr {
                 if let Some(info) = scopes.lookup(var_name) {
                     if !info.is_mutable {
                         errors.push(SemanticError {

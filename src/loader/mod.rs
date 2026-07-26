@@ -220,9 +220,9 @@ fn load_file_recursive(
     for mut s in program.structs {
         if !prefix_str.is_empty() {
             s.name = format!("{}{}", prefix_str, s.name);
-            for field in &mut s.fields {
-                rewrite_type(&mut field.ty, &local_types, &use_aliases, &prefix_str);
-            }
+        }
+        for field in &mut s.fields {
+            rewrite_type(&mut field.ty, &local_types, &use_aliases, &prefix_str);
         }
         merged_program.structs.push(s);
     }
@@ -231,10 +231,10 @@ fn load_file_recursive(
     for mut e in program.enums {
         if !prefix_str.is_empty() {
             e.name = format!("{}{}", prefix_str, e.name);
-            for v in &mut e.variants {
-                for p_ty in &mut v.payload_types {
-                    rewrite_type(p_ty, &local_types, &use_aliases, &prefix_str);
-                }
+        }
+        for v in &mut e.variants {
+            for p_ty in &mut v.payload_types {
+                rewrite_type(p_ty, &local_types, &use_aliases, &prefix_str);
             }
         }
         merged_program.enums.push(e);
