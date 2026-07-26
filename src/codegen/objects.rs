@@ -97,7 +97,7 @@ pub fn compile_field_assign<M: Module>(
     struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
     let base_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
-    let new_val = compile_expr(builder, val, vars, var_counter, module, struct_layouts);
+    let mut new_val = compile_expr(builder, val, vars, var_counter, module, struct_layouts);
     let mut offset = 0i32;
 
     let target_struct_name = match target.ty() {
@@ -110,9 +110,17 @@ pub fn compile_field_assign<M: Module>(
     };
 
     if let Some(struct_name) = target_struct_name {
-        if let Some(layout) = struct_layouts.get(struct_name) {
-            if let Some((f_offset, _)) = layout.field_offsets.get(field_name) {
+        let layout_opt = struct_layouts.get(struct_name).cloned().or_else(|| {
+            struct_layouts
+                .iter()
+                .find(|(k, _)| **k == struct_name || k.starts_with(&format!("{struct_name}_")) || k.ends_with(&format!("_{struct_name}")))
+                .map(|(_, v)| v.clone())
+        });
+        if let Some(layout) = layout_opt {
+            if let Some((f_offset, f_ty)) = layout.field_offsets.get(field_name) {
                 offset = *f_offset as i32;
+                let target_cranelift_ty = crate::codegen::expr::cranelift_type_of(f_ty);
+                new_val = crate::codegen::expr::coerce_val(builder, new_val, target_cranelift_ty);
             }
         }
     }
