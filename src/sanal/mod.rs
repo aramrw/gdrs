@@ -122,6 +122,15 @@ pub fn check_semantics(program: &Program) -> Result<(TypedProgram, HashMap<Strin
 
     let mut all_functions = Vec::new();
 
+fn resolve_self_type(param_ty: Type, target_ty: Type) -> Type {
+    match param_ty {
+        Type::Unit => target_ty,
+        Type::Ref(inner) if *inner == Type::Unit => Type::Ref(crate::ast::intern_type(target_ty)),
+        Type::MutRef(inner) if *inner == Type::Unit => Type::MutRef(crate::ast::intern_type(target_ty)),
+        _ => param_ty,
+    }
+}
+
     for impl_block in &program.impls {
         let target_ty = resolve_type(Type::Obj(intern_str(&impl_block.target_type)), &enum_names, 0..1, &mut errors);
         for method in &impl_block.methods {
@@ -132,7 +141,7 @@ pub fn check_semantics(program: &Program) -> Result<(TypedProgram, HashMap<Strin
                     params.push(Param {
                         name: "self".to_string(),
                         is_mutable: p.is_mutable,
-                        ty: target_ty,
+                        ty: resolve_self_type(p.ty, target_ty),
                         span: p.span.clone(),
                     });
                 } else {
@@ -165,7 +174,7 @@ pub fn check_semantics(program: &Program) -> Result<(TypedProgram, HashMap<Strin
                                 params.push(Param {
                                     name: "self".to_string(),
                                     is_mutable: p.is_mutable,
-                                    ty: target_ty,
+                                    ty: resolve_self_type(p.ty, target_ty),
                                     span: p.span.clone(),
                                 });
                             } else {

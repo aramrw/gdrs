@@ -1489,6 +1489,14 @@ pub fn type_check_expr<'a>(
                 if target_func.params.len() == typed_args.len() {
                     for (param, arg) in target_func.params.iter().zip(typed_args.iter_mut()) {
                         match (param.ty, arg.ty()) {
+                            (Type::MutRef(expected), actual) if actual == *expected => {
+                                let arg_span = arg.span();
+                                *arg = TypedExpr::Ref(Box::new(arg.clone()), true, Type::MutRef(expected), arg_span);
+                            }
+                            (Type::Ref(expected), actual) if actual == *expected => {
+                                let arg_span = arg.span();
+                                *arg = TypedExpr::Ref(Box::new(arg.clone()), false, Type::Ref(expected), arg_span);
+                            }
                             (Type::F32, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_)) => {
                                 if arg.ty() != Type::F32 {
                                     *arg = TypedExpr::CastF32(Box::new(arg.clone()), span.clone());
@@ -1743,7 +1751,17 @@ pub fn type_check_expr<'a>(
             let t_target = type_check_expr(scopes, errors, type_ctx, target)?;
             let mut field_ty = Type::Int;
 
-            if let Type::Obj(struct_name) = t_target.ty() {
+            let target_ty = t_target.ty();
+            let struct_name_opt = match target_ty {
+                Type::Obj(s) => Some(s),
+                Type::Ref(inner) | Type::MutRef(inner) => match *inner {
+                    Type::Obj(s) => Some(s),
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            if let Some(struct_name) = struct_name_opt {
                 if let Some(layout) = type_ctx.struct_map.get(struct_name) {
                     if let Some((_, fty)) = layout.field_offsets.get(field_name) {
                         field_ty = *fty;
@@ -1783,7 +1801,8 @@ pub fn type_check_expr<'a>(
             }
             if let Expr::Ident(var_name, _) = curr {
                 if let Some(info) = scopes.lookup(var_name) {
-                    if !info.is_mutable {
+                    let is_ref = matches!(info.ty, Type::Ref(_) | Type::MutRef(_));
+                    if !info.is_mutable && !is_ref {
                         errors.push(SemanticError {
                             message: format!(
                                 "Cannot mutate field of immutable object '{var_name}'"
@@ -1832,10 +1851,26 @@ pub fn type_check_expr<'a>(
             ))
         }
 
+        Expr::Ref(inner, is_mut, span) => {
+            let t_inner = type_check_expr(scopes, errors, type_ctx, inner)?;
+            let inner_ty = t_inner.ty();
+            let ref_ty = if *is_mut {
+                Type::MutRef(crate::ast::intern_type(inner_ty))
+            } else {
+                Type::Ref(crate::ast::intern_type(inner_ty))
+            };
+            Some(TypedExpr::Ref(
+                Box::new(t_inner),
+                *is_mut,
+                ref_ty,
+                span.clone(),
+            ))
+        }
+
         Expr::Deref(inner, span) => {
             let t_inner = type_check_expr(scopes, errors, type_ctx, inner)?;
             match t_inner.ty() {
-                Type::Rc(inner_ty) | Type::Arc(inner_ty) => {
+                Type::Rc(inner_ty) | Type::Arc(inner_ty) | Type::Ref(inner_ty) | Type::MutRef(inner_ty) => {
                     Some(TypedExpr::Deref(Box::new(t_inner), *inner_ty, span.clone()))
                 }
                 Type::Int | Type::I32 => {
@@ -1861,7 +1896,7 @@ pub fn type_check_expr<'a>(
             let t_ptr = type_check_expr(scopes, errors, type_ctx, ptr)?;
             let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
             match t_ptr.ty() {
-                Type::Rc(inner_ty) | Type::Arc(inner_ty) => {
+                Type::Rc(inner_ty) | Type::Arc(inner_ty) | Type::Ref(inner_ty) | Type::MutRef(inner_ty) => {
                     if t_val.ty() != *inner_ty {
                         errors.push(SemanticError {
                             message: format!("Mismatched type in dereference assignment. Pointer holds `{:?}`, found `{:?}`", *inner_ty, t_val.ty()),

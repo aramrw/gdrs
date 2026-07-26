@@ -61,6 +61,17 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
                 }
             });
 
+        let ref_type = just(Token::Ampersand)
+            .ignore_then(just(Token::Mut).or_not())
+            .then(type_parser.clone())
+            .map(|(opt_mut, inner_ty)| {
+                if opt_mut.is_some() {
+                    Type::MutRef(intern_type(inner_ty))
+                } else {
+                    Type::Ref(intern_type(inner_ty))
+                }
+            });
+
         select! {
             Token::TypeI64 => Type::Int,
             Token::TypeI32 => Type::I32,
@@ -70,6 +81,7 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
             Token::TypeStr => Type::Str,
             Token::TypeString => Type::String,
         }
+        .or(ref_type)
         .or(path_obj_type)
         .or(generic_type)
         .or(dyn_type)
@@ -84,17 +96,29 @@ pub fn parser() -> impl Parser<Token, Program, Error = Simple<Token>> {
     // 4. Recursive statement and block parser
     let stmt = stmt_parser(math, type_parser.clone());
 
-    let self_param = select! { Token::Ident(s) if s == "self" => s }
-        .map_with_span(|s, span| Param { name: s, is_mutable: false, ty: Type::Unit, span });
+    let ref_mut_self_param = just(Token::Ampersand)
+        .ignore_then(just(Token::Mut))
+        .ignore_then(select! { Token::Ident(s) if s == "self" => s })
+        .map_with_span(|s, span| Param { name: s, is_mutable: true, ty: Type::MutRef(intern_type(Type::Unit)), span });
+    let ref_self_param = just(Token::Ampersand)
+        .ignore_then(select! { Token::Ident(s) if s == "self" => s })
+        .map_with_span(|s, span| Param { name: s, is_mutable: false, ty: Type::Ref(intern_type(Type::Unit)), span });
     let mut_self_param = just(Token::Mut)
         .ignore_then(select! { Token::Ident(s) if s == "self" => s })
         .map_with_span(|s, span| Param { name: s, is_mutable: true, ty: Type::Unit, span });
-    let param = mut_self_param.or(self_param).or(
-        select! { Token::Ident(name) => name }
-            .then_ignore(just(Token::Colon))
-            .then(type_parser.clone())
-            .map_with_span(|(name, ty), span| Param { name, is_mutable: false, ty, span }),
-    );
+    let self_param = select! { Token::Ident(s) if s == "self" => s }
+        .map_with_span(|s, span| Param { name: s, is_mutable: false, ty: Type::Unit, span });
+
+    let param = ref_mut_self_param
+        .or(ref_self_param)
+        .or(mut_self_param)
+        .or(self_param)
+        .or(
+            select! { Token::Ident(name) => name }
+                .then_ignore(just(Token::Colon))
+                .then(type_parser.clone())
+                .map_with_span(|(name, ty), span| Param { name, is_mutable: false, ty, span }),
+        );
 
     let where_clause = just(Token::Where)
         .ignore_then(just(Token::Dollar).or_not())

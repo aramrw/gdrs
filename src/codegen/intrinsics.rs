@@ -645,6 +645,8 @@ pub fn compile_macro_call<M: Module>(
                     Type::DynTrait(name) => name,
                     Type::Rc(_) => "Rc",
                     Type::Arc(_) => "Arc",
+                    Type::Ref(_) => "Ref",
+                    Type::MutRef(_) => "MutRef",
                 };
 
                 let ptr_val = compile_string_constant(builder, type_name, var_counter, module);

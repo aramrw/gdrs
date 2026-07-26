@@ -993,7 +993,16 @@ pub fn compile_expr<M: Module>(
             let base_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
             let mut offset = 0i32;
 
-            if let crate::ast::Type::Obj(struct_name) = target.ty() {
+            let target_struct_name = match target.ty() {
+                crate::ast::Type::Obj(struct_name) => Some(struct_name),
+                crate::ast::Type::Ref(inner) | crate::ast::Type::MutRef(inner) => match *inner {
+                    crate::ast::Type::Obj(struct_name) => Some(struct_name),
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            if let Some(struct_name) = target_struct_name {
                 if let Some(layout) = struct_layouts.get(struct_name) {
                     if let Some((f_offset, _)) = layout.field_offsets.get(field_name) {
                         offset = *f_offset as i32;
@@ -1013,7 +1022,16 @@ pub fn compile_expr<M: Module>(
             let new_val = compile_expr(builder, val, vars, var_counter, module, struct_layouts);
             let mut offset = 0i32;
 
-            if let crate::ast::Type::Obj(struct_name) = target.ty() {
+            let target_struct_name = match target.ty() {
+                crate::ast::Type::Obj(struct_name) => Some(struct_name),
+                crate::ast::Type::Ref(inner) | crate::ast::Type::MutRef(inner) => match *inner {
+                    crate::ast::Type::Obj(struct_name) => Some(struct_name),
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            if let Some(struct_name) = target_struct_name {
                 if let Some(layout) = struct_layouts.get(struct_name) {
                     if let Some((f_offset, _)) = layout.field_offsets.get(field_name) {
                         offset = *f_offset as i32;
@@ -1142,8 +1160,57 @@ pub fn compile_expr<M: Module>(
             }
         }
 
+        TypedExpr::Ref(inner_expr, _is_mut, _ref_ty, _) => {
+            match inner_expr.as_ref() {
+                TypedExpr::Ident(_name, ty, _) => {
+                    let val = compile_expr(builder, inner_expr, vars, var_counter, module, struct_layouts);
+                    match ty {
+                        Type::Obj(_) | Type::Str | Type::String | Type::Vec(_) | Type::Array(_, _) | Type::Ref(_) | Type::MutRef(_) => {
+                            val
+                        }
+                        _ => {
+                            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                                StackSlotKind::ExplicitSlot,
+                                8,
+                                0,
+                            ));
+                            let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                            builder.ins().store(MemFlags::new(), val, ptr, 0);
+                            ptr
+                        }
+                    }
+                }
+                TypedExpr::FieldAccess(target, field_name, _, _) => {
+                    let base_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
+                    let mut offset = 0i32;
+                    let target_struct_name = match target.ty() {
+                        crate::ast::Type::Obj(struct_name) => Some(struct_name),
+                        crate::ast::Type::Ref(inner) | crate::ast::Type::MutRef(inner) => match *inner {
+                            crate::ast::Type::Obj(struct_name) => Some(struct_name),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(struct_name) = target_struct_name {
+                        if let Some(layout) = struct_layouts.get(struct_name) {
+                            if let Some((f_offset, _)) = layout.field_offsets.get(field_name) {
+                                offset = *f_offset as i32;
+                            }
+                        }
+                    }
+                    builder.ins().iadd_imm(base_ptr, offset as i64)
+                }
+                TypedExpr::Deref(ptr_expr, _, _) => {
+                    compile_expr(builder, ptr_expr, vars, var_counter, module, struct_layouts)
+                }
+                _ => {
+                    compile_expr(builder, inner_expr, vars, var_counter, module, struct_layouts)
+                }
+            }
+        }
+
         TypedExpr::Deref(inner_expr, _ty, _) => {
-            let heap_ptr = compile_expr(
+            let ptr_val = compile_expr(
                 builder,
                 inner_expr,
                 vars,
@@ -1152,17 +1219,22 @@ pub fn compile_expr<M: Module>(
                 struct_layouts,
             );
             let offset = match inner_expr.ty() {
-                Type::Int | Type::I32 => 0,
-                _ => 8,
+                Type::Rc(_) | Type::Arc(_) => 8,
+                _ => 0,
             };
-            builder.ins().load(types::I64, MemFlags::new(), heap_ptr, offset)
+            let load_ty = cranelift_type_of(_ty);
+            builder.ins().load(load_ty, MemFlags::new(), ptr_val, offset)
         }
 
         TypedExpr::DerefAssign(ptr_expr, val_expr, _) => {
-            let heap_ptr =
+            let ptr_val =
                 compile_expr(builder, ptr_expr, vars, var_counter, module, struct_layouts);
             let val = compile_expr(builder, val_expr, vars, var_counter, module, struct_layouts);
-            builder.ins().store(MemFlags::new(), val, heap_ptr, 8);
+            let offset = match ptr_expr.ty() {
+                Type::Rc(_) | Type::Arc(_) => 8,
+                _ => 0,
+            };
+            builder.ins().store(MemFlags::new(), val, ptr_val, offset);
             builder.ins().iconst(types::I64, 0)
         }
 

@@ -208,6 +208,8 @@ pub enum Type {
     Vec(&'static Type),
     Rc(&'static Type),
     Arc(&'static Type),
+    Ref(&'static Type),
+    MutRef(&'static Type),
 }
 
 impl Type {
@@ -342,6 +344,7 @@ pub enum Expr {
 
     EnumConstruct(String, String, Vec<Expr>, Span),
     Match(Box<Expr>, Vec<MatchArm>, Span),
+    Ref(Box<Expr>, bool, Span),
     Deref(Box<Expr>, Span),
     DerefAssign(Box<Expr>, Box<Expr>, Span),
     Closure(Vec<String>, Box<Expr>, Span),
@@ -410,6 +413,7 @@ impl Expr {
             Expr::IndexAssign(_, _, _, s) => s.clone(),
             Expr::EnumConstruct(_, _, _, s) => s.clone(),
             Expr::Match(_, _, s) => s.clone(),
+            Expr::Ref(_, _, s) => s.clone(),
             Expr::Deref(_, s) => s.clone(),
             Expr::DerefAssign(_, _, s) => s.clone(),
             Expr::Closure(_, _, s) => s.clone(),
@@ -481,6 +485,7 @@ pub enum TypedExpr {
     Match(Box<TypedExpr>, Vec<TypedMatchArm>, Type, Span),
     CastF32(Box<TypedExpr>, Span),
     CastI32(Box<TypedExpr>, Span),
+    Ref(Box<TypedExpr>, bool, Type, Span),
     Deref(Box<TypedExpr>, Type, Span),
     DerefAssign(Box<TypedExpr>, Box<TypedExpr>, Span),
     Closure(String, Vec<(String, Type)>, Box<TypedExpr>, Type, Span),
@@ -529,6 +534,7 @@ impl TypedExpr {
             | TypedExpr::IndexAccess(_, _, ty, _)
             | TypedExpr::EnumConstruct(_, _, _, _, ty, _)
             | TypedExpr::Match(_, _, ty, _)
+            | TypedExpr::Ref(_, _, ty, _)
             | TypedExpr::Deref(_, ty, _)
             | TypedExpr::Closure(_, _, _, ty, _)
             | TypedExpr::Range(_, _, ty, _) => *ty,
@@ -593,6 +599,7 @@ impl TypedExpr {
             TypedExpr::EnumConstruct(_, _, _, _, _, s) => s.clone(),
             TypedExpr::Match(_, _, _, s) => s.clone(),
             TypedExpr::CastF32(_, s) | TypedExpr::CastI32(_, s) => s.clone(),
+            TypedExpr::Ref(_, _, _, s) => s.clone(),
             TypedExpr::Deref(_, _, s) => s.clone(),
             TypedExpr::DerefAssign(_, _, s) => s.clone(),
             TypedExpr::Closure(_, _, _, _, s) => s.clone(),

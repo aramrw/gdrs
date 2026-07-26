@@ -197,7 +197,14 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
             .ignore_then(postfix_atom.clone())
             .map_with_span(|expr, span| Expr::Deref(Box::new(expr), span));
 
-        let unary = neg.or(not).or(deref).or(postfix_atom);
+        let reference = just(Token::Ampersand)
+            .then(just(Token::Mut).or_not())
+            .then(postfix_atom.clone())
+            .map_with_span(|((_, opt_mut), expr), span| {
+                Expr::Ref(Box::new(expr), opt_mut.is_some(), span)
+            });
+
+        let unary = neg.or(not).or(deref).or(reference).or(postfix_atom);
 
         let factor =
             unary
