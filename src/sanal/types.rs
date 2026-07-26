@@ -1489,12 +1489,12 @@ pub fn type_check_expr<'a>(
                 if target_func.params.len() == typed_args.len() {
                     for (param, arg) in target_func.params.iter().zip(typed_args.iter_mut()) {
                         match (param.ty, arg.ty()) {
-                            (Type::F32, Type::Int | Type::I32 | Type::Float | Type::F32) => {
+                            (Type::F32, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_)) => {
                                 if arg.ty() != Type::F32 {
                                     *arg = TypedExpr::CastF32(Box::new(arg.clone()), span.clone());
                                 }
                             }
-                            (Type::I32, Type::Int | Type::I32) => {
+                            (Type::I32, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_)) => {
                                 if arg.ty() != Type::I32 {
                                     *arg = TypedExpr::CastI32(Box::new(arg.clone()), span.clone());
                                 }
@@ -1516,10 +1516,18 @@ pub fn type_check_expr<'a>(
                 type_ctx.extern_signatures.get(&resolved_name)
             {
                 for (param_ty, arg) in param_decl_types.iter().zip(typed_args.iter_mut()) {
-                    if *param_ty == Type::F32 && arg.ty() == Type::Float {
-                        *arg = TypedExpr::CastF32(Box::new(arg.clone()), span.clone());
-                    } else if *param_ty == Type::I32 && arg.ty() == Type::Int {
-                        *arg = TypedExpr::CastI32(Box::new(arg.clone()), span.clone());
+                    match (param_ty, arg.ty()) {
+                        (Type::F32, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_)) => {
+                            if arg.ty() != Type::F32 {
+                                *arg = TypedExpr::CastF32(Box::new(arg.clone()), span.clone());
+                            }
+                        }
+                        (Type::I32, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_)) => {
+                            if arg.ty() != Type::I32 {
+                                *arg = TypedExpr::CastI32(Box::new(arg.clone()), span.clone());
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 *ext_ret_ty

@@ -939,6 +939,16 @@ pub fn compile_expr<M: Module>(
                         let actual_ty = builder.func.dfg.value_type(arg_val);
                         let coerced = if actual_ty == expected_ty {
                             arg_val
+                        } else if actual_ty == types::I32 && expected_ty == types::I64 {
+                            builder.ins().sextend(types::I64, arg_val)
+                        } else if actual_ty == types::I64 && expected_ty == types::I32 {
+                            builder.ins().ireduce(types::I32, arg_val)
+                        } else if actual_ty == types::I32 && expected_ty == types::F32 {
+                            builder.ins().fcvt_from_sint(types::F32, arg_val)
+                        } else if actual_ty == types::I64 && expected_ty == types::F32 {
+                            builder.ins().fcvt_from_sint(types::F32, arg_val)
+                        } else if actual_ty == types::F32 && expected_ty == types::I32 {
+                            builder.ins().fcvt_to_sint(types::I32, arg_val)
                         } else if actual_ty == types::F64 && expected_ty == types::I64 {
                             builder.ins().bitcast(types::I64, MemFlags::new(), arg_val)
                         } else if actual_ty == types::F32 && expected_ty == types::I64 {
