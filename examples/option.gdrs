@@ -1,12 +1,12 @@
 use std::core::{Result as Res, Option as Opt}
 
-fn find_even(val: i64) -> Opt:
+fn find_even(val: i64) -> Opt<i64>:
 	if val % 2 == 0:
 		return Opt::Some(val)
 	else:
 		return Opt::None
 
-fn double_even(val: i64) -> Opt:
+fn double_even(val: i64) -> Opt<i64>:
 	let even = find_even(val)?
 	return Opt::Some(even * 2)
 
@@ -16,7 +16,23 @@ fn main():
 	let d1 = double_even(15)
 	log!("double_even(15).is_none():", d1.is_none())
 
-	let res = Res::Ok(777)
-	log!("res.unwrap():", res.unwrap())
+	let none = None
+	log!("let none = None: ", none.is_none())
 
-	panic!("ending program")
+	let some = Some(1)
+	log!("let some = Some(1): ", none.is_some())
+
+	let res = Res::Ok(777)
+	log!("res.unwrap():", res.is_err())
+
+// none is returning the wrong values.
+
+// double_even(15).is_none():
+// true
+// let none = None: 
+// true
+// let some = Some(1): 
+// false
+// res.unwrap():
+// false
+// ~/Programming/newlang>     
