@@ -92,13 +92,6 @@ fn main():
 				balls.push(ball)
 				i += 1
 
-		let mut i2 = 0
-		while i2 < 10:
-			log!(balls[i2].color)
-			i2 += 1
-
-		balls.iter().for_each(|ball| log!(ball.r))
-		
 		while !WindowShouldClose():
 			BeginDrawing()
 			ClearBackground(2294467295)

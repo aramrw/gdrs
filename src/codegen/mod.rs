@@ -1,11 +1,20 @@
 //! codegen/mod.rs
 //! Main entry point for Cranelift JIT code generation.
 
+pub mod arrays;
+pub mod binops;
+pub mod calls;
+pub mod closures;
 pub mod expr;
 pub mod func;
 pub mod intrinsics;
 pub mod jit;
 pub mod object;
+pub mod objects;
+pub mod assign;
+pub mod branching;
+pub mod loops;
+pub mod refs;
 
 use std::collections::HashMap;
 use std::mem;
@@ -19,6 +28,7 @@ use crate::ast::TypedProgram;
 use crate::codegen::func::compile_func;
 use crate::codegen::jit::create_jit_module;
 use crate::sanal::StructLayout;
+
 
 pub struct JitCompiler {
     builder_context: FunctionBuilderContext,
