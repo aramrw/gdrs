@@ -3,4 +3,6 @@ fn main():
 	(0..5).iter().for_each(|x| log!("Item:", x))
 
 	log!("--- 2. Range Mapping (0..5).map(|x| x * 10) ---")
-	(0..5).map(|x| x * 10).for_each(|x| log!("Mapped item (x * 10):", x))
+	(0..5).map(|x| x * 10).for_each(|x|:
+		log!("Mapped item (x * 10):", x)
+	)

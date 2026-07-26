@@ -24,14 +24,3 @@ fn main():
 
 	let res = Res::Ok(777)
 	log!("res.unwrap():", res.unwrap())
-
-// Output:
-// --- Testing Multi Imports with aliases ---
-// double_even(15).is_none():
-// true
-// let none = None: 
-// true
-// some.is_some(): 
-// true
-// res.unwrap():
-// 777
