@@ -1055,7 +1055,8 @@ pub fn type_check_expr<'a>(
                     | "args_at"
                     | "args"
                     | "thread"
-                    | "spawn"
+                    | "thread!"
+                    | "spawn!"
             );
             if is_intrinsic_macro {
                 if name == "push" || name == "push_str" || name == "pop" {
@@ -1130,8 +1131,12 @@ pub fn type_check_expr<'a>(
                             ));
                         }
                     }
+                    let short_target = target_or_var.split("::").last().unwrap_or(target_or_var);
                     let mangled = format!("{}_{}", target_or_var.replace("::", "_"), method_name);
-                    let found_fn = type_ctx.fn_map.iter().find(|(k, _)| **k == mangled || k.ends_with(&format!("_{mangled}")));
+                    let short_mangled = format!("{}_{}", short_target, method_name);
+                    let found_fn = type_ctx.fn_map.iter().find(|(k, _)| {
+                        **k == mangled || **k == short_mangled || k.ends_with(&format!("_{mangled}")) || k.ends_with(&format!("_{short_mangled}"))
+                    });
                     if let Some((mangled_fn_name, target_func)) = found_fn {
                         resolved_name = mangled_fn_name.clone();
                         let expects_self = target_func.params.first().map(|p| p.name == "self").unwrap_or(false);
@@ -1274,13 +1279,29 @@ pub fn type_check_expr<'a>(
                         }
                     };
                     let mangled = format!("{}_{}", normalized_target, name);
-                    if type_ctx.fn_map.contains_key(&mangled) {
-                        resolved_name = mangled.clone();
+                    let found_mangled = if type_ctx.fn_map.contains_key(&mangled) {
+                        Some(mangled.clone())
+                    } else if let Some((k, _)) = type_ctx.fn_map.iter().find(|(k, _)| {
+                        let short_target = normalized_target.split('_').last().unwrap_or("");
+                        let short_mangled = format!("{short_target}_{name}");
+                        **k == short_mangled || k.ends_with(&format!("_{short_mangled}"))
+                    }) {
+                        Some(k.clone())
+                    } else {
+                        None
+                    };
+
+                    if let Some(mangled_fn) = found_mangled {
+                        resolved_name = mangled_fn;
+                        let short_target = normalized_target.split('_').last().unwrap_or(&normalized_target);
                         if type_ctx.struct_map.contains_key(&normalized_target)
                             || type_ctx.enum_map.contains_key(&normalized_target)
+                            || type_ctx.struct_map.contains_key(short_target)
+                            || type_ctx.enum_map.contains_key(short_target)
                         {
                             if let TypedExpr::Ident(id, _, _) = &typed_args[0] {
-                                if id == &normalized_target {
+                                let short_id = id.split("::").last().unwrap_or(id);
+                                if id == &normalized_target || short_id == short_target {
                                     typed_args.remove(0);
                                 }
                             }

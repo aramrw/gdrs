@@ -58,6 +58,24 @@ impl JitCompiler {
             );
         }
 
+        use cranelift_codegen::ir::AbiParam;
+        use cranelift_module::Linkage;
+        use crate::codegen::expr::cranelift_type_of;
+
+        for func in &program.functions {
+            let export_name = if func.name == "main" { "gdrs_main" } else { &func.name };
+            if self.module.get_name(export_name).is_none() {
+                let mut sig = self.module.make_signature();
+                for param in &func.params {
+                    sig.params.push(AbiParam::new(cranelift_type_of(&param.ty)));
+                }
+                if func.return_type != crate::ast::Type::Unit {
+                    sig.returns.push(AbiParam::new(cranelift_type_of(&func.return_type)));
+                }
+                let _ = self.module.declare_function(export_name, Linkage::Export, &sig);
+            }
+        }
+
         for func in &program.functions {
             let code_ptr = compile_func(
                 func,

@@ -49,6 +49,24 @@ fn jit_run(entry_path: &Path) {
             let mut ctx = jit.make_context();
             let mut builder_context = cranelift_frontend::FunctionBuilderContext::new();
 
+            use cranelift_codegen::ir::AbiParam;
+            use cranelift_module::Linkage;
+            use crate::codegen::expr::cranelift_type_of;
+
+            for func in &typed_tree.functions {
+                let export_name = if func.name == "main" { "gdrs_main" } else { &func.name };
+                if jit.get_name(export_name).is_none() {
+                    let mut sig = jit.make_signature();
+                    for param in &func.params {
+                        sig.params.push(AbiParam::new(cranelift_type_of(&param.ty)));
+                    }
+                    if func.return_type != crate::ast::Type::Unit {
+                        sig.returns.push(AbiParam::new(cranelift_type_of(&func.return_type)));
+                    }
+                    let _ = jit.declare_function(export_name, Linkage::Export, &sig);
+                }
+            }
+
             for func in &typed_tree.functions {
                 crate::codegen::func::compile_func(
                     func,

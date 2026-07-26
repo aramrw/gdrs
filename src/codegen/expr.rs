@@ -920,16 +920,10 @@ pub fn compile_expr<M: Module>(
                     builder.ins().iconst(types::I64, 0)
                 }
             } else {
-                let linkage = if target_symbol_name.starts_with("intrinsic_") {
-                    Linkage::Import
-                } else {
-                    Linkage::Export
-                };
-
                 let callee = match module.get_name(&target_symbol_name) {
                     Some(cranelift_module::FuncOrDataId::Func(id)) => id,
                     _ => module
-                        .declare_function(&target_symbol_name, linkage, &sig)
+                        .declare_function(&target_symbol_name, Linkage::Import, &sig)
                         .unwrap(),
                 };
                 let decl_sig = module.declarations().get_function_decl(callee);
