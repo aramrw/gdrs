@@ -58,6 +58,22 @@ pub fn check_binary_op(
     }
 }
 
+fn lookup_struct_method_fn<'a>(type_ctx: &TypeCtx<'a>, struct_name: &str, method: &str) -> Option<crate::ast::FuncDecl> {
+    let mangled = format!("{}_{}", struct_name, method);
+    if let Some(fn_info) = type_ctx.get_fn(&mangled) {
+        return Some(fn_info);
+    }
+    let parts: Vec<&str> = struct_name.split('_').collect();
+    if parts.len() > 1 {
+        let base_struct = parts[..parts.len() - 1].join("_");
+        let base_mangled = format!("{}_{}", base_struct, method);
+        if let Some(fn_info) = type_ctx.get_fn(&base_mangled) {
+            return Some(fn_info);
+        }
+    }
+    None
+}
+
 pub fn type_check_add<'a>(
     scopes: &mut ScopeStack,
     errors: &mut Vec<SemanticError>,
@@ -69,10 +85,9 @@ pub fn type_check_add<'a>(
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
     if let Type::Obj(struct_name) = t_lhs.ty() {
-        let mangled = format!("{}_add", struct_name);
-        if let Some(fn_info) = type_ctx.get_fn(&mangled) {
+        if let Some(fn_info) = lookup_struct_method_fn(type_ctx, struct_name, "add") {
             return Some(TypedExpr::Call(
-                mangled,
+                fn_info.name.clone(),
                 vec![t_lhs, t_rhs],
                 fn_info.return_type,
                 span.clone(),
@@ -99,10 +114,9 @@ pub fn type_check_sub<'a>(
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
     if let Type::Obj(struct_name) = t_lhs.ty() {
-        let mangled = format!("{}_sub", struct_name);
-        if let Some(fn_info) = type_ctx.get_fn(&mangled) {
+        if let Some(fn_info) = lookup_struct_method_fn(type_ctx, struct_name, "sub") {
             return Some(TypedExpr::Call(
-                mangled,
+                fn_info.name.clone(),
                 vec![t_lhs, t_rhs],
                 fn_info.return_type,
                 span.clone(),
@@ -129,10 +143,9 @@ pub fn type_check_mul<'a>(
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
     if let Type::Obj(struct_name) = t_lhs.ty() {
-        let mangled = format!("{}_mul", struct_name);
-        if let Some(fn_info) = type_ctx.get_fn(&mangled) {
+        if let Some(fn_info) = lookup_struct_method_fn(type_ctx, struct_name, "mul") {
             return Some(TypedExpr::Call(
-                mangled,
+                fn_info.name.clone(),
                 vec![t_lhs, t_rhs],
                 fn_info.return_type,
                 span.clone(),
@@ -159,10 +172,9 @@ pub fn type_check_div<'a>(
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
     if let Type::Obj(struct_name) = t_lhs.ty() {
-        let mangled = format!("{}_div", struct_name);
-        if let Some(fn_info) = type_ctx.get_fn(&mangled) {
+        if let Some(fn_info) = lookup_struct_method_fn(type_ctx, struct_name, "div") {
             return Some(TypedExpr::Call(
-                mangled,
+                fn_info.name.clone(),
                 vec![t_lhs, t_rhs],
                 fn_info.return_type,
                 span.clone(),

@@ -343,17 +343,7 @@ pub fn type_check_call<'a>(
                 }
             }
             if !type_args.is_empty() {
-                let lookup_base = if let Some((base, _)) = base_struct.rsplit_once('_') {
-                    if type_ctx.mono.borrow().struct_templates.contains_key(base)
-                        || type_ctx.mono.borrow().struct_templates.iter().any(|(k, _)| k.ends_with(&format!("_{base}")) || base.ends_with(k))
-                    {
-                        base.to_string()
-                    } else {
-                        base_struct.clone()
-                    }
-                } else {
-                    base_struct.clone()
-                };
+                let lookup_base = base_struct.clone();
                 if let Some(mangled_struct) = crate::sanal::mono::monomorphize_struct(
                     type_ctx.mono,
                     &lookup_base,

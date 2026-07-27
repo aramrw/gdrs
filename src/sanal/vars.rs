@@ -273,7 +273,8 @@ pub fn type_check_assign<'a>(
                 }
             }
         } else if let Type::Obj(s) = &val_ty {
-            if s.contains("Vec") {
+            let clean = s.split('_').last().unwrap_or(s);
+            if clean == "Vec" || clean.starts_with("Vec_") {
                 if let Type::Vec(elem_ty) = info.ty {
                     info.ty = Type::Vec(elem_ty);
                 }
@@ -286,8 +287,8 @@ pub fn type_check_assign<'a>(
             (Type::F32 | Type::Float, Type::F32 | Type::Float) => true,
             (Type::F32 | Type::Float, Type::I32 | Type::Int) => true,
             (Type::Vec(_), Type::Obj(s)) | (Type::Obj(s), Type::Vec(_)) => {
-                let name = s.to_string();
-                name.contains("Vec") || name.contains("vec")
+                let clean = s.split('_').last().unwrap_or(s);
+                clean == "Vec" || clean.starts_with("Vec_")
             }
             (Type::F32 | Type::Float | Type::I32 | Type::Int, Type::Generic(_)) => true,
             (Type::Generic(_), Type::F32 | Type::Float | Type::I32 | Type::Int) => true,
