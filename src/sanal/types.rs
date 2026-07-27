@@ -58,6 +58,7 @@ impl<'a> TypeCtx<'a> {
                     base_name,
                     &type_args,
                     self.struct_map,
+                    self.enum_map,
                     self.fn_map,
                     self.worklist,
                 ) {

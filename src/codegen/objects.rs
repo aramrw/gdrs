@@ -77,6 +77,8 @@ pub fn compile_field_access<M: Module>(
                 .iter()
                 .find(|(k, _)| {
                     **k == struct_name
+                        || struct_name.starts_with(k.as_str())
+                        || struct_name.contains(k.as_str())
                         || k.contains(&format!("{struct_name}_"))
                         || k.starts_with(&format!("{struct_name}_"))
                         || k.ends_with(&format!("_{struct_name}"))
@@ -127,6 +129,8 @@ pub fn compile_field_assign<M: Module>(
                 .iter()
                 .find(|(k, _)| {
                     **k == struct_name
+                        || struct_name.starts_with(k.as_str())
+                        || struct_name.contains(k.as_str())
                         || k.contains(&format!("{struct_name}_"))
                         || k.starts_with(&format!("{struct_name}_"))
                         || k.ends_with(&format!("_{struct_name}"))

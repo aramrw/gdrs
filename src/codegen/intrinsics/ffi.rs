@@ -131,6 +131,7 @@ pub extern "C" fn intrinsic_log(type_tag: u64, value_bits: u64) -> i64 {
         3 => println!("{}", f64::from_bits(value_bits)),
         _ => println!("<unknown type 0x{:x}: 0x{:x}>", type_tag, value_bits),
     }
+    let _ = std::io::Write::flush(&mut std::io::stdout());
     0
 }
 

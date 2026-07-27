@@ -106,12 +106,13 @@ pub fn check_semantics(
 
     let mut mono = Monomorphizer::default();
     mono.impl_templates = program.impls.clone();
+    let mono_cell = std::cell::RefCell::new(mono);
 
     let mut struct_map = HashMap::new();
     for s in &program.structs {
-        let is_generic = !extract_generic_params_struct(s).is_empty();
+        let is_generic = !extract_generic_params_struct(s, &mono_cell).is_empty();
         if is_generic {
-            mono.struct_templates.insert(s.name.clone(), s.clone());
+            mono_cell.borrow_mut().struct_templates.insert(s.name.clone(), s.clone());
         } else {
             let mut total_size = 0u32;
             let mut field_offsets = HashMap::new();
@@ -136,7 +137,7 @@ pub fn check_semantics(
     for e in &program.enums {
         let is_generic = !extract_generic_params_enum(e).is_empty();
         if is_generic {
-            mono.enum_templates.insert(e.name.clone(), e.clone());
+            mono_cell.borrow_mut().enum_templates.insert(e.name.clone(), e.clone());
         } else {
             let mut variant_map = HashMap::new();
             for (i, variant) in e.variants.iter().enumerate() {
@@ -234,7 +235,7 @@ pub fn check_semantics(
     let mut fn_map = HashMap::new();
     for func in &all_functions {
         fn_map.insert(func.name.clone(), func.clone());
-        mono.fn_templates.insert(func.name.clone(), func.clone());
+        mono_cell.borrow_mut().fn_templates.insert(func.name.clone(), func.clone());
     }
 
     let mut extern_fn_names = std::collections::HashSet::new();
@@ -254,7 +255,6 @@ pub fn check_semantics(
         }
     }
 
-    let mono_cell = RefCell::new(mono);
     let struct_map_cell = RefCell::new(struct_map);
     let enum_map_cell = RefCell::new(enum_map);
     let fn_map_cell = RefCell::new(fn_map);

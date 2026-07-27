@@ -206,7 +206,7 @@ pub fn type_check_obj_init<'a>(
 
         if let Some(decl) = opt_template {
             let mut type_args = Vec::new();
-            let generic_params = crate::sanal::mono::extract_generic_params_struct(&decl);
+            let generic_params = crate::sanal::mono::extract_generic_params_struct(&decl, type_ctx.mono);
             for p in &generic_params {
                 let mut inferred_ty = Type::Int;
                 for f in &decl.fields {
@@ -229,6 +229,7 @@ pub fn type_check_obj_init<'a>(
                 &decl.name,
                 &type_args,
                 type_ctx.struct_map,
+                type_ctx.enum_map,
                 type_ctx.fn_map,
                 type_ctx.worklist,
             ) {

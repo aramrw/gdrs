@@ -168,7 +168,7 @@ pub fn type_check_let<'a>(
     let typed_val = type_check_expr(scopes, errors, type_ctx, value)?;
     let inferred_ty = typed_val.ty();
 
-    let final_ty = if let Some(annotated) = explicit_ty {
+    let mut final_ty = if let Some(annotated) = explicit_ty {
         let compatible = match (annotated, &inferred_ty) {
             (Type::I32 | Type::Int, Type::I32 | Type::Int) => true,
             (Type::F32 | Type::Float, Type::F32 | Type::Float) => true,
@@ -216,6 +216,16 @@ pub fn type_check_let<'a>(
         ty
     };
 
+    if name.starts_with("__iter_") {
+        if let TypedExpr::Call(_, args, _, _) = &typed_val {
+            if !args.is_empty() {
+                if let Type::Vec(elem_ty) = args[0].ty() {
+                    final_ty = Type::Vec(elem_ty);
+                }
+            }
+        }
+    }
+
     scopes.declare(name.to_string(), is_mutable, final_ty.clone());
 
     Some(TypedExpr::Let(
@@ -237,7 +247,7 @@ pub fn type_check_assign<'a>(
 ) -> Option<TypedExpr> {
     let typed_val = type_check_expr(scopes, errors, type_ctx, value)?;
 
-    if let Some(info) = scopes.lookup(name) {
+    if let Some(info) = scopes.lookup_mut(name) {
         if !info.is_mutable {
             errors.push(SemanticError {
                 code: "E0382",
@@ -253,11 +263,32 @@ pub fn type_check_assign<'a>(
 
         let val_ty = typed_val.ty();
 
+        if let Type::Vec(elem_ty) = &val_ty {
+            info.ty = Type::Vec(*elem_ty);
+        } else if let TypedExpr::Call(c_name, c_args, _, _) = &typed_val {
+            if c_name.ends_with("push") && c_args.len() >= 2 {
+                let pushed_ty = c_args[1].ty();
+                if pushed_ty != Type::Int && pushed_ty != Type::Unit {
+                    info.ty = Type::Vec(crate::ast::intern_type(pushed_ty));
+                }
+            }
+        } else if let Type::Obj(s) = &val_ty {
+            if s.contains("Vec") {
+                if let Type::Vec(elem_ty) = info.ty {
+                    info.ty = Type::Vec(elem_ty);
+                }
+            }
+        }
+
         let is_compatible = match (&info.ty, &val_ty) {
             (a, b) if a == b => true,
             (Type::I32 | Type::Int, Type::I32 | Type::Int) => true,
             (Type::F32 | Type::Float, Type::F32 | Type::Float) => true,
             (Type::F32 | Type::Float, Type::I32 | Type::Int) => true,
+            (Type::Vec(_), Type::Obj(s)) | (Type::Obj(s), Type::Vec(_)) => {
+                let name = s.to_string();
+                name.contains("Vec") || name.contains("vec")
+            }
             (Type::F32 | Type::Float | Type::I32 | Type::Int, Type::Generic(_)) => true,
             (Type::Generic(_), Type::F32 | Type::Float | Type::I32 | Type::Int) => true,
             (Type::Generic(_), Type::Generic(_)) => true,

@@ -92,10 +92,24 @@ pub fn type_check_match<'a>(
             if let Some((_, v_map)) = &variant_info {
                 if let Some((v_tag, p_types)) = v_map.get(short_v_name) {
                     for (b_name, p_ty) in arm.bindings.iter().zip(p_types.iter()) {
-                        if b_name != "_" {
-                            scopes.declare(b_name.clone(), false, *p_ty);
+                        let mut bound_ty = *p_ty;
+                        if short_v_name == "Some" && (*p_ty == Type::Int || matches!(*p_ty, Type::Generic(_))) {
+                            if let TypedExpr::Call(name, args, _, _) = &t_target {
+                                if (name == "next" || name.ends_with("_next")) && !args.is_empty() {
+                                    if let TypedExpr::Ident(iter_var_name, _, _) = &args[0] {
+                                        if let Some(info) = scopes.lookup(iter_var_name) {
+                                            if let Type::Vec(elem_ty) = info.ty {
+                                                bound_ty = *elem_ty;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        typed_bindings.push((b_name.clone(), *p_ty));
+                        if b_name != "_" {
+                            scopes.declare(b_name.clone(), false, bound_ty);
+                        }
+                        typed_bindings.push((b_name.clone(), bound_ty));
                     }
                     *v_tag
                 } else {

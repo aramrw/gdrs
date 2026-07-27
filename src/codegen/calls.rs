@@ -57,6 +57,10 @@ pub fn compile_call<M: Module>(
                     builder.ins().fpromote(types::F64, compiled_arg)
                 }
                 (types::F64, types::F32) => builder.ins().fdemote(types::F32, compiled_arg),
+                (types::F32, types::I32) => builder.ins().fcvt_to_sint(types::I32, compiled_arg),
+                (types::F64, types::I32) => builder.ins().fcvt_to_sint(types::I32, compiled_arg),
+                (types::F32, types::I64) => builder.ins().fcvt_to_sint(types::I64, compiled_arg),
+                (types::F64, types::I64) => builder.ins().fcvt_to_sint(types::I64, compiled_arg),
                 (types::I8, t) if t.is_int() => builder.ins().sextend(t, compiled_arg),
                 (t, types::I8) if t.is_int() => builder.ins().ireduce(types::I8, compiled_arg),
                 _ => compiled_arg,

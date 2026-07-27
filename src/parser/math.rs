@@ -315,17 +315,24 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
                                 span.clone(),
                             );
 
+                            let iter_expr = match &target {
+                                Expr::Call(name, _, _) if name == "iter" || name.ends_with("_iter") => {
+                                    target.clone()
+                                }
+                                _ => Expr::Call(
+                                    "iter".to_string(),
+                                    vec![target],
+                                    span.clone(),
+                                ),
+                            };
+
                             Expr::Block(
                                 vec![
                                     Expr::Let(
                                         iter_var,
                                         None,
                                         true,
-                                        Box::new(Expr::Call(
-                                            "iter".to_string(),
-                                            vec![target],
-                                            span.clone(),
-                                        )),
+                                        Box::new(iter_expr),
                                         span.clone(),
                                     ),
                                     Expr::While(

@@ -310,7 +310,9 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
 
     let impl_header = select! { Token::Ident(s) => s }
         .then(
-            select! { Token::Ident(s) if s == "for" => s }
+            just(Token::For)
+                .map(|_| "for".to_string())
+                .or(select! { Token::Ident(s) if s == "for" => s })
                 .ignore_then(select! { Token::Ident(s) => s })
                 .or_not(),
         )

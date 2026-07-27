@@ -58,7 +58,7 @@ pub fn mangle_name(base: &str, type_args: &[Type]) -> String {
     }
 }
 
-pub fn extract_generic_params_struct(decl: &StructDecl) -> Vec<String> {
+pub fn extract_generic_params_struct(decl: &StructDecl, mono: &RefCell<Monomorphizer>) -> Vec<String> {
     let mut params = Vec::new();
     if let Some(w) = &decl.where_clause {
         let clean = w.target_param.trim_start_matches('$').to_string();
@@ -68,6 +68,21 @@ pub fn extract_generic_params_struct(decl: &StructDecl) -> Vec<String> {
     }
     for field in &decl.fields {
         collect_generics_from_type(&field.ty, &mut params);
+    }
+    if params.is_empty() {
+        let impls = mono.borrow().impl_templates.clone();
+        for impl_block in &impls {
+            if impl_block.target_type == decl.name
+                || decl.name.ends_with(&format!("_{}", impl_block.target_type))
+            {
+                for m in &impl_block.methods {
+                    for p in &m.params {
+                        collect_generics_from_type(&p.ty, &mut params);
+                    }
+                    collect_generics_from_type(&m.return_type, &mut params);
+                }
+            }
+        }
     }
     params
 }
@@ -121,6 +136,24 @@ pub fn substitute_type(ty: Type, env: &HashMap<String, Type>) -> Type {
         Type::Vec(inner) => Type::Vec(intern_type(substitute_type(*inner, env))),
         Type::Slice(inner) => Type::Slice(intern_type(substitute_type(*inner, env))),
         Type::Array(inner, len) => Type::Array(intern_type(substitute_type(*inner, env)), len),
+        Type::Obj(name) | Type::Enum(name) => {
+            let s_name = name.to_string();
+            if (s_name.starts_with("std_core_Option_") || s_name.starts_with("std_core_Result_") || s_name == "Option" || s_name == "Result") && !env.is_empty() {
+                let mut unique_vals = Vec::new();
+                for val in env.values() {
+                    if !unique_vals.contains(val) {
+                        unique_vals.push(*val);
+                    }
+                }
+                let type_args: Vec<String> = unique_vals.iter().map(type_suffix).collect();
+                if !type_args.is_empty() {
+                    let base = if s_name.contains("Option") { "std_core_Option" } else { "std_core_Result" };
+                    let mangled = format!("{}_{}", base, type_args.join("_"));
+                    return Type::Enum(crate::ast::intern_str(&mangled));
+                }
+            }
+            ty
+        }
         other => other,
     }
 }
@@ -275,14 +308,32 @@ pub fn substitute_expr(expr: &Expr, env: &HashMap<String, Type>) -> Expr {
             span.clone(),
         ),
         Expr::Try(inner, span) => Expr::Try(Box::new(substitute_expr(inner, env)), span.clone()),
-        Expr::ObjInit(name, fields, span) => Expr::ObjInit(
-            name.clone(),
-            fields
-                .iter()
-                .map(|(n, e)| (n.clone(), substitute_expr(e, env)))
-                .collect(),
-            span.clone(),
-        ),
+        Expr::ObjInit(name, fields, span) => {
+            let mut unique_vals = Vec::new();
+            for val in env.values() {
+                if !unique_vals.contains(val) {
+                    unique_vals.push(*val);
+                }
+            }
+            let new_name = if !unique_vals.is_empty() {
+                let clean = name.split('_').last().unwrap_or(name);
+                if clean == "VecIter" || clean == "Vec" || clean == "Option" || clean == "Result" {
+                    mangle_name(name, &unique_vals)
+                } else {
+                    name.clone()
+                }
+            } else {
+                name.clone()
+            };
+            Expr::ObjInit(
+                new_name,
+                fields
+                    .iter()
+                    .map(|(n, e)| (n.clone(), substitute_expr(e, env)))
+                    .collect(),
+                span.clone(),
+            )
+        },
         Expr::FieldAccess(target, field_name, span) => Expr::FieldAccess(
             Box::new(substitute_expr(target, env)),
             field_name.clone(),
@@ -356,6 +407,7 @@ pub fn monomorphize_struct(
     base_name: &str,
     type_args: &[Type],
     struct_map: &RefCell<HashMap<String, StructLayout>>,
+    enum_map: &RefCell<HashMap<String, (&'static str, HashMap<String, (i64, Vec<Type>)>)>>,
     fn_map: &RefCell<HashMap<String, FuncDecl>>,
     worklist: &RefCell<Vec<FuncDecl>>,
 ) -> Option<String> {
@@ -383,7 +435,7 @@ pub fn monomorphize_struct(
             .cloned()?
     };
 
-    let params = extract_generic_params_struct(&decl);
+    let params = extract_generic_params_struct(&decl, mono);
     let mut env = HashMap::new();
     for (i, p) in params.iter().enumerate() {
         if i < type_args.len() {
@@ -459,6 +511,56 @@ pub fn monomorphize_struct(
                 if let Type::Obj(tn) = ret_ty {
                     if tn == decl.name || tn == base_name {
                         ret_ty = target_ty;
+                    } else {
+                        let tn_str = tn.to_string();
+                        if let Some((b_name, suffix)) = tn_str.rsplit_once('_') {
+                            let sub_tys: Vec<Type> = suffix
+                                .split('_')
+                                .map(|s| {
+                                    if s == "i64" || s == "int" {
+                                        Type::Int
+                                    } else if s == "i32" {
+                                        Type::I32
+                                    } else if s == "bool" {
+                                        Type::Bool
+                                    } else {
+                                        Type::Obj(intern_str(s))
+                                    }
+                                })
+                                .collect();
+                            let clean_b = b_name.split('_').last().unwrap_or(b_name);
+                            monomorphize_struct(
+                                mono,
+                                clean_b,
+                                &sub_tys,
+                                struct_map,
+                                enum_map,
+                                fn_map,
+                                worklist,
+                            );
+                        }
+                    }
+                }
+                if let Type::Enum(mangled_enum) = ret_ty {
+                    let m_str = mangled_enum.to_string();
+                    if m_str.starts_with("std_core_Option_") || m_str.starts_with("std_core_Result_") {
+                        let base_e = if m_str.starts_with("std_core_Option_") { "std_core_Option" } else { "std_core_Result" };
+                        let sub_strs: Vec<&str> = m_str[base_e.len() + 1..].split('_').collect();
+                        let sub_tys: Vec<Type> = sub_strs
+                            .iter()
+                            .map(|s| {
+                                if *s == "i64" || *s == "int" {
+                                    Type::Int
+                                } else if *s == "i32" {
+                                    Type::I32
+                                } else if *s == "bool" {
+                                    Type::Bool
+                                } else {
+                                    Type::Obj(intern_str(s))
+                                }
+                            })
+                            .collect();
+                        monomorphize_enum(mono, base_e, &sub_tys, enum_map, fn_map, worklist);
                     }
                 }
 

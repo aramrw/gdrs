@@ -132,6 +132,21 @@ pub fn type_check_call<'a>(
                     typed_args.push(t_arg);
                 }
             }
+
+            if raw_name.ends_with("push") && typed_args.len() >= 2 {
+                if let Expr::Ident(vec_var_name, _) = &args[0] {
+                    let pushed_ty = typed_args[1].ty();
+                    if pushed_ty != Type::Int && pushed_ty != Type::Unit {
+                        let new_vec_ty = Type::Vec(crate::ast::intern_type(pushed_ty));
+                        if let Some(info) = scopes.lookup_mut(vec_var_name) {
+                            info.ty = new_vec_ty;
+                        }
+                        if let TypedExpr::Ident(_, t_ty, _) = &mut typed_args[0] {
+                            *t_ty = new_vec_ty;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -194,10 +209,7 @@ pub fn type_check_call<'a>(
             | "format!"
             | "vec"
             | "vec!"
-            | "push"
             | "push_str"
-            | "pop"
-            | "len"
             | "arg_count"
             | "arg_at"
             | "args_count"
@@ -206,7 +218,6 @@ pub fn type_check_call<'a>(
             | "thread"
             | "thread!"
             | "spawn!"
-            | "iter"
             | "iter!"
     );
     if is_intrinsic_macro {
@@ -302,24 +313,53 @@ pub fn type_check_call<'a>(
         };
 
         if !base_struct.is_empty() {
-            let actual_args = if !typed_args.is_empty() && matches!(typed_args[0].ty(), Type::Obj(_) | Type::Enum(_)) {
-                &typed_args[1..]
-            } else {
-                &typed_args[..]
-            };
             let mut type_args = Vec::new();
-            for a in actual_args {
-                let t = a.ty();
-                if !matches!(t, Type::Unit) && !type_args.contains(&t) {
-                    type_args.push(t);
+            if !typed_args.is_empty() {
+                if let Type::Vec(inner) = typed_args[0].ty() {
+                    type_args.push(*inner);
+                }
+            }
+            if type_args.is_empty() && !typed_args.is_empty() {
+                if let Type::Obj(obj_name) = typed_args[0].ty() {
+                    let name_str = obj_name.to_string();
+                    if let Some((_, suffix)) = name_str.rsplit_once('_') {
+                        if type_ctx.contains_struct(suffix) || type_ctx.contains_enum(suffix) {
+                            type_args.push(Type::Obj(crate::ast::intern_str(suffix)));
+                        }
+                    }
+                }
+            }
+            if type_args.is_empty() {
+                let actual_args = if !typed_args.is_empty() && matches!(typed_args[0].ty(), Type::Obj(_) | Type::Enum(_)) {
+                    &typed_args[1..]
+                } else {
+                    &typed_args[..]
+                };
+                for a in actual_args {
+                    let t = a.ty();
+                    if !matches!(t, Type::Unit) && !type_args.contains(&t) {
+                        type_args.push(t);
+                    }
                 }
             }
             if !type_args.is_empty() {
+                let lookup_base = if let Some((base, _)) = base_struct.rsplit_once('_') {
+                    if type_ctx.mono.borrow().struct_templates.contains_key(base)
+                        || type_ctx.mono.borrow().struct_templates.iter().any(|(k, _)| k.ends_with(&format!("_{base}")) || base.ends_with(k))
+                    {
+                        base.to_string()
+                    } else {
+                        base_struct.clone()
+                    }
+                } else {
+                    base_struct.clone()
+                };
                 if let Some(mangled_struct) = crate::sanal::mono::monomorphize_struct(
                     type_ctx.mono,
-                    &base_struct,
+                    &lookup_base,
                     &type_args,
                     type_ctx.struct_map,
+                    type_ctx.enum_map,
                     type_ctx.fn_map,
                     type_ctx.worklist,
                 ) {
