@@ -143,10 +143,10 @@ pub fn type_check_call<'a>(
 
     if is_enum_candidate {
         let normalized_name = match raw_name {
-            "Some" => "std_core_Option_Some".to_string(),
-            "None" => "std_core_Option_None".to_string(),
-            "Ok" => "std_core_Result_Ok".to_string(),
-            "Err" => "std_core_Result_Err".to_string(),
+            "Some" | "Option::Some" | "Option_Some" => "std_core_Option_Some".to_string(),
+            "None" | "Option::None" | "Option_None" => "std_core_Option_None".to_string(),
+            "Ok" | "Result::Ok" | "Result_Ok" => "std_core_Result_Ok".to_string(),
+            "Err" | "Result::Err" | "Result_Err" => "std_core_Result_Err".to_string(),
             _ => {
                 let n = raw_name.replace("::", "_");
                 if n.starts_with("Opt_") {
@@ -208,8 +208,6 @@ pub fn type_check_call<'a>(
             | "spawn!"
             | "iter"
             | "iter!"
-            | "for_each"
-            | "for_each!"
     );
     if is_intrinsic_macro {
         let clean_macro = name.trim_end_matches('!');

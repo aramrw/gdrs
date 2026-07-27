@@ -3,6 +3,6 @@ use std::time::Instant
 fn main():
 	let now = Instant.now()
 	log!("Benchmarking 1,000,000 closure iterations...")
-	(0..1000000).iter().for_each(|x| x + x)
+	(0..1000000).for_each(|x| x + x)
 
-	log!(now.ms())
+	log!("Elapsed ms:", now.ms())

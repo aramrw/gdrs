@@ -1,0 +1,7 @@
+// std/libc.gdrs - Standard C library declarations for heap allocation and memory
+
+extern "C":
+	fn malloc(size: i64) -> i64
+	fn realloc(ptr: i64, size: i64) -> i64
+	fn free(ptr: i64)
+	fn memcpy(dest: i64, src: i64, count: i64) -> i64

@@ -323,7 +323,13 @@ pub fn compile_expr<M: Module>(
         TypedExpr::Return(opt_expr, _) => {
             if let Some(e) = opt_expr {
                 let ret_val = compile_expr(builder, e, vars, var_counter, module, struct_layouts);
-                builder.ins().return_(&[ret_val]);
+                let ret_coerced = if !builder.func.signature.returns.is_empty() {
+                    let target_ty = builder.func.signature.returns[0].value_type;
+                    coerce_val(builder, ret_val, target_ty)
+                } else {
+                    ret_val
+                };
+                builder.ins().return_(&[ret_coerced]);
             } else {
                 // Bare `return` — void return (no value)
                 builder.ins().return_(&[]);

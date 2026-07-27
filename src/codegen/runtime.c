@@ -157,48 +157,6 @@ int64_t intrinsic_arc_drop(int64_t ptr_val) {
     return 0;
 }
 
-// Iterator Intrinsics
-int64_t intrinsic_iter_for_each(int64_t range_ptr_val, int64_t func_ptr) {
-    if (range_ptr_val == 0 || func_ptr == 0) return 0;
-    uint64_t* ptr = (uint64_t*)range_ptr_val;
-    uint64_t start = ptr[0];
-    uint64_t end = ptr[1];
-    int64_t (*f)(int64_t) = (int64_t (*)(int64_t))func_ptr;
-    for (uint64_t i = start; i < end; i++) {
-        f((int64_t)i);
-    }
-    return 0;
-}
-
-int64_t intrinsic_iter_map(int64_t range_ptr_val, int64_t closure_ptr) {
-    if (range_ptr_val == 0) return 0;
-    uint64_t* src = (uint64_t*)range_ptr_val;
-    uint64_t* map_iter = (uint64_t*)malloc(24);
-    map_iter[0] = src[0];
-    map_iter[1] = src[1];
-    map_iter[2] = (uint64_t)closure_ptr;
-    return (int64_t)map_iter;
-}
-
-int64_t intrinsic_map_for_each(int64_t map_iter_val, int64_t consumer_func_ptr) {
-    if (map_iter_val == 0) return 0;
-    uint64_t* map_iter = (uint64_t*)map_iter_val;
-    uint64_t start = map_iter[0];
-    uint64_t end = map_iter[1];
-    int64_t (*map_fn)(int64_t) = (int64_t (*)(int64_t))map_iter[2];
-    int64_t (*consumer_fn)(int64_t) = (int64_t (*)(int64_t))consumer_func_ptr;
-
-    if (!map_fn) return 0;
-
-    for (uint64_t i = start; i < end; i++) {
-        int64_t mapped = map_fn((int64_t)i);
-        if (consumer_fn) {
-            consumer_fn(mapped);
-        }
-    }
-    return 0;
-}
-
 // Vector Intrinsics
 int64_t intrinsic_vec_push(int64_t vec_ptr_val, int64_t val) {
     if (vec_ptr_val == 0) return 0;

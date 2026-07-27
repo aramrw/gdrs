@@ -142,6 +142,73 @@ pub fn stmt_parser<'a>(
             .then(block.clone())
             .map_with_span(|(cond, body), span| Expr::While(Box::new(cond), Box::new(body), span));
 
+        let for_stmt = just(Token::For)
+            .ignore_then(select! { Token::Ident(s) => s })
+            .then_ignore(just(Token::In))
+            .then(math.clone())
+            .then_ignore(just(Token::Colon))
+            .then_ignore(just(Token::Newline).or_not())
+            .then(block.clone())
+            .map_with_span(|((item_name, iter_expr), body_block), span| {
+                static FOR_LOOP_COUNTER: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(0);
+                let loop_id = FOR_LOOP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let iter_var = format!("__iter_{}", loop_id);
+
+                let body_stmts = match body_block {
+                    Expr::Block(stmts, _) => stmts,
+                    single => vec![single],
+                };
+
+                let mut arm_body = body_stmts;
+                arm_body.push(Expr::Bool(true, span.clone()));
+
+                let match_cond = Expr::Match(
+                    Box::new(Expr::Call(
+                        "next".to_string(),
+                        vec![Expr::Ident(iter_var.clone(), span.clone())],
+                        span.clone(),
+                    )),
+                    vec![
+                        crate::ast::MatchArm {
+                            variant_name: "Some".to_string(),
+                            bindings: vec![item_name],
+                            body: arm_body,
+                            span: span.clone(),
+                        },
+                        crate::ast::MatchArm {
+                            variant_name: "_".to_string(),
+                            bindings: vec![],
+                            body: vec![Expr::Bool(false, span.clone())],
+                            span: span.clone(),
+                        },
+                    ],
+                    span.clone(),
+                );
+
+                Expr::Block(
+                    vec![
+                        Expr::Let(
+                            iter_var,
+                            None,
+                            true,
+                            Box::new(Expr::Call(
+                                "iter".to_string(),
+                                vec![iter_expr],
+                                span.clone(),
+                            )),
+                            span.clone(),
+                        ),
+                        Expr::While(
+                            Box::new(match_cond),
+                            Box::new(Expr::Block(vec![], span.clone())),
+                            span.clone(),
+                        ),
+                    ],
+                    span,
+                )
+            });
+
         let if_stmt = just(Token::If)
             .ignore_then(math.clone())
             .then_ignore(just(Token::Colon))
@@ -286,6 +353,7 @@ pub fn stmt_parser<'a>(
                     .or(match_stmt)
                     .or(if_stmt)
                     .or(while_stmt)
+                    .or(for_stmt)
                     .or(macro_call)
                     .or(math_stmt)
                     .or(block),

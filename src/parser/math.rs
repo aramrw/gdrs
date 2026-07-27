@@ -274,9 +274,78 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
             .foldl(|target, post| match post {
                 Postfix::DotCall(method, args, method_span) => {
                     let span = target.span().start..method_span.end;
-                    let mut call_args = vec![target];
-                    call_args.extend(args);
-                    Expr::Call(method, call_args, span)
+                    if method == "for_each" && args.len() == 1 {
+                        if let Expr::Closure(params, closure_body, _) = &args[0] {
+                            static FOR_EACH_COUNTER: std::sync::atomic::AtomicUsize =
+                                std::sync::atomic::AtomicUsize::new(0);
+                            let loop_id =
+                                FOR_EACH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let iter_var = format!("__iter_{}", loop_id);
+                            let item_name =
+                                params.first().cloned().unwrap_or_else(|| "_".to_string());
+
+                            let body_stmts = match closure_body.as_ref() {
+                                Expr::Block(stmts, _) => stmts.clone(),
+                                single => vec![single.clone()],
+                            };
+
+                            let mut arm_body = body_stmts;
+                            arm_body.push(Expr::Bool(true, span.clone()));
+
+                            let match_cond = Expr::Match(
+                                Box::new(Expr::Call(
+                                    "next".to_string(),
+                                    vec![Expr::Ident(iter_var.clone(), span.clone())],
+                                    span.clone(),
+                                )),
+                                vec![
+                                    crate::ast::MatchArm {
+                                        variant_name: "Some".to_string(),
+                                        bindings: vec![item_name],
+                                        body: arm_body,
+                                        span: span.clone(),
+                                    },
+                                    crate::ast::MatchArm {
+                                        variant_name: "_".to_string(),
+                                        bindings: vec![],
+                                        body: vec![Expr::Bool(false, span.clone())],
+                                        span: span.clone(),
+                                    },
+                                ],
+                                span.clone(),
+                            );
+
+                            Expr::Block(
+                                vec![
+                                    Expr::Let(
+                                        iter_var,
+                                        None,
+                                        true,
+                                        Box::new(Expr::Call(
+                                            "iter".to_string(),
+                                            vec![target],
+                                            span.clone(),
+                                        )),
+                                        span.clone(),
+                                    ),
+                                    Expr::While(
+                                        Box::new(match_cond),
+                                        Box::new(Expr::Block(vec![], span.clone())),
+                                        span.clone(),
+                                    ),
+                                ],
+                                span,
+                            )
+                        } else {
+                            let mut call_args = vec![target];
+                            call_args.extend(args);
+                            Expr::Call(method, call_args, span)
+                        }
+                    } else {
+                        let mut call_args = vec![target];
+                        call_args.extend(args);
+                        Expr::Call(method, call_args, span)
+                    }
                 }
                 Postfix::Dot(field, field_span) => {
                     let span = target.span().start..field_span.end;

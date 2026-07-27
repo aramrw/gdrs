@@ -1,0 +1,19 @@
+// std/iter.gdrs - Standard iterator trait and Range iterator
+
+obj Range:
+	start: i64
+	end: i64
+
+trait Iterator:
+	fn next(self) -> Option<i64>
+
+impl Range:
+	fn iter(self) -> Range:
+		return self
+
+	fn next(mut self) -> Option<i64>:
+		if self.start < self.end:
+			let val = self.start
+			self.start = self.start + 1
+			return Option::Some(val)
+		return Option::None

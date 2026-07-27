@@ -2,7 +2,7 @@ use std::fs::File
 use std::time::Instant
 
 fn read_file_test() -> Result<String>:
-	let file = File::open("./main.gdrs")?
+	let file = File::open("./examples/read_file.gdrs")?
 	let contents = file.read_to_string()?
 	return Ok(contents)
 

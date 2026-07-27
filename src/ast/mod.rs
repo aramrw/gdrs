@@ -122,6 +122,10 @@ pub enum Token {
     String(String),
     #[token("while")]
     While,
+    #[token("for")]
+    For,
+    #[token("in")]
+    In,
     #[token("if")]
     If,
     #[token(",")]

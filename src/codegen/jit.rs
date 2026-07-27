@@ -7,10 +7,10 @@ use cranelift_native::builder as native_builder;
 
 use crate::codegen::intrinsics::{
     gdrs_resolve_symbol, intrinsic_arc_clone, intrinsic_arc_drop, intrinsic_arc_new, intrinsic_arg_at,
-    intrinsic_arg_count, intrinsic_args_str, intrinsic_execvp, intrinsic_iter_for_each,
-    intrinsic_iter_map, intrinsic_log, intrinsic_map_for_each, intrinsic_panic, intrinsic_push_str,
+    intrinsic_arg_count, intrinsic_args_str, intrinsic_execvp,
+    intrinsic_log, intrinsic_panic, intrinsic_push_str,
     intrinsic_rc_clone, intrinsic_rc_drop, intrinsic_rc_new, intrinsic_spawn_thread,
-    intrinsic_vec_for_each, intrinsic_vec_new, intrinsic_vec_pop, intrinsic_vec_push, intrinsic_waitpid,
+    intrinsic_vec_new, intrinsic_vec_pop, intrinsic_vec_push, intrinsic_waitpid,
 };
 
 /// Creates a new Cranelift JITModule configured for the host CPU architecture.
@@ -36,10 +36,6 @@ pub fn create_jit_module() -> JITModule {
     builder.symbol("intrinsic_rc_drop", intrinsic_rc_drop as *const u8);
     builder.symbol("intrinsic_arc_drop", intrinsic_arc_drop as *const u8);
     builder.symbol("intrinsic_spawn_thread", intrinsic_spawn_thread as *const u8);
-    builder.symbol("intrinsic_iter_for_each", intrinsic_iter_for_each as *const u8);
-    builder.symbol("intrinsic_vec_for_each", intrinsic_vec_for_each as *const u8);
-    builder.symbol("intrinsic_iter_map", intrinsic_iter_map as *const u8);
-    builder.symbol("intrinsic_map_for_each", intrinsic_map_for_each as *const u8);
     builder.symbol("intrinsic_arg_count", intrinsic_arg_count as *const u8);
     builder.symbol("intrinsic_arg_at", intrinsic_arg_at as *const u8);
     builder.symbol("intrinsic_args_str", intrinsic_args_str as *const u8);

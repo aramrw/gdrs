@@ -1,8 +1,8 @@
 fn main():
-	log!("--- 1. Range Iteration (0..5).iter() ---")
-	(0..5).iter().for_each(|x| log!("Item:", x))
+	log!("--- 1. Range Iteration with .for_each ---")
+	(0..5).for_each(|x| log!("Item:", x))
 
-	log!("--- 2. Range Mapping (0..5).map(|x| x * 10) ---")
-	(0..5).map(|x| x * 10).for_each(|x|:
-		log!("Mapped item (x * 10):", x)
-	)
+	log!("--- 2. Range Iteration with for loop ---")
+	for x in (0..5):
+		let mapped = x * 10
+		log!("Mapped item (x * 10):", mapped)

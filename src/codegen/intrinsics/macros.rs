@@ -436,34 +436,6 @@ pub fn compile_macro_call<M: Module>(
                 builder.ins().iconst(types::I64, 0)
             }
         }
-        "for_each" => {
-            if args.len() >= 2 {
-                let target_val =
-                    compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
-                let func_val =
-                    compile_expr(builder, &args[1], vars, var_counter, module, struct_layouts);
-                let target_ptr =
-                    crate::codegen::expr::coerce_val(builder, target_val, types::I64);
-                let func_ptr =
-                    crate::codegen::expr::coerce_val(builder, func_val, types::I64);
-
-                let intrinsic_name = match args[0].ty() {
-                    Type::Obj(n) if n == "Range" => "intrinsic_iter_for_each",
-                    _ => "intrinsic_vec_for_each",
-                };
-
-                let mut sig = module.make_signature();
-                sig.params.push(AbiParam::new(types::I64));
-                sig.params.push(AbiParam::new(types::I64));
-
-                let callee = module
-                    .declare_function(intrinsic_name, Linkage::Import, &sig)
-                    .unwrap();
-                let local_callee = module.declare_func_in_func(callee, builder.func);
-                builder.ins().call(local_callee, &[target_ptr, func_ptr]);
-            }
-            builder.ins().iconst(types::I64, 0)
-        }
         _ => panic!("Unknown intrinsic macro: '{name}!'"),
     }
 }

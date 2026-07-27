@@ -97,6 +97,13 @@ pub fn type_check_deref_assign<'a>(
                 span.clone(),
             ))
         }
+        Type::Int | Type::I32 => {
+            Some(TypedExpr::DerefAssign(
+                Box::new(t_ptr),
+                Box::new(t_val),
+                span.clone(),
+            ))
+        }
         other => {
             errors.push(SemanticError {
                 code: "E0614",

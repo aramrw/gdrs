@@ -33,26 +33,24 @@ pub fn load_program(entry_file: &Path) -> Result<Program, String> {
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
 
-    let std_core_path = Path::new("std/core.gdrs");
-    if std_core_path.exists() {
-        let _ = load_file_recursive(
-            std_core_path,
-            Path::new("."),
-            &["std".to_string(), "core".to_string()],
-            &mut loaded_files,
-            &mut merged_program,
-        );
-    }
-
-    let std_time_path = Path::new("std/time.gdrs");
-    if std_time_path.exists() {
-        let _ = load_file_recursive(
-            std_time_path,
-            Path::new("."),
-            &["std".to_string(), "time".to_string()],
-            &mut loaded_files,
-            &mut merged_program,
-        );
+    let std_files = [
+        ("std/libc.gdrs", vec!["std".to_string(), "libc".to_string()]),
+        ("std/core.gdrs", vec!["std".to_string(), "core".to_string()]),
+        ("std/iter.gdrs", vec!["std".to_string(), "iter".to_string()]),
+        ("std/vec.gdrs", vec!["std".to_string(), "vec".to_string()]),
+        ("std/time.gdrs", vec!["std".to_string(), "time".to_string()]),
+    ];
+    for (file_path, prefix) in std_files {
+        let path = Path::new(file_path);
+        if path.exists() {
+            let _ = load_file_recursive(
+                path,
+                Path::new("."),
+                &prefix,
+                &mut loaded_files,
+                &mut merged_program,
+            );
+        }
     }
 
     load_file_recursive(entry_file, &base_dir, &[], &mut loaded_files, &mut merged_program)?;
