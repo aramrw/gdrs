@@ -62,10 +62,16 @@ impl Vec:
 	fn is_empty(self) -> bool:
 		return self.len == 0
 
+	fn into_iter(self) -> VecIter:
+		return VecIter{ vec_ptr: self.ptr, idx: 0, len: self.len }
+
 	fn iter(self) -> VecIter:
 		return VecIter{ vec_ptr: self.ptr, idx: 0, len: self.len }
 
 impl VecIter:
+	fn into_iter(self) -> VecIter:
+		return self
+
 	fn iter(self) -> VecIter:
 		return self
 
@@ -78,3 +84,4 @@ impl VecIter:
 			self.idx = self.idx + 1
 			return Option::Some(val)
 		return Option::None
+

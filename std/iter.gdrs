@@ -7,7 +7,13 @@ obj Range:
 trait Iterator:
 	fn next(self) -> Option<i64>
 
+trait IntoIterator:
+	fn into_iter(self) -> Self
+
 impl Range:
+	fn into_iter(self) -> Range:
+		return self
+
 	fn iter(self) -> Range:
 		return self
 
@@ -17,3 +23,4 @@ impl Range:
 			self.start = self.start + 1
 			return Option::Some(val)
 		return Option::None
+

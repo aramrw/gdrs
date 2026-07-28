@@ -318,11 +318,11 @@ pub fn math_parser<'a>(
                             );
 
                             let iter_expr = match &target {
-                                Expr::Call(name, _, _) if name == "iter" || name.ends_with("_iter") => {
+                                Expr::Call(name, _, _) if name == "into_iter" || name.ends_with("_iter") => {
                                     target.clone()
                                 }
                                 _ => Expr::Call(
-                                    "iter".to_string(),
+                                    "into_iter".to_string(),
                                     vec![target],
                                     span.clone(),
                                 ),

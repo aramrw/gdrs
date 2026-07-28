@@ -226,16 +226,6 @@ pub fn type_check_let<'a>(
         ty
     };
 
-    if name.starts_with("__iter_") {
-        if let TypedExpr::Call(_, args, _, _) = &typed_val {
-            if !args.is_empty() {
-                if let Type::Vec(elem_ty) = args[0].ty() {
-                    final_ty = Type::Vec(elem_ty);
-                }
-            }
-        }
-    }
-
     if let TypedExpr::Ident(rhs_name, rhs_ty, _) = &typed_val {
         if !rhs_ty.is_copy() {
             scopes.mark_moved(rhs_name);

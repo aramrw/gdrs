@@ -431,13 +431,6 @@ pub fn compile_macro_call<M: Module>(
 
             vec_ptr
         }
-        "iter" => {
-            if !args.is_empty() {
-                compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts)
-            } else {
-                builder.ins().iconst(types::I64, 0)
-            }
-        }
         _ => panic!("Unknown intrinsic macro: '{name}!'"),
     }
 }

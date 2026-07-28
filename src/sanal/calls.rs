@@ -90,6 +90,27 @@ pub fn type_check_call<'a>(
     args: &[Expr],
     span: &Span,
 ) -> Option<TypedExpr> {
+    if !args.is_empty() {
+        if let Expr::Ident(ref struct_name, _) = args[0] {
+            if scopes.lookup(struct_name).is_none()
+                && (type_ctx.contains_struct(struct_name) || type_ctx.contains_enum(struct_name))
+            {
+                let static_name = format!("{struct_name}::{raw_name}");
+                let mangled = format!("{struct_name}_{raw_name}");
+                if type_ctx.contains_fn(&mangled) || type_ctx.contains_fn(&static_name) {
+                    return type_check_call(
+                        scopes,
+                        errors,
+                        type_ctx,
+                        &static_name,
+                        &args[1..],
+                        span,
+                    );
+                }
+            }
+        }
+    }
+
     let mut typed_args = Vec::new();
     if !args.is_empty() {
         if let Some(first_arg) = type_check_expr(scopes, errors, type_ctx, &args[0]) {
@@ -244,7 +265,6 @@ pub fn type_check_call<'a>(
             | "thread"
             | "thread!"
             | "spawn!"
-            | "iter!"
     );
     if is_intrinsic_macro {
         let clean_macro = name.trim_end_matches('!');
@@ -262,13 +282,6 @@ pub fn type_check_call<'a>(
         let macro_ret_ty = match name.trim_end_matches('!') {
             "format" | "arg_at" | "args_at" | "args" => Type::Str,
             "arg_count" | "args_count" | "thread" | "spawn" | "len" => Type::Int,
-            "iter" => {
-                if !typed_args.is_empty() {
-                    typed_args[0].ty()
-                } else {
-                    Type::Int
-                }
-            }
             "vec" => {
                 let elem_ty = if !typed_args.is_empty() {
                     typed_args[0].ty()

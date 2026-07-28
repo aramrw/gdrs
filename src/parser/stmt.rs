@@ -193,7 +193,7 @@ pub fn stmt_parser<'a>(
                             None,
                             true,
                             Box::new(Expr::Call(
-                                "iter".to_string(),
+                                "into_iter".to_string(),
                                 vec![iter_expr],
                                 span.clone(),
                             )),

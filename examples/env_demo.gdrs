@@ -4,7 +4,6 @@ use std::env::{args, var, set_var}
 use std::core::{Result, Option}
 
 fn main():
-	log!("--- Command Line Arguments ---")
 	let mut arg_iter = args()
 	log!("Total arg count:", arg_iter.len())
 
@@ -16,7 +15,6 @@ fn main():
 			Option::None =>
 				done = true
 
-	log!("--- Environment Variables ---")
 	set_var("GDRS_ENV_TEST", "rocks")
 
 	match var("GDRS_ENV_TEST"):
