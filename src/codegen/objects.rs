@@ -164,6 +164,18 @@ pub fn compile_enum_construct<M: Module>(
     module: &mut M,
     struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
+    let is_npo = _enum_name.starts_with("std_core_Option_ptr")
+        || _enum_name.starts_with("std_core_Option_void")
+        || _enum_name.contains("_ptr_")
+        || _enum_name.contains("_void");
+    if is_npo {
+        if _variant_name.ends_with("None") || *disc == 1 || payload_exprs.is_empty() {
+            return builder.ins().iconst(types::I64, 0);
+        } else {
+            return compile_expr(builder, &payload_exprs[0], vars, var_counter, module, struct_layouts);
+        }
+    }
+
     use cranelift_codegen::ir::AbiParam;
     let total_bytes = ((1 + payload_exprs.len()) * 8) as i64;
     let size_val = builder

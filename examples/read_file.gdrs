@@ -7,19 +7,15 @@ fn read_file_test() -> Result<String>:
 	return Ok(contents)
 
 fn main():
-	log!("--- Benchmarking std::fs::File read using std::time::Instant ---")
-
 	let start = Instant::now()
-
 	let res = read_file_test()
-
-	let elapsed_us = start.us()
-	let elapsed_ms = start.ms()
+	let us = start.us()
+	let ms = start.ms()
 
 	if res.is_ok():
-		log!("Successfully read file!")
-		log!("Time taken (microseconds):", elapsed_us)
-		log!("Time taken (milliseconds):", elapsed_ms)
+		log!("sucess")
+		log!("(microseconds):", us)
+		log!("(milliseconds):", us)
 
 		log!(res.unwrap())
 	else:

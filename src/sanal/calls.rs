@@ -191,7 +191,26 @@ pub fn type_check_call<'a>(
     }
 
     let name = raw_name.replace("::", "_");
-    let is_intrinsic_macro = matches!(
+    let is_obj_method = if !typed_args.is_empty() {
+        let type_name = match typed_args[0].ty() {
+            Type::Obj(s) | Type::Enum(s) => Some(s.to_string()),
+            Type::Ref(inner) | Type::MutRef(inner) => match inner {
+                Type::Obj(s) | Type::Enum(s) => Some(s.to_string()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(tn) = type_name {
+            let mangled = format!("{tn}_{name}");
+            type_ctx.contains_fn(&mangled)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let is_intrinsic_macro = !is_obj_method && matches!(
         name.as_str(),
         "log"
             | "log!"
@@ -363,7 +382,7 @@ pub fn type_check_call<'a>(
     }
 
     // 3. Fallback to direct fn_map lookup if not already resolved to a method
-    if resolved_name == name {
+    if resolved_name == name && !type_ctx.extern_signatures.contains_key(&name) && !type_ctx.extern_fn_names.contains(&name) {
         if let Some(target_func) = type_ctx.get_fn(&name) {
             resolved_name = target_func.name;
         }
@@ -382,9 +401,7 @@ pub fn type_check_call<'a>(
         });
     }
 
-    let ret_ty = if scopes.lookup(&resolved_name).is_some() {
-        Type::Int
-    } else if let Some(target_func) = type_ctx.get_fn(&resolved_name) {
+    let ret_ty = if let Some(target_func) = type_ctx.get_fn(&resolved_name) {
         if target_func.params.len() != typed_args.len() && !typed_args.is_empty() {
             if (target_func.params.is_empty() || target_func.params[0].name != "self")
                 && target_func.params.len() == typed_args.len() - 1
@@ -480,6 +497,8 @@ pub fn type_check_call<'a>(
             }
         }
         *ext_ret_ty
+    } else if scopes.lookup(&resolved_name).is_some() {
+        Type::Int
     } else {
         errors.push(SemanticError {
             code: "E0425",

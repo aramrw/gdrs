@@ -39,6 +39,33 @@ pub unsafe extern "C" fn gdrs_resolve_symbol(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn gdrs_malloc(size: usize) -> *mut std::ffi::c_void {
+    unsafe { libc::malloc(size) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gdrs_free(ptr: *mut std::ffi::c_void) {
+    if !ptr.is_null() {
+        unsafe { libc::free(ptr); }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gdrs_realloc(ptr: *mut std::ffi::c_void, size: usize) -> *mut std::ffi::c_void {
+    unsafe { libc::realloc(ptr, size) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gdrs_memcpy(dest: *mut std::ffi::c_void, src: *const std::ffi::c_void, count: usize) -> *mut std::ffi::c_void {
+    unsafe { libc::memcpy(dest, src, count) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gdrs_memset(ptr: *mut std::ffi::c_void, val: i32, count: usize) -> *mut std::ffi::c_void {
+    unsafe { libc::memset(ptr, val, count) }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_panic(msg_ptr: *const std::os::raw::c_char) -> ! {
     let msg = if msg_ptr.is_null() {
         "explicit panic"

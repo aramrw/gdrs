@@ -44,6 +44,8 @@ pub fn type_suffix(ty: &Type) -> String {
         Type::Vec(t) => format!("vec_{}", type_suffix(t)),
         Type::Rc(t) => format!("rc_{}", type_suffix(t)),
         Type::Arc(t) => format!("arc_{}", type_suffix(t)),
+        Type::Void => "void".to_string(),
+        Type::Ptr(t) => format!("ptr_{}", type_suffix(t)),
         Type::Ref(t) => format!("ref_{}", type_suffix(t)),
         Type::MutRef(t) => format!("mutref_{}", type_suffix(t)),
     }
@@ -112,7 +114,7 @@ fn collect_generics_from_type(ty: &Type, params: &mut Vec<String>) {
             }
         }
         Type::Ref(inner) | Type::MutRef(inner) | Type::Rc(inner) | Type::Arc(inner)
-        | Type::Vec(inner) | Type::Slice(inner) | Type::Array(inner, _) => {
+        | Type::Ptr(inner) | Type::Vec(inner) | Type::Slice(inner) | Type::Array(inner, _) => {
             collect_generics_from_type(inner, params);
         }
         _ => {}
@@ -129,6 +131,7 @@ pub fn substitute_type(ty: Type, env: &HashMap<String, Type>) -> Type {
                 ty
             }
         }
+        Type::Ptr(inner) => Type::Ptr(intern_type(substitute_type(*inner, env))),
         Type::Ref(inner) => Type::Ref(intern_type(substitute_type(*inner, env))),
         Type::MutRef(inner) => Type::MutRef(intern_type(substitute_type(*inner, env))),
         Type::Rc(inner) => Type::Rc(intern_type(substitute_type(*inner, env))),
@@ -392,6 +395,11 @@ pub fn substitute_expr(expr: &Expr, env: &HashMap<String, Type>) -> Expr {
         Expr::Closure(params, body, span) => Expr::Closure(
             params.clone(),
             Box::new(substitute_expr(body, env)),
+            span.clone(),
+        ),
+        Expr::Cast(inner, target_ty, span) => Expr::Cast(
+            Box::new(substitute_expr(inner, env)),
+            substitute_type(*target_ty, env),
             span.clone(),
         ),
         Expr::Range(start, end, span) => Expr::Range(

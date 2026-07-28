@@ -1,0 +1,77 @@
+// std/string.gdrs - Heap allocated String collection using libc
+use std::libc::{malloc, realloc, free, memcpy, memset, strlen, strdup}
+use std::core::{Option}
+
+obj String:
+	ptr: *i64
+	len: i64
+	cap: i64
+
+impl String:
+	fn new() -> String:
+		return String{ ptr: 0 as *i64, len: 0, cap: 0 }
+
+	fn from(s: str) -> String:
+		unsafe:
+			let length = strlen(s)
+			if length == 0:
+				return String{ ptr: 0 as *i64, len: 0, cap: 0 }
+			let mut p_val = 0 as *i64
+			match strdup(s):
+				Option::Some(p) =>
+					p_val = p as *i64
+				Option::None =>
+					return String{ ptr: 0 as *i64, len: 0, cap: 0 }
+			return String{ ptr: p_val, len: length, cap: length + 1 }
+
+	fn len(self) -> i64:
+		return self.len
+
+	fn is_empty(self) -> bool:
+		return self.len == 0
+
+	fn push_str(mut self, s: str) -> String:
+		unsafe:
+			let s_len = strlen(s)
+			if s_len == 0:
+				return self
+			let needed_cap = self.len + s_len + 1
+			if self.cap == 0:
+				let mut new_cap = 16
+				if needed_cap > new_cap:
+					new_cap = needed_cap
+				self.cap = new_cap
+				match malloc(self.cap):
+					Option::Some(p) =>
+						self.ptr = p as *i64
+					Option::None =>
+						return self
+				memcpy(self.ptr as *void, s as *void, s_len)
+				self.len = s_len
+				let end_ptr = (self.ptr as i64) + self.len
+				memset(end_ptr as *void, 0, 1)
+			else:
+				if needed_cap > self.cap:
+					self.cap = needed_cap * 2
+					match realloc(self.ptr as *void, self.cap):
+						Option::Some(p) =>
+							self.ptr = p as *i64
+						Option::None =>
+							return self
+				let dst_ptr = (self.ptr as i64) + self.len
+				memcpy(dst_ptr as *void, s as *void, s_len)
+				self.len = self.len + s_len
+				let end_ptr = (self.ptr as i64) + self.len
+				memset(end_ptr as *void, 0, 1)
+		return self
+
+	fn as_str(self) -> str:
+		return self.ptr as str
+
+	fn free(mut self):
+		unsafe:
+			if (self.ptr as i64) != 0:
+				free(self.ptr as *void)
+				self.ptr = 0 as *i64
+				self.len = 0
+				self.cap = 0

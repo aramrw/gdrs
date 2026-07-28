@@ -38,6 +38,7 @@ pub fn load_program(entry_file: &Path) -> Result<Program, String> {
         ("std/core.gdrs", vec!["std".to_string(), "core".to_string()]),
         ("std/iter.gdrs", vec!["std".to_string(), "iter".to_string()]),
         ("std/vec.gdrs", vec!["std".to_string(), "vec".to_string()]),
+        ("std/string.gdrs", vec!["std".to_string(), "string".to_string()]),
         ("std/time.gdrs", vec!["std".to_string(), "time".to_string()]),
     ];
     for (file_path, prefix) in std_files {

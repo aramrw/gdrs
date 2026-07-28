@@ -25,6 +25,18 @@ macro_rules! bin_op {
 
 // ── Arithmetic ───────────────────────────────────────────────────────────────
 
+fn type_stride(ty: &Type) -> i64 {
+    match ty {
+        Type::Ptr(inner) => match **inner {
+            Type::I32 | Type::F32 => 4,
+            Type::Int | Type::Float | Type::Str | Type::String | Type::Ptr(_) => 8,
+            Type::Void | Type::Unit => 1,
+            _ => 8,
+        },
+        _ => 1,
+    }
+}
+
 pub fn compile_add<M: Module>(
     builder: &mut FunctionBuilder,
     lhs: &TypedExpr,
@@ -35,9 +47,26 @@ pub fn compile_add<M: Module>(
     module: &mut M,
     struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
-    let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
-    let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
-    let (left, right) = coerce_operands(builder, left, right);
+    let mut left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
+    let mut right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+    let (left_coerced, right_coerced) = coerce_operands(builder, left, right);
+    left = left_coerced;
+    right = right_coerced;
+
+    if let Type::Ptr(_) = lhs.ty() {
+        let stride = type_stride(&lhs.ty());
+        if stride > 1 {
+            right = builder.ins().imul_imm(right, stride);
+        }
+        return builder.ins().iadd(left, right);
+    } else if let Type::Ptr(_) = rhs.ty() {
+        let stride = type_stride(&rhs.ty());
+        if stride > 1 {
+            left = builder.ins().imul_imm(left, stride);
+        }
+        return builder.ins().iadd(left, right);
+    }
+
     if is_float_ty(ty) || is_float_val(builder, left) {
         builder.ins().fadd(left, right)
     } else {
@@ -55,9 +84,20 @@ pub fn compile_sub<M: Module>(
     module: &mut M,
     struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
-    let left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
-    let right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
-    let (left, right) = coerce_operands(builder, left, right);
+    let mut left = compile_expr(builder, lhs, vars, var_counter, module, struct_layouts);
+    let mut right = compile_expr(builder, rhs, vars, var_counter, module, struct_layouts);
+    let (left_coerced, right_coerced) = coerce_operands(builder, left, right);
+    left = left_coerced;
+    right = right_coerced;
+
+    if let Type::Ptr(_) = lhs.ty() {
+        let stride = type_stride(&lhs.ty());
+        if stride > 1 {
+            right = builder.ins().imul_imm(right, stride);
+        }
+        return builder.ins().isub(left, right);
+    }
+
     if is_float_ty(ty) || is_float_val(builder, left) {
         builder.ins().fsub(left, right)
     } else {

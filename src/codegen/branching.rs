@@ -133,6 +133,77 @@ pub fn compile_match<M: Module>(
     let is_unit = *ty == Type::Unit;
     let cranelift_ty = cranelift_type_of(ty);
 
+    let is_npo = match target.ty() {
+        Type::Enum(n) => n.starts_with("std_core_Option_ptr") || n.starts_with("std_core_Option_void") || n.contains("_ptr_") || n.contains("_void"),
+        _ => false,
+    };
+
+    if is_npo {
+        let raw_ptr_val = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
+        let exit_block = builder.create_block();
+        if !is_unit {
+            builder.append_block_param(exit_block, cranelift_ty);
+        }
+
+        for arm in arms {
+            let arm_block = builder.create_block();
+            let next_check_block = builder.create_block();
+
+            if arm.variant_name.ends_with("None") || arm.tag == 1 {
+                let is_match = builder.ins().icmp_imm(IntCC::Equal, raw_ptr_val, 0);
+                builder.ins().brif(is_match, arm_block, &[], next_check_block, &[]);
+            } else if arm.variant_name.ends_with("Some") || arm.tag == 0 {
+                let is_match = builder.ins().icmp_imm(IntCC::NotEqual, raw_ptr_val, 0);
+                builder.ins().brif(is_match, arm_block, &[], next_check_block, &[]);
+            } else {
+                builder.ins().jump(arm_block, &[]);
+            }
+
+            builder.switch_to_block(arm_block);
+            builder.seal_block(arm_block);
+
+            for (b_name, _b_ty) in &arm.bindings {
+                if b_name != "_" {
+                    let var = cranelift_frontend::Variable::from_u32(*var_counter as u32);
+                    *var_counter += 1;
+                    builder.declare_var(var, types::I64);
+                    builder.def_var(var, raw_ptr_val);
+                    vars.insert(b_name.clone(), var);
+                }
+            }
+
+            let mut arm_val = builder.ins().iconst(types::I64, 0);
+            for stmt in &arm.body {
+                arm_val = compile_expr(builder, stmt, vars, var_counter, module, struct_layouts);
+            }
+
+            if !builder.is_unreachable() {
+                if is_unit {
+                    builder.ins().jump(exit_block, &[]);
+                } else {
+                    let coerced = coerce_val(builder, arm_val, cranelift_ty);
+                    builder.ins().jump(exit_block, &[coerced]);
+                }
+            }
+
+            builder.switch_to_block(next_check_block);
+            builder.seal_block(next_check_block);
+        }
+
+        if !builder.is_unreachable() {
+            builder.ins().trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+        }
+
+        builder.switch_to_block(exit_block);
+        builder.seal_block(exit_block);
+
+        if is_unit {
+            return builder.ins().iconst(types::I64, 0);
+        } else {
+            return builder.block_params(exit_block)[0];
+        }
+    }
+
     let target_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
     let tag_val = builder
         .ins()

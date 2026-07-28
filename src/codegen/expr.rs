@@ -201,6 +201,10 @@ pub fn compile_expr<M: Module>(
             struct_layouts,
         ),
 
+        TypedExpr::Cast(inner_expr, _target_ty, _) => {
+            compile_expr(builder, inner_expr, vars, var_counter, module, struct_layouts)
+        }
+
         TypedExpr::Caret(lhs, rhs, _, _) => crate::codegen::binops::compile_caret(
             builder,
             lhs,

@@ -80,6 +80,10 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
                 }
             });
 
+        let ptr_type = just(Token::Star)
+            .ignore_then(type_parser.clone())
+            .map(|inner_ty| Type::Ptr(intern_type(inner_ty)));
+
         select! {
             Token::TypeI64 => Type::Int,
             Token::TypeI32 => Type::I32,
@@ -88,7 +92,10 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             Token::TypeBool => Type::Bool,
             Token::TypeStr => Type::Str,
             Token::TypeString => Type::String,
+            Token::TypeVoid => Type::Void,
+            Token::TypeU8 => Type::Int,
         }
+        .or(ptr_type)
         .or(ref_type)
         .or(path_obj_type)
         .or(generic_type)
@@ -99,7 +106,7 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
     }).boxed();
 
     // 3. Math Expression parser with operator precedence hierarchy
-    let math = math_parser();
+    let math = math_parser(type_parser.clone());
 
     // 4. Recursive statement and block parser
     let stmt = stmt_parser(math, type_parser.clone());
@@ -343,7 +350,14 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             },
         );
 
-    let path_parser = select! { Token::Ident(s) => s }
+    let any_ident = select! {
+        Token::Ident(s) => s,
+        Token::TypeString => "string".to_string(),
+        Token::TypeStr => "str".to_string(),
+    };
+
+    let path_parser = any_ident
+        .clone()
         .separated_by(just(Token::ColonColon))
         .at_least(1);
 
@@ -354,8 +368,10 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
 
     let as_keyword = select! { Token::Ident(s) if s == "as" => s };
 
-    let item_with_alias = select! { Token::Ident(s) => s }
-        .then(as_keyword.clone().ignore_then(select! { Token::Ident(s) => s }).or_not());
+    let item_with_alias = any_ident
+        .clone()
+        .then(as_keyword.clone().ignore_then(any_ident.clone()).or_not());
+
 
     let multi_import_items = item_with_alias
         .separated_by(just(Token::Comma))

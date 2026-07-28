@@ -218,6 +218,10 @@ pub fn type_check_expr<'a>(
         Expr::Ref(inner, is_mut, span) => refs::type_check_ref(scopes, errors, type_ctx, inner, *is_mut, span),
         Expr::Deref(inner, span) => refs::type_check_deref(scopes, errors, type_ctx, inner, span),
         Expr::DerefAssign(ptr, val, span) => refs::type_check_deref_assign(scopes, errors, type_ctx, ptr, val, span),
+        Expr::Cast(inner, target_ty, span) => {
+            let t_inner = type_check_expr(scopes, errors, type_ctx, inner)?;
+            Some(TypedExpr::Cast(Box::new(t_inner), *target_ty, span.clone()))
+        }
     }
 }
 

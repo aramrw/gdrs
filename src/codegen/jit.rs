@@ -41,12 +41,42 @@ pub fn create_jit_module() -> JITModule {
     builder.symbol("intrinsic_args_str", intrinsic_args_str as *const u8);
     builder.symbol("intrinsic_execvp", intrinsic_execvp as *const u8);
     builder.symbol("intrinsic_waitpid", intrinsic_waitpid as *const u8);
+    builder.symbol("malloc", crate::codegen::intrinsics::gdrs_malloc as *const u8);
+    builder.symbol("free", crate::codegen::intrinsics::gdrs_free as *const u8);
+    builder.symbol("realloc", crate::codegen::intrinsics::gdrs_realloc as *const u8);
+    builder.symbol("memcpy", crate::codegen::intrinsics::gdrs_memcpy as *const u8);
+    builder.symbol("memset", crate::codegen::intrinsics::gdrs_memset as *const u8);
+    builder.symbol("strlen", libc::strlen as *const u8);
+    builder.symbol("strdup", libc::strdup as *const u8);
+    builder.symbol("strcmp", libc::strcmp as *const u8);
+    builder.symbol("strncmp", libc::strncmp as *const u8);
+    builder.symbol("strcpy", libc::strcpy as *const u8);
+
+    builder.symbol("std_libc_malloc", crate::codegen::intrinsics::gdrs_malloc as *const u8);
+    builder.symbol("std_libc_free", crate::codegen::intrinsics::gdrs_free as *const u8);
+    builder.symbol("std_libc_realloc", crate::codegen::intrinsics::gdrs_realloc as *const u8);
+    builder.symbol("std_libc_memcpy", crate::codegen::intrinsics::gdrs_memcpy as *const u8);
+    builder.symbol("std_libc_memset", crate::codegen::intrinsics::gdrs_memset as *const u8);
+    builder.symbol("std_libc_strlen", libc::strlen as *const u8);
+    builder.symbol("std_libc_strdup", libc::strdup as *const u8);
+    builder.symbol("std_libc_strcmp", libc::strcmp as *const u8);
+    builder.symbol("std_libc_strncmp", libc::strncmp as *const u8);
+    builder.symbol("std_libc_strcpy", libc::strcpy as *const u8);
 
     builder.symbol_lookup_fn(Box::new(|name| {
-        let c_str = std::ffi::CString::new(name).ok()?;
+        let clean_name = name.strip_prefix("std_libc_").unwrap_or(name);
+        match clean_name {
+            "malloc" => return Some(crate::codegen::intrinsics::gdrs_malloc as *const u8),
+            "free" => return Some(crate::codegen::intrinsics::gdrs_free as *const u8),
+            "realloc" => return Some(crate::codegen::intrinsics::gdrs_realloc as *const u8),
+            "memcpy" => return Some(crate::codegen::intrinsics::gdrs_memcpy as *const u8),
+            "memset" => return Some(crate::codegen::intrinsics::gdrs_memset as *const u8),
+            _ => {}
+        }
+        let c_str = std::ffi::CString::new(clean_name).ok()?;
         let mut ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c_str.as_ptr()) };
         if ptr.is_null() {
-            let mangled = format!("_{}", name);
+            let mangled = format!("_{}", clean_name);
             if let Ok(c_mangled) = std::ffi::CString::new(mangled) {
                 ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c_mangled.as_ptr()) };
             }

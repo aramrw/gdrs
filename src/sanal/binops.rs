@@ -84,6 +84,14 @@ pub fn type_check_add<'a>(
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+    if let Type::Ptr(_) = t_lhs.ty() {
+        let ty = t_lhs.ty();
+        return Some(TypedExpr::Add(Box::new(t_lhs), Box::new(t_rhs), ty, span.clone()));
+    }
+    if let Type::Ptr(_) = t_rhs.ty() {
+        let ty = t_rhs.ty();
+        return Some(TypedExpr::Add(Box::new(t_lhs), Box::new(t_rhs), ty, span.clone()));
+    }
     if let Type::Obj(struct_name) = t_lhs.ty() {
         if let Some(fn_info) = lookup_struct_method_fn(type_ctx, struct_name, "add") {
             return Some(TypedExpr::Call(
@@ -113,6 +121,10 @@ pub fn type_check_sub<'a>(
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+    if let Type::Ptr(_) = t_lhs.ty() {
+        let ty = t_lhs.ty();
+        return Some(TypedExpr::Sub(Box::new(t_lhs), Box::new(t_rhs), ty, span.clone()));
+    }
     if let Type::Obj(struct_name) = t_lhs.ty() {
         if let Some(fn_info) = lookup_struct_method_fn(type_ctx, struct_name, "sub") {
             return Some(TypedExpr::Call(

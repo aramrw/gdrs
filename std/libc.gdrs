@@ -1,7 +1,14 @@
 // std/libc.gdrs - Standard C library declarations for heap allocation and memory
+use std::core::{Option}
 
 extern "C":
-	fn malloc(size: i64) -> i64
-	fn realloc(ptr: i64, size: i64) -> i64
-	fn free(ptr: i64)
-	fn memcpy(dest: i64, src: i64, count: i64) -> i64
+	fn malloc(size: i64) -> Option<*void>
+	fn realloc(ptr: *void, size: i64) -> Option<*void>
+	fn free(ptr: *void)
+	fn memcpy(dest: *void, src: *void, count: i64) -> *void
+	fn memset(ptr: *void, val: i32, size: i64) -> *void
+	fn strlen(s: str) -> i64
+	fn strdup(s: str) -> Option<*void>
+	fn strcmp(s1: str, s2: str) -> i32
+	fn strncmp(s1: str, s2: str, n: i64) -> i32
+	fn strcpy(dest: *void, src: str) -> *void

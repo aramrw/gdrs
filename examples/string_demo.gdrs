@@ -1,0 +1,25 @@
+// examples/string_demo.gdrs
+
+use std::string::String
+use std::libc::{strlen, strcmp}
+
+fn main():
+	log!("--- Testing C libc string functions ---")
+	let test_str = "Hello, gdrs!"
+	unsafe:
+		let len = strlen(test_str)
+		log!("strlen returned:", len)
+		let cmp = strcmp(test_str, "Hello, gdrs!")
+		log!("strcmp with identical string returned:", cmp)
+
+	log!("--- Testing heap String object ---")
+	let mut s = String::from("Hello")
+	log!("Initial length:", s.len())
+
+	s = s.push_str(", ")
+	s = s.push_str("World!")
+	log!("After push_str length:", s.len())
+	log!("String contents:", s.as_str())
+
+	s.free()
+	log!("String freed successfully.")

@@ -1,0 +1,28 @@
+// examples/raw_ptr_demo.gdrs
+
+use std::libc::{malloc, free, strlen, strcmp}
+use std::core::{Option}
+
+fn main():
+	unsafe:
+		match malloc(32):
+			Option::Some(p) =>
+				let ptr = p as *i64
+				*ptr = 100
+				let ptr_next = ptr + 1
+				*ptr_next = 200
+
+				log!("Value at ptr[0]:", *ptr)
+				log!("Value at ptr[1]:", *ptr_next)
+
+				free(p)
+				log!("sucess!")
+			Option::None =>
+				log!("Allocation failed")
+
+	let test_str = "Hello raw pointers!"
+	unsafe:
+		let len = strlen(test_str)
+		log!("strlen returned:", len)
+		let cmp = strcmp(test_str, "Hello raw pointers!")
+		log!("strcmp returned:", cmp)

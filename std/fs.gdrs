@@ -2,9 +2,10 @@
 use std::core::{Result, Option}
 use std::error::Error
 use std::fmt::Display
+use std::libc::{malloc, free, memset}
 
-fn buffer_to_string(ptr: i64, size: i64) -> str:
-	return ptr
+fn buffer_to_string(ptr: *void, size: i64) -> str:
+	return ptr as str
 
 #[derive(Error)]
 enum IoError:
@@ -19,11 +20,8 @@ extern "C":
 	fn fopen(filename: str, mode: str) -> i64
 	fn fseek(stream: i64, offset: i64, whence: i32) -> i32
 	fn ftell(stream: i64) -> i64
-	fn fread(ptr: i64, size: i64, nmemb: i64, stream: i64) -> i64
+	fn fread(ptr: *void, size: i64, nmemb: i64, stream: i64) -> i64
 	fn fclose(stream: i64) -> i32
-	fn malloc(size: i64) -> i64
-	fn free(ptr: i64)
-	fn memset(ptr: i64, val: i32, size: i64) -> i64
 
 obj File:
 	handle: i64
@@ -51,14 +49,18 @@ impl File:
 			fseek(stream, 0, 0)
 
 			// 3. Allocate buffer (+1 for null terminator safety)
-			let buffer = malloc(size + 1)
-			if buffer == 0:
-				fclose(stream)
-				return Err(IoError::AllocationFailed)
+			let mut buffer = 0 as *void
+			match malloc(size + 1):
+				Option::Some(p) =>
+					buffer = p
+				Option::None =>
+					fclose(stream)
+					return Err(IoError::AllocationFailed)
 
 			// 4. Read data into the buffer pointer
 			fread(buffer, 1, size, stream)
-			memset(buffer + size, 0, 1)
+			let end_ptr = (buffer as i64) + size
+			memset(end_ptr as *void, 0, 1)
 
 			// Clean up file handle
 			fclose(stream)

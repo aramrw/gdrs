@@ -178,6 +178,12 @@ pub enum Token {
     Dyn,
     #[token("extern")]
     Extern,
+    #[token("as")]
+    As,
+    #[token("void")]
+    TypeVoid,
+    #[token("u8")]
+    TypeU8,
     #[token("unsafe")]
     Unsafe,
     #[token("match")]
@@ -212,6 +218,8 @@ pub enum Type {
     Vec(&'static Type),
     Rc(&'static Type),
     Arc(&'static Type),
+    Void,
+    Ptr(&'static Type),
     Ref(&'static Type),
     MutRef(&'static Type),
 }
@@ -352,6 +360,7 @@ pub enum Expr {
     Deref(Box<Expr>, Span),
     DerefAssign(Box<Expr>, Box<Expr>, Span),
     Closure(Vec<String>, Box<Expr>, Span),
+    Cast(Box<Expr>, Type, Span),
     Range(Box<Expr>, Box<Expr>, Span),
 }
 
@@ -421,6 +430,7 @@ impl Expr {
             Expr::Deref(_, s) => s.clone(),
             Expr::DerefAssign(_, _, s) => s.clone(),
             Expr::Closure(_, _, s) => s.clone(),
+            Expr::Cast(_, _, s) => s.clone(),
             Expr::Range(_, _, s) => s.clone(),
             Expr::Try(_, s) => s.clone(),
         }
@@ -493,6 +503,7 @@ pub enum TypedExpr {
     Deref(Box<TypedExpr>, Type, Span),
     DerefAssign(Box<TypedExpr>, Box<TypedExpr>, Span),
     Closure(String, Vec<(String, Type)>, Box<TypedExpr>, Type, Span),
+    Cast(Box<TypedExpr>, Type, Span),
     Range(Box<TypedExpr>, Box<TypedExpr>, Type, Span),
 }
 
@@ -541,7 +552,8 @@ impl TypedExpr {
             | TypedExpr::Ref(_, _, ty, _)
             | TypedExpr::Deref(_, ty, _)
             | TypedExpr::Closure(_, _, _, ty, _)
-            | TypedExpr::Range(_, _, ty, _) => *ty,
+            | TypedExpr::Cast(_, ty, _)
+            | TypedExpr::Range(_, _, ty, _)
             | TypedExpr::DynCall(_, _, _, ty, _) => *ty,
             TypedExpr::CoerceToDyn(_, trait_name, _) => Type::DynTrait(trait_name),
             TypedExpr::CastF32(..) => Type::F32,
@@ -607,6 +619,7 @@ impl TypedExpr {
             TypedExpr::Deref(_, _, s) => s.clone(),
             TypedExpr::DerefAssign(_, _, s) => s.clone(),
             TypedExpr::Closure(_, _, _, _, s) => s.clone(),
+            TypedExpr::Cast(_, _, s) => s.clone(),
             TypedExpr::Range(_, _, _, s) => s.clone(),
         }
     }

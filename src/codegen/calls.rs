@@ -101,84 +101,15 @@ pub fn compile_call<M: Module>(
         }
     }
 
-    let known_in_module = module.get_name(&target_symbol_name).is_some();
-    let sym_ptr = if !known_in_module {
-        unsafe {
-            if let Ok(c_name) = std::ffi::CString::new(target_symbol_name.as_str()) {
-                let p = libc::dlsym(libc::RTLD_DEFAULT, c_name.as_ptr());
-                if p.is_null() {
-                    let c_mangled =
-                        std::ffi::CString::new(format!("_{}", target_symbol_name)).unwrap();
-                    libc::dlsym(libc::RTLD_DEFAULT, c_mangled.as_ptr())
-                } else {
-                    p
-                }
-            } else {
-                std::ptr::null_mut()
-            }
-        }
+    let callee = module
+        .declare_function(&target_symbol_name, Linkage::Import, &sig)
+        .unwrap();
+    let local_callee = module.declare_func_in_func(callee, builder.func);
+    let call_inst = builder.ins().call(local_callee, &compiled_args);
+    if *ret_ty != Type::Unit {
+        builder.inst_results(call_inst)[0]
     } else {
-        std::ptr::null_mut()
-    };
-
-
-    if !sym_ptr.is_null() {
-        let sig_ref = builder.import_signature(sig);
-        let callee_val = builder.ins().iconst(types::I64, sym_ptr as i64);
-        let call_inst = builder
-            .ins()
-            .call_indirect(sig_ref, callee_val, &compiled_args);
-        if *ret_ty != Type::Unit {
-            builder.inst_results(call_inst)[0]
-        } else {
-            builder.ins().iconst(types::I64, 0)
-        }
-    } else {
-        let known_func_id = match module.get_name(&target_symbol_name) {
-            Some(cranelift_module::FuncOrDataId::Func(id)) => Some(id),
-            _ => None,
-        };
-
-        if let Some(callee) = known_func_id {
-            let decl_sig = module.declarations().get_function_decl(callee);
-            let mut matched_args = Vec::new();
-            for (i, &arg_val) in compiled_args.iter().enumerate() {
-                if i < decl_sig.signature.params.len() {
-                    let expected_ty = decl_sig.signature.params[i].value_type;
-                    let coerced = coerce_val(builder, arg_val, expected_ty);
-                    matched_args.push(coerced);
-                } else {
-                    matched_args.push(arg_val);
-                }
-            }
-            let local_callee = module.declare_func_in_func(callee, builder.func);
-            let call_inst = builder.ins().call(local_callee, &matched_args);
-            if *ret_ty != Type::Unit {
-                builder.inst_results(call_inst)[0]
-            } else {
-                builder.ins().iconst(types::I64, 0)
-            }
-        } else {
-            let sym_str_expr = TypedExpr::String(target_symbol_name, span.clone());
-            let str_ptr = compile_expr(builder, &sym_str_expr, vars, var_counter, module, struct_layouts);
-
-            let mut resolve_sig = module.make_signature();
-            resolve_sig.params.push(AbiParam::new(types::I64));
-            resolve_sig.returns.push(AbiParam::new(types::I64));
-
-            let resolve_callee = module.declare_function("gdrs_resolve_symbol", Linkage::Import, &resolve_sig).unwrap();
-            let local_resolve = module.declare_func_in_func(resolve_callee, builder.func);
-            let call_resolve = builder.ins().call(local_resolve, &[str_ptr]);
-            let fn_ptr = builder.inst_results(call_resolve)[0];
-
-            let sig_ref = builder.import_signature(sig);
-            let call_inst = builder.ins().call_indirect(sig_ref, fn_ptr, &compiled_args);
-            if *ret_ty != Type::Unit {
-                builder.inst_results(call_inst)[0]
-            } else {
-                builder.ins().iconst(types::I64, 0)
-            }
-        }
+        builder.ins().iconst(types::I64, 0)
     }
 }
 

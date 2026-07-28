@@ -1,10 +1,10 @@
 // std/time.gdrs
 use std::fmt::Display
+use std::libc::{malloc, free}
+use std::core::{Option}
 
 extern "C":
-	fn clock_gettime(clk_id: i32, tp: i64) -> i32
-	fn malloc(size: i64) -> i64
-	fn free(ptr: i64)
+	fn clock_gettime(clk_id: i32, tp: *void) -> i32
 
 obj Instant:
 	sec: i64
@@ -13,11 +13,16 @@ obj Instant:
 impl Instant:
 	fn now() -> Instant:
 		unsafe:
-			let ts = malloc(16)
-			clock_gettime(0, ts)
+			let mut ts = 0 as *i64
+			match malloc(16):
+				Option::Some(p) =>
+					ts = p as *i64
+				Option::None =>
+					return Instant{sec: 0, nsec: 0}
+			clock_gettime(0, ts as *void)
 			let sec = *ts
-			let nsec = *(ts + 8)
-			free(ts)
+			let nsec = *(ts + 1)
+			free(ts as *void)
 			return Instant{sec: sec, nsec: nsec}
 
 	fn ms(self) -> i64:

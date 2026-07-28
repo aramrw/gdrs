@@ -1,7 +1,9 @@
 use crate::ast::{Expr, Span, Token};
 use chumsky::prelude::*;
 
-pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone + 'a {
+pub fn math_parser<'a>(
+    type_parser: impl Parser<Token, crate::ast::Type, Error = Simple<Token>> + Clone + 'a,
+) -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone + 'a {
     // 1. Individual base literal & identifier parsers
     let int = select! { Token::Int(n) => n }.map_with_span(|n, span| Expr::Int(n, span));
     let float_lit = select! { Token::Float(bits) => f64::from_bits(bits) }
@@ -390,10 +392,20 @@ pub fn math_parser<'a>() -> impl Parser<Token, Expr, Error = Simple<Token>> + Cl
 
         let unary = neg.or(not).or(deref).or(reference).or(postfix_atom);
 
+        let cast = unary
+            .then(
+                just(Token::As)
+                    .ignore_then(type_parser.clone())
+                    .repeated(),
+            )
+            .foldl(|expr, target_ty| {
+                let span = expr.span();
+                Expr::Cast(Box::new(expr), target_ty, span)
+            });
+
         let factor =
-            unary
-                .clone()
-                .then(mul_op.then(unary).repeated())
+            cast.clone()
+                .then(mul_op.then(cast).repeated())
                 .foldl(|lhs, (make_expr, rhs)| {
                     let span = lhs.span().start..rhs.span().end;
                     make_expr(Box::new(lhs), Box::new(rhs), span)
