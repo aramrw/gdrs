@@ -40,6 +40,7 @@ pub struct StructLayout {
 pub struct VarInfo {
     pub is_mutable: bool,
     pub ty: Type,
+    pub is_moved: bool,
 }
 
 /// A scope stack (symbol table) to manage nested lexical scopes, variable types, and mutability flags.
@@ -68,7 +69,34 @@ impl ScopeStack {
     /// Declares a variable in the innermost (current) scope.
     pub fn declare(&mut self, name: String, is_mutable: bool, ty: Type) {
         if let Some(current_scope) = self.scopes.last_mut() {
-            current_scope.insert(name, VarInfo { is_mutable, ty });
+            current_scope.insert(
+                name,
+                VarInfo {
+                    is_mutable,
+                    ty,
+                    is_moved: false,
+                },
+            );
+        }
+    }
+
+    pub fn mark_moved(&mut self, name: &str) {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(info) = scope.get_mut(name) {
+                if !info.ty.is_copy() {
+                    info.is_moved = true;
+                }
+                return;
+            }
+        }
+    }
+
+    pub fn mark_active(&mut self, name: &str) {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(info) = scope.get_mut(name) {
+                info.is_moved = false;
+                return;
+            }
         }
     }
 
@@ -243,15 +271,21 @@ pub fn check_semantics(
     let mut extern_signatures = HashMap::new();
     for ext in &program.externs {
         for ef in &ext.functions {
-            extern_fn_names.insert(ef.name.clone());
             let res_ret = resolve_type(ef.return_type, &enum_names, 0..1, &mut errors);
             let res_params: Vec<Type> = ef
                 .params
                 .iter()
                 .map(|p| resolve_type(p.ty, &enum_names, p.span.clone(), &mut errors))
                 .collect();
+
+            extern_fn_names.insert(ef.name.clone());
             extern_map.insert(ef.name.clone(), res_ret);
-            extern_signatures.insert(ef.name.clone(), (res_params, res_ret));
+            extern_signatures.insert(ef.name.clone(), (res_params.clone(), res_ret));
+
+            let mangled = format!("std_libc_{}", ef.name);
+            extern_fn_names.insert(mangled.clone());
+            extern_map.insert(mangled.clone(), res_ret);
+            extern_signatures.insert(mangled, (res_params, res_ret));
         }
     }
 

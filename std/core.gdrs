@@ -1,5 +1,8 @@
 // std/core.gdrs - Core standard library types and traits
 
+trait Drop:
+	fn drop(mut self)
+
 enum Option:
 	Some($T)
 	None

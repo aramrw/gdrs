@@ -1,11 +1,16 @@
 // std/string.gdrs - Heap allocated String collection using libc
 use std::libc::{malloc, realloc, free, memcpy, memset, strlen, strdup}
-use std::core::{Option}
+use std::core::{Option, Drop}
 
 obj String:
 	ptr: *i64
 	len: i64
 	cap: i64
+
+impl Drop for String:
+	fn drop(mut self):
+		unsafe:
+			self.free()
 
 impl String:
 	fn new() -> String:

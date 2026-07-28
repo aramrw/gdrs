@@ -15,6 +15,7 @@ pub mod assign;
 pub mod branching;
 pub mod loops;
 pub mod refs;
+pub mod drops;
 
 use std::collections::HashMap;
 use std::mem;

@@ -225,6 +225,23 @@ pub enum Type {
 }
 
 impl Type {
+    pub fn is_copy(&self) -> bool {
+        match self {
+            Type::Int
+            | Type::I32
+            | Type::Float
+            | Type::F32
+            | Type::Bool
+            | Type::Str
+            | Type::Unit
+            | Type::Void
+            | Type::Ptr(_)
+            | Type::Ref(_)
+            | Type::MutRef(_) => true,
+            _ => false,
+        }
+    }
+
     pub fn name_or_default(&self) -> &'static str {
         match self {
             Type::Obj(name) => name,

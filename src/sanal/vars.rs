@@ -17,6 +17,16 @@ pub fn type_check_ident<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     if let Some(info) = scopes.lookup(name) {
+        if info.is_moved {
+            errors.push(SemanticError {
+                code: "E0382",
+                message: format!("Use of moved value '{name}'"),
+                label: "Value used here after move".to_string(),
+                secondary_label: None,
+                help: Some("Value was moved in a previous assignment or function call".to_string()),
+                span: span.clone(),
+            });
+        }
         Some(TypedExpr::Ident(name.to_string(), info.ty, span.clone()))
     } else if let Some((enum_part, variant_part)) = name.split_once("::") {
         let normalized_enum = match enum_part {
@@ -226,6 +236,12 @@ pub fn type_check_let<'a>(
         }
     }
 
+    if let TypedExpr::Ident(rhs_name, rhs_ty, _) = &typed_val {
+        if !rhs_ty.is_copy() {
+            scopes.mark_moved(rhs_name);
+        }
+    }
+
     scopes.declare(name.to_string(), is_mutable, final_ty.clone());
 
     Some(TypedExpr::Let(
@@ -247,8 +263,16 @@ pub fn type_check_assign<'a>(
 ) -> Option<TypedExpr> {
     let typed_val = type_check_expr(scopes, errors, type_ctx, value)?;
 
-    if let Some(info) = scopes.lookup_mut(name) {
-        if !info.is_mutable {
+    if let TypedExpr::Ident(rhs_name, rhs_ty, _) = &typed_val {
+        if !rhs_ty.is_copy() {
+            scopes.mark_moved(rhs_name);
+        }
+    }
+
+    let info_opt = scopes.lookup(name).map(|i| (i.is_mutable, i.ty));
+    if let Some((is_mutable, mut var_ty)) = info_opt {
+        scopes.mark_active(name);
+        if !is_mutable {
             errors.push(SemanticError {
                 code: "E0382",
                 message: format!("Cannot reassign immutable variable '{name}'"),
@@ -264,24 +288,24 @@ pub fn type_check_assign<'a>(
         let val_ty = typed_val.ty();
 
         if let Type::Vec(elem_ty) = &val_ty {
-            info.ty = Type::Vec(*elem_ty);
+            var_ty = Type::Vec(*elem_ty);
         } else if let TypedExpr::Call(c_name, c_args, _, _) = &typed_val {
             if c_name.ends_with("push") && c_args.len() >= 2 {
                 let pushed_ty = c_args[1].ty();
                 if pushed_ty != Type::Int && pushed_ty != Type::Unit {
-                    info.ty = Type::Vec(crate::ast::intern_type(pushed_ty));
+                    var_ty = Type::Vec(crate::ast::intern_type(pushed_ty));
                 }
             }
         } else if let Type::Obj(s) = &val_ty {
             let clean = s.split('_').last().unwrap_or(s);
             if clean == "Vec" || clean.starts_with("Vec_") {
-                if let Type::Vec(elem_ty) = info.ty {
-                    info.ty = Type::Vec(elem_ty);
+                if let Type::Vec(elem_ty) = var_ty {
+                    var_ty = Type::Vec(elem_ty);
                 }
             }
         }
 
-        let is_compatible = match (&info.ty, &val_ty) {
+        let is_compatible = match (&var_ty, &val_ty) {
             (a, b) if a == b => true,
             (Type::I32 | Type::Int, Type::I32 | Type::Int) => true,
             (Type::F32 | Type::Float, Type::F32 | Type::Float) => true,
@@ -301,7 +325,7 @@ pub fn type_check_assign<'a>(
                 code: "E0308",
                 message: format!(
                     "Cannot assign type `{:?}` to variable '{name}' of type `{:?}`",
-                    val_ty, info.ty
+                    val_ty, var_ty
                 ),
                 label: "Type mismatch".to_string(),
                 secondary_label: None,

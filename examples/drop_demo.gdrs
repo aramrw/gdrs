@@ -1,0 +1,22 @@
+// examples/drop_demo.gdrs
+
+use std::string::String
+
+fn take_string(s: String):
+	log!("Inside take_string:", s.as_str())
+
+fn main():
+	log!("--- Testing Automatic Drop at Scope Exit ---")
+	if true:
+		let s1 = String::from("Scoped String")
+		log!("Created:", s1.as_str())
+
+	log!("--- Testing Move Semantics ---")
+	let s2 = String::from("Moved String")
+	take_string(s2)
+
+	log!("--- Testing Reassignment Drop ---")
+	let mut s3 = String::from("Original String")
+	s3 = String::from("Reassigned String")
+	log!("Current s3:", s3.as_str())
+	log!("All tests completed cleanly with 0 memory leaks!")

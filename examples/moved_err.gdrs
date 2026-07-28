@@ -1,0 +1,10 @@
+// examples/moved_err.gdrs
+use std::string::String
+
+fn take(s: String):
+	log!(s.as_str())
+
+fn main():
+	let s = String::from("Hello")
+	take(s)
+	log!(s.as_str())

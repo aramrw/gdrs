@@ -1,6 +1,6 @@
 // std/vec.gdrs - Heap allocated Vec collection using libc
 use std::libc::{malloc, realloc, free}
-use std::core::{Option}
+use std::core::{Option, Drop}
 
 obj Vec:
 	ptr: *i64
@@ -11,6 +11,15 @@ obj VecIter:
 	vec_ptr: *i64
 	idx: i64
 	len: i64
+
+impl Drop for Vec:
+	fn drop(mut self):
+		unsafe:
+			if (self.ptr as i64) != 0:
+				free(self.ptr as *void)
+				self.ptr = 0 as *i64
+				self.len = 0
+				self.cap = 0
 
 impl Vec:
 	fn new() -> Vec:

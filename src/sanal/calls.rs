@@ -59,6 +59,13 @@ pub fn type_check_macro_call<'a>(
     let mut typed_args = Vec::new();
     for arg in args {
         if let Some(t_arg) = type_check_expr(scopes, errors, type_ctx, arg) {
+            if let Expr::Ident(arg_name, _) = arg {
+                if let Some(info) = scopes.lookup(arg_name) {
+                    if !info.ty.is_copy() {
+                        scopes.mark_moved(arg_name);
+                    }
+                }
+            }
             typed_args.push(t_arg);
         }
     }
@@ -388,6 +395,17 @@ pub fn type_check_call<'a>(
         }
     }
 
+    if raw_name.ends_with(".drop") || (raw_name == "drop" && !typed_args.is_empty()) {
+        errors.push(SemanticError {
+            code: "E0040",
+            message: "Explicit call to Drop::drop is forbidden; use std::mem::drop() instead".to_string(),
+            label: "Explicit call to Drop::drop is forbidden".to_string(),
+            secondary_label: None,
+            help: Some("Use std::mem::drop() to drop a value early".to_string()),
+            span: span.clone(),
+        });
+    }
+
     if type_ctx.extern_fn_names.contains(&resolved_name) && !type_ctx.is_unsafe {
         errors.push(SemanticError {
             code: "E0133",
@@ -425,6 +443,11 @@ pub fn type_check_call<'a>(
         }
         if target_func.params.len() == typed_args.len() {
             for (param, arg) in target_func.params.iter().zip(typed_args.iter_mut()) {
+                if !param.ty.is_copy() && !matches!(param.ty, Type::Ref(_) | Type::MutRef(_)) {
+                    if let TypedExpr::Ident(arg_name, _, _) = arg {
+                        scopes.mark_moved(arg_name);
+                    }
+                }
                 match (param.ty, arg.ty()) {
                     (Type::MutRef(expected), actual) if actual == *expected => {
                         let arg_span = arg.span();

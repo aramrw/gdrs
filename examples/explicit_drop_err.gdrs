@@ -1,0 +1,6 @@
+// examples/explicit_drop_err.gdrs
+use std::string::String
+
+fn main():
+	let s = String::from("Hello")
+	s.drop()
