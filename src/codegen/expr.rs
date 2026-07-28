@@ -334,21 +334,12 @@ pub fn compile_expr<M: Module>(
                     ret_val
                 };
                 builder.ins().return_(&[ret_coerced]);
+                ret_val
             } else {
-                // Bare `return` — void return (no value)
+                let zero = builder.ins().iconst(types::I64, 0);
                 builder.ins().return_(&[]);
+                zero
             }
-            // Unreachable dead block to satisfy Cranelift's "every block must be filled" invariant
-            let dead_block = builder.create_block();
-            builder.switch_to_block(dead_block);
-            builder.seal_block(dead_block);
-
-            // Emit a tombstone value so the block has a usable result, then trap to fill it
-            let tombstone = builder.ins().iconst(types::I64, 0);
-            builder
-                .ins()
-                .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
-            tombstone
         }
 
         // Greater Than Comparison (>)

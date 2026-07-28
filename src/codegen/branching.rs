@@ -9,6 +9,16 @@ use crate::ast::{Type, TypedExpr, TypedMatchArm};
 use crate::codegen::expr::{coerce_val, compile_expr, cranelift_type_of};
 use crate::sanal::StructLayout;
 
+pub fn expr_has_return(expr: &TypedExpr) -> bool {
+    match expr {
+        TypedExpr::Return(..) => true,
+        TypedExpr::Block(stmts, _, _) | TypedExpr::Unsafe(stmts, _, _) => {
+            stmts.last().map(expr_has_return).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
 pub fn compile_if<M: Module>(
     builder: &mut FunctionBuilder,
     vars: &mut HashMap<String, Variable>,
@@ -30,7 +40,7 @@ pub fn compile_if<M: Module>(
     builder.switch_to_block(then_block);
     builder.seal_block(then_block);
     compile_expr(builder, body, vars, var_counter, module, struct_layouts);
-    if !builder.is_unreachable() {
+    if !builder.is_unreachable() && !expr_has_return(body) {
         builder.ins().jump(exit_block, &[]);
     }
 
@@ -73,7 +83,7 @@ pub fn compile_if_else<M: Module>(
     builder.switch_to_block(then_block);
     builder.seal_block(then_block);
     let then_val = compile_expr(builder, then_b, vars, var_counter, module, struct_layouts);
-    let then_term = builder.is_unreachable();
+    let then_term = builder.is_unreachable() || expr_has_return(then_b);
     if !then_term {
         if is_unit {
             builder.ins().jump(exit_block, &[]);
@@ -87,7 +97,7 @@ pub fn compile_if_else<M: Module>(
     builder.switch_to_block(else_block);
     builder.seal_block(else_block);
     let else_val = compile_expr(builder, else_b, vars, var_counter, module, struct_layouts);
-    let else_term = builder.is_unreachable();
+    let else_term = builder.is_unreachable() || expr_has_return(else_b);
     if !else_term {
         if is_unit {
             builder.ins().jump(exit_block, &[]);
@@ -177,7 +187,8 @@ pub fn compile_match<M: Module>(
                 arm_val = compile_expr(builder, stmt, vars, var_counter, module, struct_layouts);
             }
 
-            if !builder.is_unreachable() {
+            let arm_ended_with_return = arm.body.last().map(|e| matches!(e, crate::ast::TypedExpr::Return(..))).unwrap_or(false);
+            if !builder.is_unreachable() && !arm_ended_with_return {
                 if is_unit {
                     builder.ins().jump(exit_block, &[]);
                 } else {
@@ -190,15 +201,18 @@ pub fn compile_match<M: Module>(
             builder.seal_block(next_check_block);
         }
 
-        if !builder.is_unreachable() {
-            builder.ins().trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+        if builder.is_unreachable() {
+            return raw_ptr_val;
         }
+
+        let dummy_zero = builder.ins().iconst(types::I64, 0);
+        builder.ins().trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
 
         builder.switch_to_block(exit_block);
         builder.seal_block(exit_block);
 
         if is_unit {
-            return builder.ins().iconst(types::I64, 0);
+            return dummy_zero;
         } else {
             return builder.block_params(exit_block)[0];
         }

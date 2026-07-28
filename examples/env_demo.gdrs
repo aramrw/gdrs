@@ -1,0 +1,32 @@
+// examples/env_demo.gdrs
+
+use std::env::{args, var, set_var}
+use std::core::{Result, Option}
+
+fn main():
+	log!("--- Command Line Arguments ---")
+	let mut arg_iter = args()
+	log!("Total arg count:", arg_iter.len())
+
+	let mut done = false
+	while not done:
+		match arg_iter.next():
+			Option::Some(arg) =>
+				log!("Arg:", arg.as_str())
+			Option::None =>
+				done = true
+
+	log!("--- Environment Variables ---")
+	set_var("GDRS_ENV_TEST", "rocks")
+
+	match var("GDRS_ENV_TEST"):
+		Result::Ok(val) =>
+			log!("GDRS_ENV_TEST is set to:", val.as_str())
+		Result::Err(_) =>
+			log!("GDRS_ENV_TEST not found")
+
+	match var("PATH"):
+		Result::Ok(path_str) =>
+			log!("PATH is present, length:", path_str.len())
+		Result::Err(_) =>
+			log!("PATH not found")

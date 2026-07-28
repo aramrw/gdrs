@@ -40,6 +40,8 @@ pub fn load_program(entry_file: &Path) -> Result<Program, String> {
         ("std/vec.gdrs", vec!["std".to_string(), "vec".to_string()]),
         ("std/string.gdrs", vec!["std".to_string(), "string".to_string()]),
         ("std/time.gdrs", vec!["std".to_string(), "time".to_string()]),
+        ("std/env.gdrs", vec!["std".to_string(), "env".to_string()]),
+        ("std/fs.gdrs", vec!["std".to_string(), "fs".to_string()]),
     ];
     for (file_path, prefix) in std_files {
         let path = Path::new(file_path);

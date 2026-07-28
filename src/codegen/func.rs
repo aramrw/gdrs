@@ -22,22 +22,27 @@ pub fn compile_func<M: Module>(
     ctx: &mut Context,
     builder_context: &mut FunctionBuilderContext,
 ) -> Option<cranelift_module::FuncId> {
-    ctx.func.clear();
-    ctx.func.signature = module.make_signature();
+    let export_name = if func.name == "main" { "gdrs_main" } else { &func.name };
 
-    // Add parameter signatures to Cranelift function
+    let mut sig = module.make_signature();
     for param in &func.params {
-        let param_ty = cranelift_type_of(&param.ty);
-        ctx.func.signature.params.push(AbiParam::new(param_ty));
+        sig.params.push(AbiParam::new(cranelift_type_of(&param.ty)));
+    }
+    let ret_cranelift_ty = cranelift_type_of(&func.return_type);
+    if func.return_type != Type::Unit {
+        sig.returns.push(AbiParam::new(ret_cranelift_ty));
     }
 
-    let ret_cranelift_ty = cranelift_type_of(&func.return_type);
-    match func.return_type {
-        Type::Unit => {}
-        _ => {
-            ctx.func.signature.returns.push(AbiParam::new(ret_cranelift_ty));
-        }
-    }
+    let func_id = match module.get_name(export_name) {
+        Some(cranelift_module::FuncOrDataId::Func(id)) => id,
+        _ => module
+            .declare_function(export_name, Linkage::Export, &sig)
+            .unwrap(),
+    };
+
+    ctx.func.clear();
+    *builder_context = FunctionBuilderContext::new();
+    ctx.func.signature = module.declarations().get_function_decl(func_id).signature.clone();
 
     let mut builder = FunctionBuilder::new(&mut ctx.func, builder_context);
 
@@ -45,7 +50,6 @@ pub fn compile_func<M: Module>(
     let entry_block = builder.create_block();
     builder.switch_to_block(entry_block);
     builder.append_block_params_for_function_params(entry_block);
-    builder.seal_block(entry_block);
 
     let mut vars = HashMap::new();
     let mut var_counter = 0;
@@ -80,7 +84,13 @@ pub fn compile_func<M: Module>(
     };
 
     for expr in &func.body {
+        if builder.is_unreachable() {
+            break;
+        }
         let val = compile_expr(&mut builder, expr, &mut vars, &mut var_counter, module, struct_layouts);
+        if builder.is_unreachable() || matches!(expr, crate::ast::TypedExpr::Return(..)) {
+            break;
+        }
         if !builder.is_unreachable() {
             if let Some(ret_var) = ret_var {
                 // Coerce the returned body value to match the function's return type.
@@ -115,7 +125,18 @@ pub fn compile_func<M: Module>(
         }
     }
 
-    if !builder.is_unreachable() {
+fn expr_is_return(expr: &crate::ast::TypedExpr) -> bool {
+    match expr {
+        crate::ast::TypedExpr::Return(..) => true,
+        crate::ast::TypedExpr::Block(stmts, _, _) | crate::ast::TypedExpr::Unsafe(stmts, _, _) => {
+            stmts.last().map(expr_is_return).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+    let is_last_ret = func.body.last().map(expr_is_return).unwrap_or(false);
+    if !builder.is_unreachable() && !is_last_ret {
         if let Some(ret_var) = ret_var {
             let final_ret = builder.use_var(ret_var);
             builder.ins().return_(&[final_ret]);
@@ -123,22 +144,10 @@ pub fn compile_func<M: Module>(
             builder.ins().return_(&[]);
         }
     }
+    builder.seal_all_blocks();
     builder.finalize();
 
-    let export_name = if func.name == "main" { "gdrs_main" } else { &func.name };
-
     // Declare & compile native function
-    let func_id = match module.get_name(export_name) {
-        Some(cranelift_module::FuncOrDataId::Func(id)) => {
-            let existing_sig = module.declarations().get_function_decl(id).signature.clone();
-            ctx.func.signature = existing_sig;
-            id
-        }
-        _ => module
-            .declare_function(export_name, Linkage::Export, &ctx.func.signature)
-            .unwrap(),
-    };
-
     if let Err(e) = module.define_function(func_id, ctx) {
         match e {
             cranelift_module::ModuleError::DuplicateDefinition(_) => {

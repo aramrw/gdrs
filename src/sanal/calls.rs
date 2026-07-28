@@ -324,6 +324,8 @@ pub fn type_check_call<'a>(
         let target_type = if !typed_args.is_empty() {
             match typed_args[0].ty() {
                 Type::Obj(s) | Type::Enum(s) => Some(s.to_string()),
+                Type::Vec(_) => Some("Vec".to_string()),
+                Type::String => Some("String".to_string()),
                 _ => None,
             }
         } else {
@@ -443,7 +445,7 @@ pub fn type_check_call<'a>(
         }
         if target_func.params.len() == typed_args.len() {
             for (param, arg) in target_func.params.iter().zip(typed_args.iter_mut()) {
-                if !param.ty.is_copy() && !matches!(param.ty, Type::Ref(_) | Type::MutRef(_)) {
+                if param.name != "self" && !param.ty.is_copy() && !matches!(param.ty, Type::Ref(_) | Type::MutRef(_)) {
                     if let TypedExpr::Ident(arg_name, _, _) = arg {
                         scopes.mark_moved(arg_name);
                     }

@@ -12,3 +12,6 @@ extern "C":
 	fn strcmp(s1: str, s2: str) -> i32
 	fn strncmp(s1: str, s2: str, n: i64) -> i32
 	fn strcpy(dest: *void, src: str) -> *void
+	fn getenv(name: str) -> Option<*void>
+	fn setenv(name: str, value: str, overwrite: i32) -> i32
+	fn unsetenv(name: str) -> i32

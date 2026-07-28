@@ -120,13 +120,29 @@ impl<'a> TypeCtx<'a> {
     }
 
     pub fn get_fn(&self, name: &str) -> Option<FuncDecl> {
-        self.fn_map.borrow().get(name).cloned().or_else(|| {
-            self.fn_map
-                .borrow()
-                .iter()
-                .find(|(k, _)| **k == name || k.ends_with(&format!("_{name}")))
-                .map(|(_, v)| v.clone())
-        })
+        let fn_map = self.fn_map.borrow();
+        if let Some(f) = fn_map.get(name) {
+            return Some(f.clone());
+        }
+        fn_map
+            .iter()
+            .find(|(k, _)| {
+                if **k == name {
+                    return true;
+                }
+                if let Some((_, method)) = k.rsplit_once('_') {
+                    if method == name && (k.starts_with("std_vec_Vec") || k.starts_with("std_string_String") || k.starts_with("std_iter_Range") || k.starts_with("std_env_Args")) {
+                        return true;
+                    }
+                }
+                let clean = if let Some(stripped) = k.strip_prefix("std_") {
+                    stripped.split_once('_').map(|(_, rest)| rest).unwrap_or(stripped)
+                } else {
+                    k.as_str()
+                };
+                clean == name
+            })
+            .map(|(_, v)| v.clone())
     }
 
     pub fn contains_fn(&self, name: &str) -> bool {

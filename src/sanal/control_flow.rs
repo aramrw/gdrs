@@ -93,7 +93,26 @@ pub fn type_check_match<'a>(
                 if let Some((v_tag, p_types)) = v_map.get(short_v_name) {
                     for (b_name, p_ty) in arm.bindings.iter().zip(p_types.iter()) {
                         let mut bound_ty = *p_ty;
-                        if short_v_name == "Some" && (*p_ty == Type::Int || matches!(*p_ty, Type::Generic(_))) {
+                        if let Type::Enum(mangled) = t_target.ty() {
+                            let lower = mangled.to_lowercase();
+                            if lower.starts_with("std_core_option") {
+                                if lower.ends_with("string") {
+                                    bound_ty = Type::Obj(crate::ast::intern_str("String"));
+                                } else if lower.ends_with("ptr_void") || lower.ends_with("void") {
+                                    bound_ty = Type::Ptr(crate::ast::intern_type(Type::Void));
+                                } else if let Some((_, suffix)) = mangled.rsplit_once('_') {
+                                    if suffix != "Int" && suffix != "i64" {
+                                        bound_ty = Type::Obj(crate::ast::intern_str(suffix));
+                                    }
+                                }
+                            } else if lower.starts_with("std_core_result") {
+                                if short_v_name == "Ok" {
+                                    if lower.contains("string") {
+                                        bound_ty = Type::Obj(crate::ast::intern_str("String"));
+                                    }
+                                }
+                            }
+                        } else if short_v_name == "Some" && (*p_ty == Type::Int || matches!(*p_ty, Type::Generic(_))) {
                             if let TypedExpr::Call(name, args, _, _) = &t_target {
                                 if (name == "next" || name.ends_with("_next")) && !args.is_empty() {
                                     if let TypedExpr::Ident(iter_var_name, _, _) = &args[0] {

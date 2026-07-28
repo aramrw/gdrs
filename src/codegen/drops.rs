@@ -66,6 +66,15 @@ pub fn emit_drop_for_var<M: Module>(
     }
 }
 
+pub fn has_drop_glue(ty: &Type) -> bool {
+    match ty {
+        Type::String | Type::Obj("String") | Type::Obj("std_string_String") => true,
+        Type::Vec(_) | Type::Obj("Vec") | Type::Obj("std_vec_Vec") => true,
+        Type::Obj(_) => true,
+        _ => false,
+    }
+}
+
 pub fn emit_conditional_drop<M: Module>(
     builder: &mut FunctionBuilder,
     var_name: &str,
@@ -74,6 +83,10 @@ pub fn emit_conditional_drop<M: Module>(
     vars: &HashMap<String, Variable>,
     module: &mut M,
 ) {
+    if !has_drop_glue(ty) || builder.is_unreachable() {
+        return;
+    }
+
     let flag = builder.ins().stack_load(types::I8, slot, 0);
     let drop_block = builder.create_block();
     let cont_block = builder.create_block();
