@@ -33,22 +33,42 @@ pub fn load_program(entry_file: &Path) -> Result<Program, String> {
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
 
+    let std_dir = if let Ok(env_path) = std::env::var("GDRS_STD_PATH") {
+        PathBuf::from(env_path)
+    } else if let Ok(exe_path) = std::env::current_exe() {
+        let exe_dir = exe_path.parent().unwrap_or_else(|| Path::new("."));
+        if exe_dir.join("std").exists() {
+            exe_dir.join("std")
+        } else if exe_dir.join("../std").exists() {
+            exe_dir.join("../std")
+        } else {
+            let default_repo_std = PathBuf::from("/Users/aramsamifanni/Programming/gdrsc/std");
+            if default_repo_std.exists() {
+                default_repo_std
+            } else {
+                PathBuf::from("std")
+            }
+        }
+    } else {
+        PathBuf::from("std")
+    };
+
     let std_files = [
-        ("std/libc.gdrs", vec!["std".to_string(), "libc".to_string()]),
-        ("std/core.gdrs", vec!["std".to_string(), "core".to_string()]),
-        ("std/iter.gdrs", vec!["std".to_string(), "iter".to_string()]),
-        ("std/vec.gdrs", vec!["std".to_string(), "vec".to_string()]),
-        ("std/string.gdrs", vec!["std".to_string(), "string".to_string()]),
-        ("std/time.gdrs", vec!["std".to_string(), "time".to_string()]),
-        ("std/env.gdrs", vec!["std".to_string(), "env".to_string()]),
-        ("std/fs.gdrs", vec!["std".to_string(), "fs".to_string()]),
+        ("libc.gdrs", vec!["std".to_string(), "libc".to_string()]),
+        ("core.gdrs", vec!["std".to_string(), "core".to_string()]),
+        ("iter.gdrs", vec!["std".to_string(), "iter".to_string()]),
+        ("vec.gdrs", vec!["std".to_string(), "vec".to_string()]),
+        ("string.gdrs", vec!["std".to_string(), "string".to_string()]),
+        ("time.gdrs", vec!["std".to_string(), "time".to_string()]),
+        ("env.gdrs", vec!["std".to_string(), "env".to_string()]),
+        ("fs.gdrs", vec!["std".to_string(), "fs".to_string()]),
     ];
-    for (file_path, prefix) in std_files {
-        let path = Path::new(file_path);
+    for (file_name, prefix) in std_files {
+        let path = std_dir.join(file_name);
         if path.exists() {
             let _ = load_file_recursive(
-                path,
-                Path::new("."),
+                &path,
+                &std_dir,
                 &prefix,
                 &mut loaded_files,
                 &mut merged_program,

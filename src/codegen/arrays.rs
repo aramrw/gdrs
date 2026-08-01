@@ -77,6 +77,9 @@ pub fn compile_index_access<M: Module>(
         Type::Slice(_) | Type::Vec(_) => {
             builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
         }
+        Type::Obj(s) if s.contains("Vec") => {
+            builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
+        }
         _ => base_ptr,
     };
     let raw_idx_val = compile_expr(builder, idx, vars, var_counter, module, struct_layouts);
@@ -105,6 +108,9 @@ pub fn compile_index_assign<M: Module>(
     let base_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
     let buffer_ptr = match target.ty() {
         Type::Slice(_) | Type::Vec(_) => {
+            builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
+        }
+        Type::Obj(s) if s.contains("Vec") => {
             builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
         }
         _ => base_ptr,

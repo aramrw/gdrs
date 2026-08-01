@@ -1,8 +1,14 @@
-fn main():
-	log!("--- 1. Range Iteration with .for_each ---")
-	(0..5).for_each(|x| log!("Item:", x))
+use std::math::Vec2
 
-	log!("--- 2. Range Iteration with for loop ---")
+fn main():
+	(0..5).for_each(|x|:
+		log!("Item:", x)
+		// doin work
+		let mut sum = x + x
+		sum *= sum
+		let res = Vec2.new(sum + sum, sum - sum)
+	)
+
 	for x in (0..5):
 		let mapped = x * 10
 		log!("Mapped item (x * 10):", mapped)

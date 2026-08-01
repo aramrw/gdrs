@@ -320,7 +320,7 @@ pub fn substitute_expr(expr: &Expr, env: &HashMap<String, Type>) -> Expr {
             }
             let new_name = if !unique_vals.is_empty() {
                 let clean = name.split('_').last().unwrap_or(name);
-                if clean == "VecIter" || clean == "Vec" || clean == "Option" || clean == "Result" {
+                if clean == "Vec" || clean == "Option" || clean == "Result" {
                     mangle_name(name, &unique_vals)
                 } else {
                     name.clone()

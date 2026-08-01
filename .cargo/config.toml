@@ -1,2 +1,3 @@
 [build]
-rustflags = ["-Awarnings", "-C", "symbol-mangling-version=v0"]
+rustflags = ["-Awarnings", "-C", "symbol-mangling-version=v0", "-C", "link-arg=-Wl,-ld_classic"]
+

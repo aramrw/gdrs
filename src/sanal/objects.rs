@@ -380,13 +380,15 @@ pub fn type_check_field_access<'a>(
                 });
             }
         }
+    } else if field_name == "len" && (matches!(t_target.ty(), Type::Vec(_) | Type::Slice(_) | Type::Array(_, _)) || match &t_target.ty() { Type::Obj(s) => s.contains("Vec"), _ => false }) {
+        return crate::sanal::calls::type_check_call(scopes, errors, type_ctx, "len", &[target.clone()], span);
     } else {
         errors.push(SemanticError {
             code: "E0599",
             message: format!("Cannot access field on non-object type {:?}", t_target.ty()),
             label: "Not a struct object".to_string(),
             secondary_label: None,
-            help: None,
+            help: Some("Did you mean to call a method like `.len()` with parentheses?".to_string()),
             span: span.clone(),
         });
     }

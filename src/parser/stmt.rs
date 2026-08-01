@@ -71,17 +71,27 @@ pub fn stmt_parser<'a>(
             })
             .then_ignore(just(Token::Newline).or_not());
 
+        enum AccessPost {
+            Field(String, Span),
+            Index(Expr, Span),
+        }
+
+        let field_post = just(Token::Dot)
+            .ignore_then(select! { Token::Ident(f) => f })
+            .map_with_span(|f, span| AccessPost::Field(f, span));
+
+        let index_post = math
+            .clone()
+            .delimited_by(just(Token::LBracket), just(Token::RBracket))
+            .map_with_span(|idx, span| AccessPost::Index(idx, span));
+
         let assign_target_expr = path
             .clone()
             .map_with_span(|name, span| Expr::Ident(name, span))
-            .then(
-                just(Token::Dot)
-                    .ignore_then(select! { Token::Ident(f) => f })
-                    .repeated(),
-            )
-            .foldl(|target, field| {
-                let span = target.span().clone();
-                Expr::FieldAccess(Box::new(target), field, span)
+            .then(field_post.or(index_post).repeated())
+            .foldl(|target, post| match post {
+                AccessPost::Field(field, span) => Expr::FieldAccess(Box::new(target), field, span),
+                AccessPost::Index(idx, span) => Expr::IndexAccess(Box::new(target), Box::new(idx), span),
             });
 
         // Index assignment statement: arr[0] = 42 or self.keys[slot] = key

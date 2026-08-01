@@ -301,8 +301,7 @@ pub fn type_check_assign<'a>(
             (Type::F32 | Type::Float, Type::F32 | Type::Float) => true,
             (Type::F32 | Type::Float, Type::I32 | Type::Int) => true,
             (Type::Vec(_), Type::Obj(s)) | (Type::Obj(s), Type::Vec(_)) => {
-                let clean = s.split('_').last().unwrap_or(s);
-                clean == "Vec" || clean.starts_with("Vec_")
+                s.contains("Vec")
             }
             (Type::F32 | Type::Float | Type::I32 | Type::Int, Type::Generic(_)) => true,
             (Type::Generic(_), Type::F32 | Type::Float | Type::I32 | Type::Int) => true,
