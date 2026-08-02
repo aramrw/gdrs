@@ -13,12 +13,10 @@ obj Instant:
 impl Instant:
 	fn now() -> Instant:
 		unsafe:
-			let mut ts = 0 as *i64
-			match malloc(16):
-				Option::Some(p) =>
-					ts = p as *i64
-				Option::None =>
-					return Instant{sec: 0, nsec: 0}
+			let p = malloc(16)
+			if (p as i64) == 0:
+				return Instant{sec: 0, nsec: 0}
+			let ts = p as *i64
 			clock_gettime(0, ts as *void)
 			let sec = *ts
 			let nsec = *(ts + 1)

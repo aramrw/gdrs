@@ -94,20 +94,23 @@ pub fn stmt_parser<'a>(
                 AccessPost::Index(idx, span) => Expr::IndexAccess(Box::new(target), Box::new(idx), span),
             });
 
-        // Index assignment statement: arr[0] = 42 or self.keys[slot] = key
+        // Index assignment statement: arr[0] = 42, self.keys[slot] = key, or arr[i][j] = val
+        // assign_target_expr greedily consumes all postfix accesses including the
+        // final [index], so we decompose the resulting IndexAccess here.
         let index_assign_stmt = assign_target_expr
             .clone()
-            .then_ignore(just(Token::LBracket))
-            .then(math.clone())
-            .then_ignore(just(Token::RBracket))
+            .try_map(|expr, span| match expr {
+                Expr::IndexAccess(target, idx, _) => Ok((target, idx)),
+                _ => Err(Simple::custom(span, "expected index access as assignment target")),
+            })
             .then(assign_op.clone())
             .then(math.clone())
             .map_with_span(|(((target_expr, idx), op), rhs), span| {
                 let final_rhs = match op {
                     Some(make_expr) => {
                         let lhs = Expr::IndexAccess(
-                            Box::new(target_expr.clone()),
-                            Box::new(idx.clone()),
+                            target_expr.clone(),
+                            idx.clone(),
                             span.clone(),
                         );
                         make_expr(Box::new(lhs), Box::new(rhs), span.clone())
@@ -115,8 +118,8 @@ pub fn stmt_parser<'a>(
                     None => rhs,
                 };
                 Expr::IndexAssign(
-                    Box::new(target_expr),
-                    Box::new(idx),
+                    target_expr,
+                    idx,
                     Box::new(final_rhs),
                     span,
                 )

@@ -171,24 +171,25 @@ pub fn math_parser<'a>(
 
         let index_assign_stmt = assign_target_expr
             .clone()
-            .then_ignore(just(Token::LBracket))
-            .then(math.clone())
-            .then_ignore(just(Token::RBracket))
+            .try_map(|expr, span| match expr {
+                Expr::IndexAccess(target, idx, _) => Ok((target, idx)),
+                _ => Err(Simple::custom(span, "expected index access as assignment target")),
+            })
             .then(assign_op.clone())
             .then(math.clone())
             .map_with_span(|(((target, idx), op), rhs), span: Span| {
                 let final_rhs = match op {
                     Some(make_expr) => {
                         let lhs = Expr::IndexAccess(
-                            Box::new(target.clone()),
-                            Box::new(idx.clone()),
+                            target.clone(),
+                            idx.clone(),
                             span.clone(),
                         );
                         make_expr(Box::new(lhs), Box::new(rhs), span.clone())
                     }
                     None => rhs,
                 };
-                Expr::IndexAssign(Box::new(target), Box::new(idx), Box::new(final_rhs), span)
+                Expr::IndexAssign(target, idx, Box::new(final_rhs), span)
             });
 
         let field_assign_stmt = target_expr

@@ -88,7 +88,7 @@ pub fn compile_func<M: Module>(
             break;
         }
         let val = compile_expr(&mut builder, expr, &mut vars, &mut var_counter, module, struct_layouts);
-        if builder.is_unreachable() || matches!(expr, crate::ast::TypedExpr::Return(..)) {
+        if builder.is_unreachable() || expr_is_return(expr) {
             break;
         }
         if !builder.is_unreachable() {

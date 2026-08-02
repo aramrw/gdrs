@@ -5,20 +5,20 @@ use std::core::{Option}
 
 fn main():
 	unsafe:
-		match malloc(32):
-			Option::Some(p) =>
-				let ptr = p as *i64
-				*ptr = 100
-				let ptr_next = ptr + 1
-				*ptr_next = 200
+		let p = malloc(32)
+		if (p as i64) == 0:
+			log!("Allocation failed")
+		else:
+			let ptr = p as *i64
+			*ptr = 100
+			let ptr_next = ptr + 1
+			*ptr_next = 200
 
-				log!("Value at ptr[0]:", *ptr)
-				log!("Value at ptr[1]:", *ptr_next)
+			log!("Value at ptr[0]:", *ptr)
+			log!("Value at ptr[1]:", *ptr_next)
 
-				free(p)
-				log!("sucess!")
-			Option::None =>
-				log!("Allocation failed")
+			free(p)
+			log!("sucess!")
 
 	let test_str = "Hello raw pointers!"
 	unsafe:

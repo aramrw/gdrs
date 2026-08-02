@@ -49,13 +49,10 @@ impl File:
 			fseek(stream, 0, 0)
 
 			// 3. Allocate buffer (+1 for null terminator safety)
-			let mut buffer = 0 as *void
-			match malloc(size + 1):
-				Option::Some(p) =>
-					buffer = p
-				Option::None =>
-					fclose(stream)
-					return Err(IoError::AllocationFailed)
+			let mut buffer = malloc(size + 1)
+			if (buffer as i64) == 0:
+				fclose(stream)
+				return Err(IoError::AllocationFailed)
 
 			// 4. Read data into the buffer pointer
 			fread(buffer, 1, size, stream)

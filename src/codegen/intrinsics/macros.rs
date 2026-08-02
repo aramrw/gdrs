@@ -216,9 +216,18 @@ pub fn compile_macro_call<M: Module>(
                     ),
                     Type::Obj(tn) | Type::Enum(tn) => {
                         let to_string_fn = format!("{tn}_to_string");
-                        if module.get_name(&to_string_fn).is_some() {
+                        let fmt_fn = format!("{tn}_fmt");
+                        let target_fn = if module.get_name(&to_string_fn).is_some() {
+                            Some(to_string_fn)
+                        } else if module.get_name(&fmt_fn).is_some() {
+                            Some(fmt_fn)
+                        } else {
+                            None
+                        };
+
+                        if let Some(func_name) = target_fn {
                             let method_call = TypedExpr::Call(
-                                to_string_fn,
+                                func_name,
                                 vec![arg.clone()],
                                 Type::Str,
                                 arg.span(),

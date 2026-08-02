@@ -57,6 +57,7 @@ pub fn load_program(entry_file: &Path) -> Result<Program, String> {
         ("libc.gdrs", vec!["std".to_string(), "libc".to_string()]),
         ("core.gdrs", vec!["std".to_string(), "core".to_string()]),
         ("iter.gdrs", vec!["std".to_string(), "iter".to_string()]),
+        ("convert.gdrs", vec!["std".to_string(), "convert".to_string()]),
         ("vec.gdrs", vec!["std".to_string(), "vec".to_string()]),
         ("string.gdrs", vec!["std".to_string(), "string".to_string()]),
         ("time.gdrs", vec!["std".to_string(), "time".to_string()]),
