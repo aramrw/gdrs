@@ -19,6 +19,15 @@ pub fn is_obj_field_type_compatible(expected: &Type, found: &Type) -> bool {
         (Type::Float | Type::F32, Type::Float | Type::F32) => true,
         (Type::Float | Type::F32, Type::Int | Type::I32) => true,
         (Type::Str | Type::Obj("String"), Type::Str | Type::Obj("String")) => true,
+        (Type::Vec(e1), Type::Vec(e2))
+        | (Type::Slice(e1), Type::Slice(e2))
+        | (Type::Vec(e1), Type::Slice(e2))
+        | (Type::Slice(e1), Type::Vec(e2)) => {
+            is_obj_field_type_compatible(e1, e2)
+        }
+        (Type::Vec(_), Type::Obj(s)) | (Type::Obj(s), Type::Vec(_)) => {
+            s.contains("Vec")
+        }
         (Type::Obj(e1), Type::Obj(e2))
         | (Type::Enum(e1), Type::Enum(e2))
         | (Type::Obj(e1), Type::Enum(e2))
@@ -99,6 +108,26 @@ pub fn type_check_index_access<'a>(
 
     let elem_ty = match t_target.ty() {
         Type::Array(e_ty, _) | Type::Slice(e_ty) | Type::Vec(e_ty) => *e_ty,
+        Type::Obj(s) if s.contains("Vec") || s.contains("vec") => {
+            let inner = if let Some(pos) = s.find("_t_") {
+                &s[pos + 3..]
+            } else if let Some(pos) = s.find("Vec_") {
+                &s[pos + 4..]
+            } else if let Some(pos) = s.find("vec_") {
+                &s[pos + 4..]
+            } else {
+                s
+            };
+            if inner.starts_with("std_vec_Vec") || inner.starts_with("Vec") || inner.starts_with("vec") {
+                Type::Obj(crate::ast::intern_str(inner))
+            } else if inner.contains("Float") || inner.contains("f64") || inner.contains("F64") {
+                Type::Float
+            } else if inner.contains("Bool") || inner.contains("bool") {
+                Type::Bool
+            } else {
+                Type::Int
+            }
+        }
         other_ty => {
             errors.push(SemanticError {
                 code: "E0308",

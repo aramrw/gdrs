@@ -64,8 +64,12 @@ pub fn compile_field_access<M: Module>(
 
     let target_struct_name = match target.ty() {
         Type::Obj(struct_name) => Some(struct_name),
+        Type::Vec(_) => Some("Vec"),
+        Type::String => Some("String"),
         Type::Ref(inner) | Type::MutRef(inner) => match *inner {
             Type::Obj(struct_name) => Some(struct_name),
+            Type::Vec(_) => Some("Vec"),
+            Type::String => Some("String"),
             _ => None,
         },
         _ => None,
@@ -116,8 +120,12 @@ pub fn compile_field_assign<M: Module>(
 
     let target_struct_name = match target.ty() {
         Type::Obj(struct_name) => Some(struct_name),
+        Type::Vec(_) => Some("Vec"),
+        Type::String => Some("String"),
         Type::Ref(inner) | Type::MutRef(inner) => match *inner {
             Type::Obj(struct_name) => Some(struct_name),
+            Type::Vec(_) => Some("Vec"),
+            Type::String => Some("String"),
             _ => None,
         },
         _ => None,

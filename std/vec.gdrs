@@ -25,6 +25,14 @@ impl Vec:
 	fn new() -> Vec:
 		return Vec{ ptr: 0 as *i64, len: 0, cap: 0 }
 
+	fn from_slice(slice: [$T]) -> Vec:
+		let mut v = Vec::new()
+		let mut i = 0
+		while i < slice.len:
+			v.push(slice[i])
+			i = i + 1
+		return v
+
 	fn push(&mut self, elem: $T):
 		unsafe:
 			if self.cap == 0:
@@ -40,7 +48,7 @@ impl Vec:
 					return
 				self.ptr = p as *i64
 			let slot = self.ptr + self.len
-			*slot = elem as i64
+			*slot = elem
 		self.len = self.len + 1
 
 	fn pop(mut self) -> Option<$T>:

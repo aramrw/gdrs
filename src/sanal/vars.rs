@@ -183,6 +183,12 @@ pub fn type_check_let<'a>(
             (Type::I32 | Type::Int, Type::I32 | Type::Int) => true,
             (Type::F32 | Type::Float, Type::F32 | Type::Float) => true,
             (Type::F32 | Type::Float, Type::I32 | Type::Int) => true,
+            (Type::Vec(_), Type::Obj(s)) | (Type::Obj(s), Type::Vec(_)) => {
+                s.contains("Vec")
+            }
+            (Type::Obj(s1), Type::Obj(s2)) => {
+                s1 == s2 || (s1.contains("Vec") && s2.contains("Vec"))
+            }
             (a, b) => a == b,
         };
         if !compatible {
@@ -199,28 +205,14 @@ pub fn type_check_let<'a>(
         }
         annotated.clone()
     } else {
-        let is_bare_int_literal = matches!(typed_val, TypedExpr::Int(..));
-        let is_bare_float_literal = matches!(typed_val, TypedExpr::Float(..));
-        let mut ty = match inferred_ty {
-            Type::Int if is_bare_int_literal => Type::I32,
-            Type::Float if is_bare_float_literal => Type::F32,
-            other => other,
-        };
+        let mut ty = inferred_ty;
         if is_mutable {
             if ty == Type::Str {
                 ty = Type::String;
-            } else if let Type::Array(elem_ty, _) = ty {
-                ty = Type::Vec(elem_ty);
-            } else if let Type::Slice(elem_ty) = ty {
-                ty = Type::Vec(elem_ty);
             }
         } else {
             if ty == Type::String {
                 ty = Type::Str;
-            } else if let Type::Array(elem_ty, _) = ty {
-                ty = Type::Slice(elem_ty);
-            } else if let Type::Vec(elem_ty) = ty {
-                ty = Type::Slice(elem_ty);
             }
         }
         ty

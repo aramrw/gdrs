@@ -1,14 +1,15 @@
 //! codegen/jit.rs
 //! Initializes the Cranelift JITModule with host machine target ISA settings.
 
+use cranelift_codegen::settings::Configurable;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::default_libcall_names;
 use cranelift_native::builder as native_builder;
 
 use crate::codegen::intrinsics::{
     gdrs_resolve_symbol, intrinsic_arc_clone, intrinsic_arc_drop, intrinsic_arc_new, intrinsic_arg_at,
-    intrinsic_arg_count, intrinsic_args_str, intrinsic_execvp,
-    intrinsic_log, intrinsic_panic, intrinsic_push_str,
+    intrinsic_arg_count, intrinsic_args_str, intrinsic_bool_to_str, intrinsic_execvp, intrinsic_float_to_str,
+    intrinsic_int_to_str, intrinsic_log, intrinsic_panic, intrinsic_push_str,
     intrinsic_rc_clone, intrinsic_rc_drop, intrinsic_rc_new, intrinsic_spawn_thread,
     intrinsic_vec_new, intrinsic_vec_pop, intrinsic_vec_push, intrinsic_waitpid,
 };
@@ -24,6 +25,9 @@ pub fn create_jit_module() -> JITModule {
     let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
     builder.symbol("gdrs_resolve_symbol", gdrs_resolve_symbol as *const u8);
     builder.symbol("intrinsic_log", intrinsic_log as *const u8);
+    builder.symbol("intrinsic_int_to_str", intrinsic_int_to_str as *const u8);
+    builder.symbol("intrinsic_float_to_str", intrinsic_float_to_str as *const u8);
+    builder.symbol("intrinsic_bool_to_str", intrinsic_bool_to_str as *const u8);
     builder.symbol("intrinsic_panic", intrinsic_panic as *const u8);
     builder.symbol("intrinsic_push_str", intrinsic_push_str as *const u8);
     builder.symbol("intrinsic_vec_push", intrinsic_vec_push as *const u8);

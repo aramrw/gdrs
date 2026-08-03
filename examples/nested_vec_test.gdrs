@@ -1,0 +1,17 @@
+use std::vec::Vec
+
+fn main():
+	let mut row = Vec::new()
+	row.push(100.0)
+	row.push(200.0)
+
+	log!(row.len)
+
+	let mut matrix = Vec.new()
+	matrix.push(row)
+
+	log!(matrix.len)
+
+	let inner_row = matrix[0]
+	log!(inner_row.len)
+	log!(inner_row[0])

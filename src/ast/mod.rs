@@ -261,6 +261,26 @@ pub fn intern_str(s: &str) -> &'static str {
     Box::leak(s.to_string().into_boxed_str())
 }
 
+/// Normalize a type name to its canonical Rust-style form
+/// Handles case variations: Float→f64, F32→f32, Int→i64, I32→i32, etc.
+pub fn normalize_type_name(name: &str) -> String {
+    let lower = name.to_lowercase();
+    match lower.as_str() {
+        "float" | "f64" => "f64".to_string(),
+        "f32" | "F32" => "f32".to_string(),
+        "i64" | "int" => "i64".to_string(),
+        "i32" | "I32" => "i32".to_string(),
+        "bool" | "Bool" | "boolean" => "bool".to_string(),
+        "string" | "str" => "str".to_string(),
+        "void" | "Void" => "void".to_string(),
+        "none" | "None" => "none".to_string(),
+        "some" | "Some" => "some".to_string(),
+        "err" | "Err" => "err".to_string(),
+        "ok" | "Ok" => "ok".to_string(),
+        _ => lower,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Attribute {
     pub name: String,

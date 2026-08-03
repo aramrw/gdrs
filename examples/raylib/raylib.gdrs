@@ -86,7 +86,7 @@ fn main():
 				col = 65535
 
 			let ball = Ball{pos: pos, speed: speed, r: radius, color: col}
-			balls = balls.push(ball)
+			balls.push(ball)
 			i += 1
 
 		while !WindowShouldClose():

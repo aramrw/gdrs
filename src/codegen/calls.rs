@@ -21,61 +21,6 @@ pub fn compile_call<M: Module>(
     module: &mut M,
     struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
-    let mut compiled_args = Vec::new();
-    let mut sig = module.make_signature();
-
-    for arg in args {
-        let mut compiled_arg =
-            compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
-
-        let param_ty = match arg.ty() {
-            Type::Bool => types::I8,
-            Type::Float => types::F64,
-            Type::F32 => types::F32,
-            Type::I32 => types::I32,
-            _ => types::I64,
-        };
-
-        let val_ty = builder.func.dfg.value_type(compiled_arg);
-        if val_ty != param_ty {
-            compiled_arg = match (val_ty, param_ty) {
-                (types::I32, types::I64) => builder.ins().sextend(types::I64, compiled_arg),
-                (types::I64, types::I32) => builder.ins().ireduce(types::I32, compiled_arg),
-                (types::I32, types::F32) => {
-                    builder.ins().fcvt_from_sint(types::F32, compiled_arg)
-                }
-                (types::I32, types::F64) => {
-                    builder.ins().fcvt_from_sint(types::F64, compiled_arg)
-                }
-                (types::I64, types::F32) => {
-                    builder.ins().fcvt_from_sint(types::F32, compiled_arg)
-                }
-                (types::I64, types::F64) => {
-                    builder.ins().fcvt_from_sint(types::F64, compiled_arg)
-                }
-                (types::F32, types::F64) => {
-                    builder.ins().fpromote(types::F64, compiled_arg)
-                }
-                (types::F64, types::F32) => builder.ins().fdemote(types::F32, compiled_arg),
-                (types::F32, types::I32) => builder.ins().fcvt_to_sint(types::I32, compiled_arg),
-                (types::F64, types::I32) => builder.ins().fcvt_to_sint(types::I32, compiled_arg),
-                (types::F32, types::I64) => builder.ins().fcvt_to_sint(types::I64, compiled_arg),
-                (types::F64, types::I64) => builder.ins().fcvt_to_sint(types::I64, compiled_arg),
-                (types::I8, t) if t.is_int() => builder.ins().sextend(t, compiled_arg),
-                (t, types::I8) if t.is_int() => builder.ins().ireduce(types::I8, compiled_arg),
-                _ => compiled_arg,
-            };
-        }
-
-        compiled_args.push(compiled_arg);
-        sig.params.push(AbiParam::new(param_ty));
-    }
-
-    let ret_cranelift_ty = cranelift_type_of(ret_ty);
-    if *ret_ty != Type::Unit {
-        sig.returns.push(AbiParam::new(ret_cranelift_ty));
-    }
-
     let target_symbol_name = if name == "rc_new"
         || name == "arc_new"
         || name == "rc_clone"
@@ -86,7 +31,69 @@ pub fn compile_call<M: Module>(
         name.to_string()
     };
 
-    if module.get_name(&target_symbol_name).is_none() {
+    let existing_func_id = module.get_name(&target_symbol_name).and_then(|id| match id {
+        cranelift_module::FuncOrDataId::Func(fid) => Some(fid),
+        _ => None,
+    });
+
+    let decl_sig = existing_func_id.map(|id| module.declarations().get_function_decl(id).signature.clone());
+
+    let mut compiled_args = Vec::new();
+    let mut sig = decl_sig.unwrap_or_else(|| module.make_signature());
+
+    for (i, arg) in args.iter().enumerate() {
+        let mut compiled_arg = if let Type::Array(_, arr_len) = arg.ty() {
+            let raw_arr_ptr = compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
+            let size_val = builder.ins().iconst(types::I64, 32);
+            let mut sig = module.make_signature();
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            let callee = module
+                .declare_function("malloc", Linkage::Import, &sig)
+                .unwrap();
+            let local_callee = module.declare_func_in_func(callee, builder.func);
+            let call_inst = builder.ins().call(local_callee, &[size_val]);
+            let slice_hdr_ptr = builder.inst_results(call_inst)[0];
+
+            builder.ins().store(MemFlags::new(), raw_arr_ptr, slice_hdr_ptr, 0);
+            let len_val = builder.ins().iconst(types::I64, arr_len as i64);
+            builder.ins().store(MemFlags::new(), len_val, slice_hdr_ptr, 8);
+            slice_hdr_ptr
+        } else {
+            compile_expr(builder, arg, vars, var_counter, module, struct_layouts)
+        };
+
+        let param_ty = if i < sig.params.len() {
+            sig.params[i].value_type
+        } else {
+            let p_ty = match arg.ty() {
+                Type::Bool => types::I8,
+                Type::Float => types::F64,
+                Type::F32 => types::F32,
+                Type::I32 => types::I32,
+                Type::Generic(_)
+                    if builder.func.name.to_string().contains("Float")
+                        || builder.func.name.to_string().contains("f64")
+                        || builder.func.name.to_string().contains("F64") =>
+                {
+                    types::F64
+                }
+                _ => types::I64,
+            };
+            sig.params.push(AbiParam::new(p_ty));
+            p_ty
+        };
+
+        compiled_arg = coerce_val(builder, compiled_arg, param_ty);
+        compiled_args.push(compiled_arg);
+    }
+
+    if sig.returns.is_empty() && *ret_ty != Type::Unit {
+        let ret_cranelift_ty = cranelift_type_of(ret_ty);
+        sig.returns.push(AbiParam::new(ret_cranelift_ty));
+    }
+
+    if existing_func_id.is_none() {
         if let Some(var) = vars.get(name) {
             let func_ptr = builder.use_var(*var);
             let sig_ref = builder.import_signature(sig.clone());
@@ -101,9 +108,12 @@ pub fn compile_call<M: Module>(
         }
     }
 
-    let callee = module
-        .declare_function(&target_symbol_name, Linkage::Import, &sig)
-        .unwrap();
+    let callee = match existing_func_id {
+        Some(id) => id,
+        None => module
+            .declare_function(&target_symbol_name, Linkage::Import, &sig)
+            .unwrap(),
+    };
     let local_callee = module.declare_func_in_func(callee, builder.func);
     let call_inst = builder.ins().call(local_callee, &compiled_args);
     if *ret_ty != Type::Unit {

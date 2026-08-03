@@ -265,6 +265,8 @@ pub fn type_check_call<'a>(
             | "thread"
             | "thread!"
             | "spawn!"
+            | "len"
+            | "len!"
     );
     if is_intrinsic_macro {
         let clean_macro = name.trim_end_matches('!');
@@ -275,6 +277,11 @@ pub fn type_check_call<'a>(
                     if let Some(info) = scopes.lookup_mut(vec_var_name) {
                         info.ty = Type::Vec(crate::ast::intern_type(elem_ty));
                     }
+                }
+            }
+            if let TypedExpr::Ident(arg_var_name, arg_ty, _) = &typed_args[1] {
+                if matches!(arg_ty, Type::Obj(_) | Type::Vec(_) | Type::String) {
+                    scopes.mark_moved(arg_var_name);
                 }
             }
         }
@@ -345,13 +352,33 @@ pub fn type_check_call<'a>(
             None
         };
 
-        let (base_struct, method_name) = if let Some((bs, mn)) = name.rsplit_once('_') {
-            (bs.to_string(), mn.to_string())
+        let (mut base_struct, method_name) = if name.starts_with("std_vec_Vec_") {
+            ("std_vec_Vec".to_string(), name["std_vec_Vec_".len()..].to_string())
         } else if let Some(ref tt) = target_type {
-            (tt.clone(), name.clone())
+            let mn = if name.starts_with(&format!("{tt}_")) {
+                name[tt.len() + 1..].to_string()
+            } else {
+                name.clone()
+            };
+            (tt.clone(), mn)
+        } else if let Some((bs, mn)) = name.split_once('_') {
+            (bs.to_string(), mn.to_string())
         } else {
             (String::new(), String::new())
         };
+
+        if base_struct.ends_with("_t") || base_struct.ends_with("_T") {
+            base_struct = base_struct[..base_struct.len() - 2].to_string();
+        }
+        if base_struct.starts_with("std_vec_") {
+            base_struct = "std_vec_Vec".to_string();
+        } else if base_struct.starts_with("std_") {
+            if let Some((clean, _)) = base_struct.rsplit_once('_') {
+                if type_ctx.struct_map.borrow().contains_key(clean) || type_ctx.enum_map.borrow().contains_key(clean) {
+                    base_struct = clean.to_string();
+                }
+            }
+        }
 
         if !base_struct.is_empty() {
             let mut type_args = Vec::new();
@@ -363,7 +390,12 @@ pub fn type_check_call<'a>(
             if type_args.is_empty() && !typed_args.is_empty() {
                 if let Type::Obj(obj_name) = typed_args[0].ty() {
                     let name_str = obj_name.to_string();
-                    if let Some((_, suffix)) = name_str.rsplit_once('_') {
+                    if name_str.contains("Vec") && typed_args.len() >= 2 {
+                        let elem_ty = typed_args[1].ty();
+                        if !matches!(elem_ty, Type::Generic(_)) {
+                            type_args.push(elem_ty);
+                        }
+                    } else if let Some((_, suffix)) = name_str.rsplit_once('_') {
                         if type_ctx.contains_struct(suffix) || type_ctx.contains_enum(suffix) {
                             type_args.push(Type::Obj(crate::ast::intern_str(suffix)));
                         }
@@ -377,7 +409,10 @@ pub fn type_check_call<'a>(
                     &typed_args[..]
                 };
                 for a in actual_args {
-                    let t = a.ty();
+                    let mut t = a.ty();
+                    if let Type::Array(elem_ty, _) | Type::Slice(elem_ty) = t {
+                        t = *elem_ty;
+                    }
                     if !matches!(t, Type::Unit) && !type_args.contains(&t) {
                         type_args.push(t);
                     }
@@ -395,9 +430,7 @@ pub fn type_check_call<'a>(
                     type_ctx.worklist,
                 ) {
                     let mangled_fn = format!("{mangled_struct}_{method_name}");
-                    if let Some(target_func) = type_ctx.get_fn(&mangled_fn) {
-                        resolved_name = target_func.name;
-                    }
+                    resolved_name = mangled_fn;
                 }
             }
         }
@@ -407,6 +440,15 @@ pub fn type_check_call<'a>(
     if resolved_name == name && !type_ctx.extern_signatures.contains_key(&name) && !type_ctx.extern_fn_names.contains(&name) {
         if let Some(target_func) = type_ctx.get_fn(&name) {
             resolved_name = target_func.name;
+        }
+    }
+
+    if (raw_name.ends_with(".push") || raw_name.ends_with("::push") || raw_name == "push") && typed_args.len() >= 2 {
+        let elem_ty = typed_args[1].ty();
+        if let TypedExpr::Ident(vec_var_name, _, _) = &typed_args[0] {
+            if let Some(info) = scopes.lookup_mut(vec_var_name) {
+                info.ty = Type::Vec(crate::ast::intern_type(elem_ty));
+            }
         }
     }
 
@@ -505,11 +547,21 @@ pub fn type_check_call<'a>(
                 }
             }
         }
-        if matches!(target_func.return_type, Type::Generic(_)) {
+        let mut ret_ty = if matches!(target_func.return_type, Type::Generic(_)) {
             Type::Int
         } else {
             target_func.return_type
+        };
+
+        if resolved_name.ends_with("from_slice") && !typed_args.is_empty() {
+            let arg_ty = typed_args[0].ty();
+            let elem_ty = match arg_ty {
+                Type::Slice(e) | Type::Vec(e) | Type::Array(e, _) => *e,
+                _ => Type::Float,
+            };
+            ret_ty = Type::Vec(crate::ast::intern_type(elem_ty));
         }
+        ret_ty
     } else if let Some((param_decl_types, ext_ret_ty)) =
         type_ctx.extern_signatures.get(&resolved_name)
     {

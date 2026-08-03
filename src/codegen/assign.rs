@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use cranelift_codegen::ir::{InstBuilder, MemFlags, Value};
 use cranelift_codegen::ir::{StackSlotData, StackSlotKind, types};
 use cranelift_frontend::{FunctionBuilder, Variable};
-use cranelift_module::Module;
+use cranelift_module::{Linkage, Module};
 
 use crate::ast::{Type, TypedExpr};
 use crate::codegen::expr::{coerce_val, compile_expr, cranelift_type_of};
@@ -33,8 +33,7 @@ pub fn compile_let<M: Module>(
 
     // 3. Handle stack slot layouts for composite types (Obj, Str, Vec, etc.)
     let stored_val = match ty {
-        Type::Obj(_) => val,
-        Type::Str => val,
+        Type::Obj(_) | Type::Vec(_) | Type::Str => val,
 
         Type::String => {
             let slot = builder.create_sized_stack_slot(StackSlotData::new(
@@ -50,40 +49,28 @@ pub fn compile_let<M: Module>(
             dst_ptr
         }
         Type::Slice(_) => {
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                16,
-                0,
-            ));
-            let dst_ptr = builder.ins().stack_addr(types::I64, slot, 0);
-            builder.ins().store(MemFlags::new(), val, dst_ptr, 0);
-            let len_val = match value.as_ref() {
-                TypedExpr::ArrayInit(elems, _, _) => {
-                    builder.ins().iconst(types::I64, elems.len() as i64)
-                }
-                _ => builder.ins().iconst(types::I64, 0),
-            };
-            builder.ins().store(MemFlags::new(), len_val, dst_ptr, 8);
-            dst_ptr
-        }
-        Type::Vec(_) => {
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                24,
-                0,
-            ));
-            let dst_ptr = builder.ins().stack_addr(types::I64, slot, 0);
-            builder.ins().store(MemFlags::new(), val, dst_ptr, 0);
-            let len_val = match value.as_ref() {
-                TypedExpr::ArrayInit(elems, _, _) => {
-                    builder.ins().iconst(types::I64, elems.len() as i64)
-                }
-                _ => builder.ins().iconst(types::I64, 0),
-            };
-            builder.ins().store(MemFlags::new(), len_val, dst_ptr, 8);
-            let zero = builder.ins().iconst(types::I64, 0);
-            builder.ins().store(MemFlags::new(), zero, dst_ptr, 16);
-            dst_ptr
+            if matches!(value.as_ref(), TypedExpr::ArrayInit(..)) {
+                let size_val = builder.ins().iconst(types::I64, 32);
+                let mut sig = module.make_signature();
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                let callee = module
+                    .declare_function("malloc", Linkage::Import, &sig)
+                    .unwrap();
+                let local_callee = module.declare_func_in_func(callee, builder.func);
+                let call_inst = builder.ins().call(local_callee, &[size_val]);
+                let dst_ptr = builder.inst_results(call_inst)[0];
+                builder.ins().store(MemFlags::new(), val, dst_ptr, 0);
+                let arr_len = match value.as_ref() {
+                    TypedExpr::ArrayInit(elems, _, _) => elems.len() as i64,
+                    _ => 0,
+                };
+                let len_val = builder.ins().iconst(types::I64, arr_len);
+                builder.ins().store(MemFlags::new(), len_val, dst_ptr, 8);
+                dst_ptr
+            } else {
+                val
+            }
         }
         _ => val,
     };

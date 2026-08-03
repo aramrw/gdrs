@@ -305,11 +305,29 @@ pub fn substitute_expr(expr: &Expr, env: &HashMap<String, Type>) -> Expr {
             args.iter().map(|a| substitute_expr(a, env)).collect(),
             span.clone(),
         ),
-        Expr::Call(name, args, span) => Expr::Call(
-            name.clone(),
-            args.iter().map(|a| substitute_expr(a, env)).collect(),
-            span.clone(),
-        ),
+        Expr::Call(name, args, span) => {
+            let mut unique_vals = Vec::new();
+            for val in env.values() {
+                if !unique_vals.contains(val) {
+                    unique_vals.push(*val);
+                }
+            }
+            let new_name = if !unique_vals.is_empty() {
+                if name.starts_with("Vec::") || name.starts_with("Vec.") || name == "Vec::new" || name == "Vec.new" {
+                    let method = name.rsplit("::").next().unwrap_or(name).rsplit('.').next().unwrap_or(name);
+                    format!("{}_{method}", mangle_name("Vec", &unique_vals))
+                } else {
+                    name.clone()
+                }
+            } else {
+                name.clone()
+            };
+            Expr::Call(
+                new_name,
+                args.iter().map(|a| substitute_expr(a, env)).collect(),
+                span.clone(),
+            )
+        },
         Expr::Try(inner, span) => Expr::Try(Box::new(substitute_expr(inner, env)), span.clone()),
         Expr::ObjInit(name, fields, span) => {
             let mut unique_vals = Vec::new();

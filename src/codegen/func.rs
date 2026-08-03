@@ -42,7 +42,7 @@ pub fn compile_func<M: Module>(
 
     ctx.func.clear();
     *builder_context = FunctionBuilderContext::new();
-    ctx.func.signature = module.declarations().get_function_decl(func_id).signature.clone();
+    ctx.func.signature = sig.clone();
 
     let mut builder = FunctionBuilder::new(&mut ctx.func, builder_context);
 

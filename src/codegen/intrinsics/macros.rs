@@ -5,12 +5,12 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cranelift_codegen::ir::types;
-use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_module::{Linkage, Module};
 
 use crate::ast::{Type, TypedExpr};
-use crate::codegen::expr::compile_expr;
+use crate::codegen::expr::{coerce_val, compile_expr};
 use crate::sanal::StructLayout;
 
 static STR_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -55,23 +55,118 @@ pub fn compile_macro_call<M: Module>(
             for arg in args {
                 let val = compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
                 let ty = arg.ty();
-                let str_val = if ty == Type::Str || matches!(ty, Type::Obj(n) if n == "String") {
-                    val
-                } else {
-                    let target_name = match ty {
-                        Type::Obj(n) | Type::Enum(n) => n,
-                        _ => "",
-                    };
-                    let method_mangled = format!("{target_name}_to_string");
-                    let mut sig = module.make_signature();
-                    sig.params.push(AbiParam::new(types::I64));
-                    sig.returns.push(AbiParam::new(types::I64));
-                    let callee = module
-                        .declare_function(&method_mangled, Linkage::Import, &sig)
-                        .unwrap();
-                    let local_callee = module.declare_func_in_func(callee, builder.func);
-                    let call_inst = builder.ins().call(local_callee, &[val]);
-                    builder.inst_results(call_inst)[0]
+                let str_val = match ty {
+                    Type::Str => val,
+                    Type::String => {
+                        builder.ins().load(types::I64, MemFlags::new(), val, 0)
+                    }
+                    Type::Obj(target_name) if target_name == "String" || target_name == "std_string_String" => {
+                        builder.ins().load(types::I64, MemFlags::new(), val, 0)
+                    }
+                    Type::Int | Type::I32 => {
+                        let val_i64 = coerce_val(builder, val, types::I64);
+                        let mut sig = module.make_signature();
+                        sig.params.push(AbiParam::new(types::I64));
+                        sig.returns.push(AbiParam::new(types::I64));
+                        let callee = module
+                            .declare_function("intrinsic_int_to_str", Linkage::Import, &sig)
+                            .unwrap();
+                        let local_callee = module.declare_func_in_func(callee, builder.func);
+                        let call_inst = builder.ins().call(local_callee, &[val_i64]);
+                        builder.inst_results(call_inst)[0]
+                    }
+                    Type::Float | Type::F32 => {
+                        let val_f64 = coerce_val(builder, val, types::F64);
+                        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot,
+                            8,
+                            3,
+                        ));
+                        let slot_addr = builder.ins().stack_addr(types::I64, slot, 0);
+                        builder.ins().store(MemFlags::new(), val_f64, slot_addr, 0);
+                        let val_bits = builder.ins().load(types::I64, MemFlags::new(), slot_addr, 0);
+
+                        let mut sig = module.make_signature();
+                        sig.params.push(AbiParam::new(types::I64));
+                        sig.returns.push(AbiParam::new(types::I64));
+                        let callee = module
+                            .declare_function("intrinsic_float_to_str", Linkage::Import, &sig)
+                            .unwrap();
+                        let local_callee = module.declare_func_in_func(callee, builder.func);
+                        let call_inst = builder.ins().call(local_callee, &[val_bits]);
+                        builder.inst_results(call_inst)[0]
+                    }
+                    _ if builder.func.dfg.value_type(val) == types::F64 => {
+                        let val_f64 = coerce_val(builder, val, types::F64);
+                        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot,
+                            8,
+                            3,
+                        ));
+                        let slot_addr = builder.ins().stack_addr(types::I64, slot, 0);
+                        builder.ins().store(MemFlags::new(), val_f64, slot_addr, 0);
+                        let val_bits = builder.ins().load(types::I64, MemFlags::new(), slot_addr, 0);
+
+                        let mut sig = module.make_signature();
+                        sig.params.push(AbiParam::new(types::I64));
+                        sig.returns.push(AbiParam::new(types::I64));
+                        let callee = module
+                            .declare_function("intrinsic_float_to_str", Linkage::Import, &sig)
+                            .unwrap();
+                        let local_callee = module.declare_func_in_func(callee, builder.func);
+                        let call_inst = builder.ins().call(local_callee, &[val_bits]);
+                        builder.inst_results(call_inst)[0]
+                    }
+                    Type::Bool => {
+                        let val_i8 = coerce_val(builder, val, types::I8);
+                        let mut sig = module.make_signature();
+                        sig.params.push(AbiParam::new(types::I8));
+                        sig.returns.push(AbiParam::new(types::I64));
+                        let callee = module
+                            .declare_function("intrinsic_bool_to_str", Linkage::Import, &sig)
+                            .unwrap();
+                        let local_callee = module.declare_func_in_func(callee, builder.func);
+                        let call_inst = builder.ins().call(local_callee, &[val_i8]);
+                        builder.inst_results(call_inst)[0]
+                    }
+                    Type::Obj(target_name) if matches!(&target_name[..], "f64" | "Float" | "F64" | "f32" | "F32") => {
+                        let val_f64 = coerce_val(builder, val, types::F64);
+                        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot,
+                            8,
+                            3,
+                        ));
+                        let slot_addr = builder.ins().stack_addr(types::I64, slot, 0);
+                        builder.ins().store(MemFlags::new(), val_f64, slot_addr, 0);
+                        let val_bits = builder.ins().load(types::I64, MemFlags::new(), slot_addr, 0);
+
+                        let mut sig = module.make_signature();
+                        sig.params.push(AbiParam::new(types::I64));
+                        sig.returns.push(AbiParam::new(types::I64));
+                        let callee = module
+                            .declare_function("intrinsic_float_to_str", Linkage::Import, &sig)
+                            .unwrap();
+                        let local_callee = module.declare_func_in_func(callee, builder.func);
+                        let call_inst = builder.ins().call(local_callee, &[val_bits]);
+                        builder.inst_results(call_inst)[0]
+                    }
+                    Type::Obj(target_name) | Type::Enum(target_name) => {
+                        let method_mangled = format!("{target_name}_to_string");
+                        let mut sig = module.make_signature();
+                        sig.params.push(AbiParam::new(types::I64));
+                        sig.returns.push(AbiParam::new(types::I64));
+                        let callee = module
+                            .declare_function(&method_mangled, Linkage::Import, &sig)
+                            .unwrap();
+                        let local_callee = module.declare_func_in_func(callee, builder.func);
+                        let call_inst = builder.ins().call(local_callee, &[val]);
+                        let str_obj_ptr = builder.inst_results(call_inst)[0];
+                        builder.ins().load(types::I64, MemFlags::new(), str_obj_ptr, 0)
+                    }
+                    _ => {
+                        eprintln!("[DEBUG format!] matched DEFAULT _ ! arg.ty()={:?}, val={}", arg.ty(), val);
+                        val
+                    }
                 };
                 compiled_args.push(str_val);
             }
@@ -206,10 +301,17 @@ pub fn compile_macro_call<M: Module>(
                         compile_expr(builder, arg, vars, var_counter, module, struct_layouts),
                         1,
                     ),
-                    Type::Str | Type::String => (
+                    Type::Str => (
                         compile_expr(builder, arg, vars, var_counter, module, struct_layouts),
                         2,
                     ),
+                    Type::String => {
+                        let string_obj_val =
+                            compile_expr(builder, arg, vars, var_counter, module, struct_layouts);
+                        let str_ptr =
+                            builder.ins().load(types::I64, MemFlags::new(), string_obj_val, 0);
+                        (str_ptr, 2)
+                    }
                     Type::Float | Type::F32 => (
                         compile_expr(builder, arg, vars, var_counter, module, struct_layouts),
                         3,
@@ -217,45 +319,28 @@ pub fn compile_macro_call<M: Module>(
                     Type::Obj(tn) | Type::Enum(tn) => {
                         let to_string_fn = format!("{tn}_to_string");
                         let fmt_fn = format!("{tn}_fmt");
-                        let target_fn = if module.get_name(&to_string_fn).is_some() {
-                            Some(to_string_fn)
-                        } else if module.get_name(&fmt_fn).is_some() {
-                            Some(fmt_fn)
+                        let func_name = if module.get_name(&to_string_fn).is_some() {
+                            to_string_fn
                         } else {
-                            None
+                            fmt_fn
                         };
 
-                        if let Some(func_name) = target_fn {
-                            let method_call = TypedExpr::Call(
-                                func_name,
-                                vec![arg.clone()],
-                                Type::Str,
-                                arg.span(),
-                            );
-                            (
-                                compile_expr(
-                                    builder,
-                                    &method_call,
-                                    vars,
-                                    var_counter,
-                                    module,
-                                    struct_layouts,
-                                ),
-                                2,
-                            )
-                        } else {
-                            (
-                                compile_expr(
-                                    builder,
-                                    arg,
-                                    vars,
-                                    var_counter,
-                                    module,
-                                    struct_layouts,
-                                ),
-                                0,
-                            )
-                        }
+                        let method_call = TypedExpr::Call(
+                            func_name,
+                            vec![arg.clone()],
+                            Type::Str,
+                            arg.span(),
+                        );
+                        let string_obj_val = compile_expr(
+                            builder,
+                            &method_call,
+                            vars,
+                            var_counter,
+                            module,
+                            struct_layouts,
+                        );
+                        let str_ptr = builder.ins().load(types::I64, MemFlags::new(), string_obj_val, 0);
+                        (str_ptr, 2)
                     }
                     _ => (
                         compile_expr(builder, arg, vars, var_counter, module, struct_layouts),
@@ -404,11 +489,15 @@ pub fn compile_macro_call<M: Module>(
         }
         "len" => {
             if args.len() == 1 {
-                let raw_target_ptr =
-                    compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
-                let target_ptr =
-                    crate::codegen::expr::coerce_val(builder, raw_target_ptr, types::I64);
-                builder.ins().load(types::I64, MemFlags::new(), target_ptr, 8)
+                if let Type::Array(_, len) = args[0].ty() {
+                    builder.ins().iconst(types::I64, len as i64)
+                } else {
+                    let raw_target_ptr =
+                        compile_expr(builder, &args[0], vars, var_counter, module, struct_layouts);
+                    let target_ptr =
+                        crate::codegen::expr::coerce_val(builder, raw_target_ptr, types::I64);
+                    builder.ins().load(types::I64, MemFlags::new(), target_ptr, 8)
+                }
             } else {
                 builder.ins().iconst(types::I64, 0)
             }

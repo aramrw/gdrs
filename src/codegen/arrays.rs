@@ -6,7 +6,7 @@ use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, StackSlotData, Stac
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_module::{Linkage, Module};
 
-use crate::ast::{Type, TypedExpr};
+use crate::ast::{normalize_type_name, Type, TypedExpr};
 use crate::codegen::expr::{coerce_val, compile_expr, cranelift_type_of};
 use crate::sanal::StructLayout;
 
@@ -31,7 +31,18 @@ pub fn compile_array_init<M: Module>(
 
         for elem in elems {
             let raw_elem_val = compile_expr(builder, elem, vars, var_counter, module, struct_layouts);
-            let elem_val = coerce_val(builder, raw_elem_val, types::I64);
+            let elem_val = if builder.func.dfg.value_type(raw_elem_val) == types::F64 {
+                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    8,
+                    3,
+                ));
+                let slot_addr = builder.ins().stack_addr(types::I64, slot, 0);
+                builder.ins().store(MemFlags::new(), raw_elem_val, slot_addr, 0);
+                builder.ins().load(types::I64, MemFlags::new(), slot_addr, 0)
+            } else {
+                coerce_val(builder, raw_elem_val, types::I64)
+            };
             let mut sig_push = module.make_signature();
             sig_push.params.push(AbiParam::new(types::I64));
             sig_push.params.push(AbiParam::new(types::I64));
@@ -44,13 +55,18 @@ pub fn compile_array_init<M: Module>(
 
         vec_ptr
     } else {
-        let slot_bytes = (elems.len() * 8) as u32;
-        let slot = builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            if slot_bytes == 0 { 8 } else { slot_bytes },
-            0,
-        ));
-        let base_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+        let raw_size = (elems.len() * 8) as i64;
+        let size_bytes = if raw_size < 32 { 32 } else { raw_size };
+        let size_val = builder.ins().iconst(types::I64, size_bytes);
+        let mut sig = module.make_signature();
+        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        let callee = module
+            .declare_function("malloc", Linkage::Import, &sig)
+            .unwrap();
+        let local_callee = module.declare_func_in_func(callee, builder.func);
+        let call_inst = builder.ins().call(local_callee, &[size_val]);
+        let base_ptr = builder.inst_results(call_inst)[0];
 
         for (i, elem) in elems.iter().enumerate() {
             let val = compile_expr(builder, elem, vars, var_counter, module, struct_layouts);
@@ -60,6 +76,60 @@ pub fn compile_array_init<M: Module>(
 
         base_ptr
     }
+}
+
+fn get_element_type(target_ty: &Type, fallback: &Type, func_name: &str) -> Type {
+    let resolved = match target_ty {
+        Type::Vec(inner) | Type::Slice(inner) | Type::Array(inner, _) => {
+            if matches!(**inner, Type::Generic(_)) {
+                *fallback
+            } else {
+                **inner
+            }
+        }
+        Type::Obj(s) => {
+            let rest = if let Some(stripped) = s.strip_prefix("std_vec_Vec_t_") {
+                stripped
+            } else if let Some(stripped) = s.strip_prefix("std_vec_Vec_") {
+                stripped
+            } else if let Some(stripped) = s.strip_prefix("Vec_") {
+                stripped
+            } else if let Some(stripped) = s.strip_prefix("vec_") {
+                stripped
+            } else {
+                s
+            };
+
+            if rest.starts_with("std_vec_Vec") || rest.starts_with("Vec") || rest.starts_with("vec") {
+                Type::Obj(crate::ast::intern_str(rest))
+            } else {
+                let normalized = normalize_type_name(rest);
+                if matches!(normalized.as_str(), "f64" | "f32") {
+                    if rest == "f64" || rest == "F64" || rest == "Float" {
+                        Type::Float
+                    } else {
+                        Type::F32
+                    }
+                } else if matches!(normalized.as_str(), "bool" | "boolean") {
+                    Type::Bool
+                } else {
+                    Type::Int
+                }
+            }
+        }
+        _ => *fallback,
+    };
+
+    if matches!(resolved, Type::Generic(_)) {
+        if func_name.contains("Float") || func_name.contains("f64") || func_name.contains("F64") {
+            return Type::Float;
+        }
+        let normalized = normalize_type_name(target_ty.name_or_default());
+        if matches!(normalized.as_str(), "f64" | "float" | "f32" | "F64" | "F32") {
+            return Type::Float;
+        }
+    }
+    resolved
 }
 
 pub fn compile_index_access<M: Module>(
@@ -77,18 +147,21 @@ pub fn compile_index_access<M: Module>(
         Type::Slice(_) | Type::Vec(_) => {
             builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
         }
-        Type::Obj(s) if s.contains("Vec") => {
+        Type::Obj(s) if s.contains("Vec") || s.contains("vec") || s.contains("Slice") || s.contains("slice") || s.contains('[') => {
             builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
         }
         _ => base_ptr,
     };
     let raw_idx_val = compile_expr(builder, idx, vars, var_counter, module, struct_layouts);
     let idx_val = coerce_val(builder, raw_idx_val, types::I64);
+
     let elem_size = builder.ins().iconst(types::I64, 8);
     let offset = builder.ins().imul(idx_val, elem_size);
     let elem_addr = builder.ins().iadd(buffer_ptr, offset);
 
-    let cranelift_ty = cranelift_type_of(elem_ty);
+    let func_name = builder.func.name.to_string();
+    let actual_elem_ty = get_element_type(&target.ty(), elem_ty, &func_name);
+    let cranelift_ty = cranelift_type_of(&actual_elem_ty);
 
     builder
         .ins()
@@ -110,7 +183,7 @@ pub fn compile_index_assign<M: Module>(
         Type::Slice(_) | Type::Vec(_) => {
             builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
         }
-        Type::Obj(s) if s.contains("Vec") => {
+        Type::Obj(s) if s.contains("Vec") || s.contains("vec") => {
             builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
         }
         _ => base_ptr,
@@ -123,8 +196,13 @@ pub fn compile_index_assign<M: Module>(
     let offset = builder.ins().imul(idx_val, elem_size);
     let elem_addr = builder.ins().iadd(buffer_ptr, offset);
 
-    builder.ins().store(MemFlags::new(), new_val, elem_addr, 0);
-    new_val
+    let func_name = builder.func.name.to_string();
+    let actual_elem_ty = get_element_type(&target.ty(), &val.ty(), &func_name);
+    let cranelift_ty = cranelift_type_of(&actual_elem_ty);
+    let coerced_val = coerce_val(builder, new_val, cranelift_ty);
+
+    builder.ins().store(MemFlags::new(), coerced_val, elem_addr, 0);
+    coerced_val
 }
 
 pub fn compile_range<M: Module>(

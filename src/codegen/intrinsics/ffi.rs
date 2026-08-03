@@ -162,6 +162,28 @@ pub extern "C" fn intrinsic_log(type_tag: u64, value_bits: u64) -> i64 {
     0
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn intrinsic_int_to_str(n: i64) -> *mut std::os::raw::c_char {
+    let s = format!("{n}");
+    let c_str = std::ffi::CString::new(s).unwrap();
+    c_str.into_raw()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn intrinsic_float_to_str(bits: u64) -> *mut std::os::raw::c_char {
+    let f = f64::from_bits(bits);
+    let s = format!("{f}");
+    let c_str = std::ffi::CString::new(s).unwrap();
+    c_str.into_raw()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn intrinsic_bool_to_str(b: bool) -> *mut std::os::raw::c_char {
+    let s = if b { "true" } else { "false" };
+    let c_str = std::ffi::CString::new(s).unwrap();
+    c_str.into_raw()
+}
+
 unsafe extern "C" {
     fn malloc(size: usize) -> *mut std::ffi::c_void;
     fn realloc(ptr: *mut std::ffi::c_void, size: usize) -> *mut std::ffi::c_void;

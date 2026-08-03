@@ -192,6 +192,11 @@ pub fn check_semantics(
     for impl_block in &program.impls {
         let target_ty = resolve_type(Type::Obj(intern_str(&impl_block.target_type)), &enum_names, 0..1, &mut errors);
         for method in &impl_block.methods {
+            let is_generic = method.params.iter().any(|p| matches!(p.ty, Type::Generic(_)))
+                || matches!(method.return_type, Type::Generic(_));
+            if is_generic {
+                continue;
+            }
             let mangled_name = format!("{}_{}", impl_block.target_type, method.name);
             let mut params = Vec::new();
             for p in &method.params {
@@ -307,11 +312,31 @@ pub fn check_semantics(
     };
 
     let mut processed_fn_names = std::collections::HashSet::new();
+    let mut i = 0;
+    while i < worklist_cell.borrow().len() {
+        let func = worklist_cell.borrow()[i].clone();
+        i += 1;
 
-    while let Some(func) = {
-        let mut wl = worklist_cell.borrow_mut();
-        wl.pop()
-    } {
+        fn type_contains_generic(ty: &Type) -> bool {
+            match ty {
+                Type::Generic(_) => true,
+                Type::Ptr(t) | Type::Ref(t) | Type::MutRef(t) | Type::Slice(t) | Type::Vec(t) | Type::Rc(t) | Type::Arc(t) => {
+                    type_contains_generic(t)
+                }
+                Type::Array(t, _) => type_contains_generic(t),
+                _ => false,
+            }
+        }
+
+        let has_generic = func.params.iter().any(|p| type_contains_generic(&p.ty))
+            || type_contains_generic(&func.return_type)
+            || func.name.contains("_t_")
+            || func.name.ends_with("_t");
+
+        if has_generic {
+            continue;
+        }
+
         if processed_fn_names.contains(&func.name) {
             continue;
         }

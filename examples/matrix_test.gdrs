@@ -1,0 +1,59 @@
+use std::vec::Vec
+use std::fmt::Display
+
+obj Matrix:
+	raw: Vec<Vec<f64> >
+
+impl Display for Matrix:
+	fn fmt(self) -> String:
+		let m = self.rows()
+		let n = self.cols()
+		let mut res = String::from("Matrix[\n")
+		for i in 0..m:
+			res = res.push_str("  [ ")
+			for j in 0..n:
+				let val = self.raw[i][j]
+				res = res.push_str(format!(val))
+				res = res.push_str(" ")
+			res = res.push_str("]\n")
+		res = res.push_str("]")
+		return res
+
+impl Matrix:
+	fn rows(&self) -> i32:
+		self.raw.len
+
+	fn cols(&self) -> i32:
+		self.raw[0].len
+
+	fn mtp(&self, other: &Matrix) -> Matrix:
+		let m = self.rows()
+		let n = self.cols()
+		let p = other.cols()
+
+		let mut result_rows = Vec::new()
+		for i in 0..m:
+			let mut row = Vec::new()
+			for j in 0..p:
+				row.push(0.0)
+			result_rows.push(row)
+
+		for i in 0..m:
+			for j in 0..p:
+				let mut sum: f64 = 0.0
+				for k in 0..n:
+					sum = sum + (self.raw[i][k] * other.raw[k][j])
+				result_rows[i][j] = sum
+
+		return Matrix{ raw: result_rows }
+
+fn main():
+	let row1: Vec<f64> = Vec::from_slice([20.0 as f64, 20.0 as f64])
+	let row2: Vec<f64> = Vec::from_slice([40.0 as f64, 40.0 as f64])
+
+	let mut col = Vec.new()
+	col.push(row1)
+	col.push(row2)
+
+	let m = Matrix{ raw: col }
+	log!(m)

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static STR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 use cranelift_codegen::ir::types;
-use cranelift_codegen::ir::{AbiParam, InstBuilder, Value};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_module::{Linkage, Module};
 
@@ -45,7 +45,18 @@ pub fn cranelift_type_of(ty: &Type) -> cranelift_codegen::ir::Type {
         Type::F32 => types::F32,
         Type::Float => types::F64,
         Type::Bool => types::I8,
-        Type::Generic(_) => types::F64,
+        Type::Obj(s) => {
+            // Normalize the type name to Rust-style before matching
+            let normalized = crate::ast::normalize_type_name(s);
+            if matches!(normalized.as_str(), "f64" | "float") {
+                types::F64
+            } else if matches!(normalized.as_str(), "f32") {
+                types::F32
+            } else {
+                types::I64
+            }
+        }
+        Type::Generic(_) => types::I64,
         _ => types::I64, // pointers / heap handles
     }
 }
@@ -130,8 +141,8 @@ pub fn compile_expr<M: Module>(
             }
         }
 
-        // Float literal — emits F32 by default (promoted by Let codegen if needed)
-        TypedExpr::Float(f, _) => builder.ins().f32const(*f as f32),
+        // Float literal — emits F64 for precision
+        TypedExpr::Float(f, _) => builder.ins().f64const(*f),
 
         // Addition -> Cranelift iadd / fadd instruction
         TypedExpr::Add(lhs, rhs, ty, _) => crate::codegen::binops::compile_add(
@@ -736,12 +747,12 @@ pub(crate) fn coerce_val(
         builder.ins().uextend(types::I32, val)
     } else if (val_ty == types::I32 || val_ty == types::I64) && target_ty == types::F32 {
         builder.ins().fcvt_from_sint(types::F32, val)
-    } else if (val_ty == types::I32 || val_ty == types::I64) && target_ty == types::F64 {
+    } else if val_ty == types::I32 && target_ty == types::F64 {
         builder.ins().fcvt_from_sint(types::F64, val)
-    } else if val_ty == types::F32 && (target_ty == types::I32 || target_ty == types::I64) {
-        builder.ins().fcvt_to_sint(target_ty, val)
-    } else if val_ty == types::F64 && (target_ty == types::I32 || target_ty == types::I64) {
-        builder.ins().fcvt_to_sint(target_ty, val)
+    } else if val_ty == types::I64 && target_ty == types::F64 {
+        builder.ins().fcvt_from_sint(types::F64, val)
+    } else if val_ty == types::F64 && target_ty == types::I64 {
+        builder.ins().fcvt_to_sint(types::I64, val)
     } else if val_ty == types::F32 && target_ty == types::F64 {
         builder.ins().fpromote(types::F64, val)
     } else if val_ty == types::F64 && target_ty == types::F32 {
