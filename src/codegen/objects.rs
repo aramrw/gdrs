@@ -12,16 +12,32 @@ use crate::sanal::StructLayout;
 
 pub fn compile_obj_init<M: Module>(
     builder: &mut FunctionBuilder,
+    struct_name: &str,
     fields: &[(String, TypedExpr)],
     vars: &mut HashMap<String, Variable>,
     var_counter: &mut usize,
     module: &mut M,
     struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
-    let slot_size = (fields.len() * 8) as i64;
+    let layout_opt = struct_layouts.get(struct_name).cloned().or_else(|| {
+        struct_layouts
+            .iter()
+            .find(|(k, _)| {
+                **k == struct_name
+                    || struct_name.starts_with(k.as_str())
+                    || struct_name.contains(k.as_str())
+                    || k.contains(&format!("{struct_name}_"))
+                    || k.starts_with(&format!("{struct_name}_"))
+                    || k.ends_with(&format!("_{struct_name}"))
+                    || k.ends_with(struct_name)
+            })
+            .map(|(_, v)| v.clone())
+    });
+
+    let total_size = layout_opt.as_ref().map(|l| l.total_size as usize).unwrap_or_else(|| fields.len() * 8);
     let size_val = builder
         .ins()
-        .iconst(types::I64, if slot_size == 0 { 8 } else { slot_size });
+        .iconst(types::I64, if total_size == 0 { 8 } else { total_size as i64 });
 
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
@@ -33,8 +49,8 @@ pub fn compile_obj_init<M: Module>(
     let call_inst = builder.ins().call(local_callee, &[size_val]);
     let base_ptr = builder.inst_results(call_inst)[0];
 
-    for (i, (_field_name, field_expr)) in fields.iter().enumerate() {
-        let val = compile_expr(
+    for (i, (field_name, field_expr)) in fields.iter().enumerate() {
+        let raw_val = compile_expr(
             builder,
             field_expr,
             vars,
@@ -42,7 +58,37 @@ pub fn compile_obj_init<M: Module>(
             module,
             struct_layouts,
         );
-        let offset = (i * 8) as i32;
+        let (offset, field_ty) = if let Some(layout) = &layout_opt {
+            if let Some((off, ty)) = layout.field_offsets.get(field_name) {
+                (*off as i32, ty.clone())
+            } else {
+                ((i * 8) as i32, field_expr.ty())
+            }
+        } else {
+            ((i * 8) as i32, field_expr.ty())
+        };
+
+        if let Type::Obj(embedded_name) = &field_ty {
+            if let Some(embedded_layout) = struct_layouts.get(&embedded_name[..]) {
+                let bytes = embedded_layout.total_size as usize;
+                if bytes > 8 {
+                    let dst_ptr = builder.ins().iadd_imm(base_ptr, offset as i64);
+                    let mut sig_mc = module.make_signature();
+                    sig_mc.params.push(AbiParam::new(types::I64));
+                    sig_mc.params.push(AbiParam::new(types::I64));
+                    sig_mc.params.push(AbiParam::new(types::I64));
+                    sig_mc.returns.push(AbiParam::new(types::I64));
+                    let callee_mc = module.declare_function("gdrs_memcpy", Linkage::Import, &sig_mc).unwrap();
+                    let local_mc = module.declare_func_in_func(callee_mc, builder.func);
+                    let count_val = builder.ins().iconst(types::I64, bytes as i64);
+                    builder.ins().call(local_mc, &[dst_ptr, raw_val, count_val]);
+                    continue;
+                }
+            }
+        }
+
+        let target_cranelift_ty = cranelift_type_of(&field_ty);
+        let val = coerce_val(builder, raw_val, target_cranelift_ty);
         builder.ins().store(MemFlags::new(), val, base_ptr, offset);
     }
 

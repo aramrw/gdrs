@@ -536,9 +536,10 @@ pub fn compile_expr<M: Module>(
 
         TypedExpr::Bool(b, _) => builder.ins().iconst(types::I8, if *b { 1 } else { 0 }),
 
-        TypedExpr::ObjInit(_struct_name, fields, _ty, _) => {
+        TypedExpr::ObjInit(struct_name, fields, _ty, _) => {
             crate::codegen::objects::compile_obj_init(
                 builder,
+                struct_name,
                 fields,
                 vars,
                 var_counter,
