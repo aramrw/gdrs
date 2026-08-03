@@ -751,9 +751,9 @@ pub(crate) fn coerce_val(
     } else if val_ty == types::I32 && target_ty == types::F64 {
         builder.ins().fcvt_from_sint(types::F64, val)
     } else if val_ty == types::I64 && target_ty == types::F64 {
-        builder.ins().fcvt_from_sint(types::F64, val)
+        builder.ins().bitcast(types::F64, MemFlags::new(), val)
     } else if val_ty == types::F64 && target_ty == types::I64 {
-        builder.ins().fcvt_to_sint(types::I64, val)
+        builder.ins().bitcast(types::I64, MemFlags::new(), val)
     } else if val_ty == types::F32 && target_ty == types::F64 {
         builder.ins().fpromote(types::F64, val)
     } else if val_ty == types::F64 && target_ty == types::F32 {

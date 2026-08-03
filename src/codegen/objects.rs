@@ -69,20 +69,26 @@ pub fn compile_obj_init<M: Module>(
         };
 
         if let Type::Obj(embedded_name) = &field_ty {
-            if let Some(embedded_layout) = struct_layouts.get(&embedded_name[..]) {
-                let bytes = embedded_layout.total_size as usize;
-                if bytes > 8 {
-                    let dst_ptr = builder.ins().iadd_imm(base_ptr, offset as i64);
-                    let mut sig_mc = module.make_signature();
-                    sig_mc.params.push(AbiParam::new(types::I64));
-                    sig_mc.params.push(AbiParam::new(types::I64));
-                    sig_mc.params.push(AbiParam::new(types::I64));
-                    sig_mc.returns.push(AbiParam::new(types::I64));
-                    let callee_mc = module.declare_function("gdrs_memcpy", Linkage::Import, &sig_mc).unwrap();
-                    let local_mc = module.declare_func_in_func(callee_mc, builder.func);
-                    let count_val = builder.ins().iconst(types::I64, bytes as i64);
-                    builder.ins().call(local_mc, &[dst_ptr, raw_val, count_val]);
-                    continue;
+            let is_heap_handle = embedded_name.contains("Vec")
+                || embedded_name.contains("vec")
+                || embedded_name.contains("String")
+                || embedded_name.contains("string");
+            if !is_heap_handle {
+                if let Some(embedded_layout) = struct_layouts.get(&embedded_name[..]) {
+                    let bytes = embedded_layout.total_size as usize;
+                    if bytes > 8 {
+                        let dst_ptr = builder.ins().iadd_imm(base_ptr, offset as i64);
+                        let mut sig_mc = module.make_signature();
+                        sig_mc.params.push(AbiParam::new(types::I64));
+                        sig_mc.params.push(AbiParam::new(types::I64));
+                        sig_mc.params.push(AbiParam::new(types::I64));
+                        sig_mc.returns.push(AbiParam::new(types::I64));
+                        let callee_mc = module.declare_function("gdrs_memcpy", Linkage::Import, &sig_mc).unwrap();
+                        let local_mc = module.declare_func_in_func(callee_mc, builder.func);
+                        let count_val = builder.ins().iconst(types::I64, bytes as i64);
+                        builder.ins().call(local_mc, &[dst_ptr, raw_val, count_val]);
+                        continue;
+                    }
                 }
             }
         }
@@ -121,6 +127,8 @@ pub fn compile_field_access<M: Module>(
         _ => None,
     };
 
+    let mut is_embedded_struct = false;
+
     if let Some(struct_name) = target_struct_name {
         let layout_opt = struct_layouts.get(struct_name).cloned().or_else(|| {
             struct_layouts
@@ -144,7 +152,6 @@ pub fn compile_field_access<M: Module>(
     }
 
     let field_cranelift_ty = cranelift_type_of(field_ty);
-
     builder
         .ins()
         .load(field_cranelift_ty, MemFlags::new(), base_ptr, offset)

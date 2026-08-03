@@ -1,0 +1,6 @@
+use std::math
+
+fn main():
+	let x = 1.0
+	let y = std::math::exp(x)
+	log!(y)

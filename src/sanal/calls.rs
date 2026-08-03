@@ -380,7 +380,12 @@ pub fn type_check_call<'a>(
             }
         }
 
-        if !base_struct.is_empty() {
+        let is_struct_or_enum = type_ctx.struct_map.borrow().contains_key(&base_struct)
+            || type_ctx.enum_map.borrow().contains_key(&base_struct)
+            || type_ctx.mono.borrow().struct_templates.contains_key(&base_struct)
+            || type_ctx.mono.borrow().enum_templates.contains_key(&base_struct);
+
+        if !base_struct.is_empty() && is_struct_or_enum {
             let mut type_args = Vec::new();
             if !typed_args.is_empty() {
                 if let Type::Vec(inner) = typed_args[0].ty() {

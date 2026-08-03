@@ -63,6 +63,7 @@ pub fn load_program(entry_file: &Path) -> Result<Program, String> {
         ("time.gdrs", vec!["std".to_string(), "time".to_string()]),
         ("env.gdrs", vec!["std".to_string(), "env".to_string()]),
         ("fs.gdrs", vec!["std".to_string(), "fs".to_string()]),
+        ("math.gdrs", vec!["std".to_string(), "math".to_string()]),
     ];
     for (file_name, prefix) in std_files {
         let path = std_dir.join(file_name);

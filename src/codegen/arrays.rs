@@ -79,6 +79,9 @@ pub fn compile_array_init<M: Module>(
 }
 
 fn get_element_type(target_ty: &Type, fallback: &Type, func_name: &str) -> Type {
+    if matches!(fallback, Type::Float | Type::F32) {
+        return *fallback;
+    }
     let resolved = match target_ty {
         Type::Vec(inner) | Type::Slice(inner) | Type::Array(inner, _) => {
             if matches!(**inner, Type::Generic(_)) {
@@ -143,7 +146,11 @@ pub fn compile_index_access<M: Module>(
     struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
     let base_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
-    let buffer_ptr = match target.ty() {
+    let target_ty = match target.ty() {
+        Type::Ref(inner) | Type::MutRef(inner) => *inner,
+        other => other,
+    };
+    let buffer_ptr = match target_ty {
         Type::Slice(_) | Type::Vec(_) => {
             builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
         }
@@ -179,7 +186,11 @@ pub fn compile_index_assign<M: Module>(
     struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
     let base_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
-    let buffer_ptr = match target.ty() {
+    let target_ty = match target.ty() {
+        Type::Ref(inner) | Type::MutRef(inner) => *inner,
+        other => other,
+    };
+    let buffer_ptr = match target_ty {
         Type::Slice(_) | Type::Vec(_) => {
             builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0)
         }

@@ -67,8 +67,47 @@ pub fn create_jit_module() -> JITModule {
     builder.symbol("std_libc_strncmp", libc::strncmp as *const u8);
     builder.symbol("std_libc_strcpy", libc::strcpy as *const u8);
 
+    let math_syms: &[(&str, *const u8)] = &[
+        ("exp", crate::codegen::intrinsics::gdrs_exp as *const u8),
+        ("sqrt", crate::codegen::intrinsics::gdrs_sqrt as *const u8),
+        ("sin", crate::codegen::intrinsics::gdrs_sin as *const u8),
+        ("cos", crate::codegen::intrinsics::gdrs_cos as *const u8),
+        ("tan", crate::codegen::intrinsics::gdrs_tan as *const u8),
+        ("pow", crate::codegen::intrinsics::gdrs_pow as *const u8),
+        ("fabs", crate::codegen::intrinsics::gdrs_fabs as *const u8),
+        ("std_math_exp", crate::codegen::intrinsics::gdrs_exp as *const u8),
+        ("std_math_sqrt", crate::codegen::intrinsics::gdrs_sqrt as *const u8),
+        ("std_math_sin", crate::codegen::intrinsics::gdrs_sin as *const u8),
+        ("std_math_cos", crate::codegen::intrinsics::gdrs_cos as *const u8),
+        ("std_math_tan", crate::codegen::intrinsics::gdrs_tan as *const u8),
+        ("std_math_pow", crate::codegen::intrinsics::gdrs_pow as *const u8),
+        ("std_math_fabs", crate::codegen::intrinsics::gdrs_fabs as *const u8),
+        ("c_exp", crate::codegen::intrinsics::gdrs_exp as *const u8),
+        ("c_sqrt", crate::codegen::intrinsics::gdrs_sqrt as *const u8),
+        ("c_sin", crate::codegen::intrinsics::gdrs_sin as *const u8),
+        ("c_cos", crate::codegen::intrinsics::gdrs_cos as *const u8),
+        ("c_tan", crate::codegen::intrinsics::gdrs_tan as *const u8),
+        ("c_pow", crate::codegen::intrinsics::gdrs_pow as *const u8),
+        ("c_fabs", crate::codegen::intrinsics::gdrs_fabs as *const u8),
+        ("std_math_c_exp", crate::codegen::intrinsics::gdrs_exp as *const u8),
+        ("std_math_c_sqrt", crate::codegen::intrinsics::gdrs_sqrt as *const u8),
+        ("std_math_c_sin", crate::codegen::intrinsics::gdrs_sin as *const u8),
+        ("std_math_c_cos", crate::codegen::intrinsics::gdrs_cos as *const u8),
+        ("std_math_c_tan", crate::codegen::intrinsics::gdrs_tan as *const u8),
+        ("std_math_c_pow", crate::codegen::intrinsics::gdrs_pow as *const u8),
+        ("std_math_c_fabs", crate::codegen::intrinsics::gdrs_fabs as *const u8),
+    ];
+    for (name, ptr) in math_syms {
+        builder.symbol(*name, *ptr);
+    }
+
     builder.symbol_lookup_fn(Box::new(|name| {
-        let clean_name = name.strip_prefix("std_libc_").unwrap_or(name);
+        let clean_name = name
+            .strip_prefix("std_math_c_")
+            .or_else(|| name.strip_prefix("std_math_"))
+            .or_else(|| name.strip_prefix("std_libc_c_"))
+            .or_else(|| name.strip_prefix("std_libc_"))
+            .unwrap_or(name);
         match clean_name {
             "malloc" => return Some(crate::codegen::intrinsics::gdrs_malloc as *const u8),
             "free" => return Some(crate::codegen::intrinsics::gdrs_free as *const u8),

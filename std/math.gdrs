@@ -44,3 +44,46 @@ impl Sub for Vec3:
 		let y = self.y - other.y
 		let z = self.z - other.z
 		return self.new(x, y, z)
+
+extern "C":
+	fn c_exp(x: f64) -> f64
+	fn c_sqrt(x: f64) -> f64
+	fn c_sin(x: f64) -> f64
+	fn c_cos(x: f64) -> f64
+	fn c_tan(x: f64) -> f64
+	fn c_pow(base: f64, exp: f64) -> f64
+	fn c_fabs(x: f64) -> f64
+
+fn exp(x: f64) -> f64:
+	unsafe:
+		return c_exp(x)
+
+fn sqrt(x: f64) -> f64:
+	unsafe:
+		return c_sqrt(x)
+
+fn sin(x: f64) -> f64:
+	unsafe:
+		return c_sin(x)
+
+fn cos(x: f64) -> f64:
+	unsafe:
+		return c_cos(x)
+
+fn tan(x: f64) -> f64:
+	unsafe:
+		return c_tan(x)
+
+fn pow(base: f64, exponent: f64) -> f64:
+	unsafe:
+		return c_pow(base, exponent)
+
+fn abs(x: f64) -> f64:
+	unsafe:
+		return c_fabs(x)
+
+fn fabs(x: f64) -> f64:
+	unsafe:
+		return c_fabs(x)
+
+

@@ -106,8 +106,19 @@ pub fn type_check_index_access<'a>(
         });
     }
 
-    let elem_ty = match t_target.ty() {
-        Type::Array(e_ty, _) | Type::Slice(e_ty) | Type::Vec(e_ty) => *e_ty,
+    let target_ty = match t_target.ty() {
+        Type::Ref(inner) | Type::MutRef(inner) => *inner,
+        other => other,
+    };
+
+    let elem_ty = match target_ty {
+        Type::Array(e_ty, _) | Type::Slice(e_ty) | Type::Vec(e_ty) => {
+            if matches!(*e_ty, Type::Generic(_)) {
+                Type::Float
+            } else {
+                *e_ty
+            }
+        }
         Type::Obj(s) if s.contains("Vec") || s.contains("vec") => {
             let inner = if let Some(pos) = s.find("_t_") {
                 &s[pos + 3..]
@@ -118,14 +129,14 @@ pub fn type_check_index_access<'a>(
             } else {
                 s
             };
-            if inner.starts_with("std_vec_Vec") || inner.starts_with("Vec") || inner.starts_with("vec") {
-                Type::Obj(crate::ast::intern_str(inner))
-            } else if inner.contains("Float") || inner.contains("f64") || inner.contains("F64") {
+            if inner.contains("Float") || inner.contains("f64") || inner.contains("F64") || inner.contains("float") {
                 Type::Float
             } else if inner.contains("Bool") || inner.contains("bool") {
                 Type::Bool
-            } else {
+            } else if inner.contains("Int") || inner.contains("i64") || inner.contains("i32") || inner.contains("int") {
                 Type::Int
+            } else {
+                Type::Float
             }
         }
         other_ty => {

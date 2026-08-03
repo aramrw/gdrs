@@ -2,17 +2,18 @@ use std::vec::Vec
 use std::fmt::Display
 
 obj Matrix:
-	raw: Vec<Vec<f64> >
+	rows: i32
+	cols: i32
+	data: Vec<f64>
 
 impl Display for Matrix:
 	fn fmt(self) -> String:
-		let m = self.rows()
-		let n = self.cols()
 		let mut res = String::from("Matrix[\n")
-		for i in 0..m:
+		for r in 0..self.rows:
 			res = res.push_str("  [ ")
-			for j in 0..n:
-				let val = self.raw[i][j]
+			for c in 0..self.cols:
+				let idx = r * self.cols + c
+				let val = self.data[idx]
 				res = res.push_str(format!(val))
 				res = res.push_str(" ")
 			res = res.push_str("]\n")
@@ -20,40 +21,149 @@ impl Display for Matrix:
 		return res
 
 impl Matrix:
-	fn rows(&self) -> i32:
-		self.raw.len
+	// --- CONSTRUCTORS ---
+	fn zeros(rows: i32, cols: i32) -> Matrix:
+		let total = rows * cols
+		let mut data = Vec::new()
+		for i in 0..total:
+			data.push(0.0)
+		return Matrix{ rows: rows, cols: cols, data: data }
 
-	fn cols(&self) -> i32:
-		self.raw[0].len
+	fn ones(rows: i32, cols: i32) -> Matrix:
+		let total = rows * cols
+		let mut data = Vec::new()
+		for i in 0..total:
+			data.push(1.0)
+		return Matrix{ rows: rows, cols: cols, data: data }
 
+	// --- ACCESSORS ---
+	fn get(&self, r: i32, c: i32) -> f64:
+		return self.data[r * self.cols + c]
+
+	fn set(&mut self, r: i32, c: i32, val: f64):
+		let idx = r * self.cols + c
+		self.data[idx] = val
+
+	// --- LINEAR ALGEBRA OPERATIONS ---
+	fn add(&self, other: &Matrix) -> Matrix:
+		let total = self.rows * self.cols
+		let mut res_data = Vec::new()
+		for i in 0..total:
+			res_data.push(self.data[i] + other.data[i])
+		return Matrix{ rows: self.rows, cols: self.cols, data: res_data }
+
+	fn sub(&self, other: &Matrix) -> Matrix:
+		let total = self.rows * self.cols
+		let mut res_data = Vec::new()
+		for i in 0..total:
+			res_data.push(self.data[i] - other.data[i])
+		return Matrix{ rows: self.rows, cols: self.cols, data: res_data }
+
+	// Element-wise multiplication (Hadamard Product)
+	fn hadamard(&self, other: &Matrix) -> Matrix:
+		let total = self.rows * self.cols
+		let mut res_data = Vec::new()
+		for i in 0..total:
+			res_data.push(self.data[i] * other.data[i])
+		return Matrix{ rows: self.rows, cols: self.cols, data: res_data }
+
+	// Multiply scalar (number) to every element
+	fn scale(&self, scalar: f64) -> Matrix:
+		let total = self.rows * self.cols
+		let mut res_data = Vec::new()
+		for i in 0..total:
+			res_data.push(self.data[i] * scalar)
+		return Matrix{ rows: self.rows, cols: self.cols, data: res_data }
+
+	fn transpose(&self) -> Matrix:
+		let mut res = Matrix::zeros(self.cols, self.rows)
+		for r in 0..self.rows:
+			for c in 0..self.cols:
+				let val = self.get(r, c)
+				res.set(c, r, val)
+		return res
+
+	// Matrix Multiplication
 	fn mtp(&self, other: &Matrix) -> Matrix:
-		let m = self.rows()
-		let n = self.cols()
-		let p = other.cols()
+		let m = self.rows
+		let n = self.cols
+		let p = other.cols
 
-		let mut result_rows = Vec::new()
-		for i in 0..m:
-			let mut row = Vec::new()
-			for j in 0..p:
-				row.push(0.0)
-			result_rows.push(row)
+		let mut res = Matrix::zeros(m, p)
 
-		for i in 0..m:
-			for j in 0..p:
+		for r in 0..m:
+			for c in 0..p:
 				let mut sum: f64 = 0.0
 				for k in 0..n:
-					sum = sum + (self.raw[i][k] * other.raw[k][j])
-				result_rows[i][j] = sum
+					sum = sum + (self.get(r, k) * other.get(k, c))
+				res.set(r, c, sum)
 
-		return Matrix{ raw: result_rows }
+		return res
+
+	// --- ACTIVATION FUNCTIONS (ML) ---
+	// ReLU: replaces negative numbers with 0.0
+	fn relu(&self) -> Matrix:
+		let total = self.rows * self.cols
+		let mut res_data = Vec::new()
+		for i in 0..total:
+			let val = self.data[i]
+			if val > 0.0:
+				res_data.push(val)
+			else:
+				res_data.push(0.0)
+		return Matrix{ rows: self.rows, cols: self.cols, data: res_data }
+
+	// Sigmoid: squashes numbers between 0.0 and 1.0
+	fn sigmoid(&self) -> Matrix:
+		let total = self.rows * self.cols
+		let mut res_data = Vec::new()
+		for i in 0..total:
+			// 1.0 / (1.0 + e^(-x))
+			let val = 1.0 / (1.0 + std::math::exp(-self.data[i]))
+			res_data.push(val)
+		return Matrix{ rows: self.rows, cols: self.cols, data: res_data }
 
 fn main():
-	let row1: Vec<f64> = Vec::from_slice([20.0 as f64, 20.0 as f64])
-	let row2: Vec<f64> = Vec::from_slice([40.0 as f64, 40.0 as f64])
+	// 1. Input Data (2 samples, 3 features each)
+	let input_data: Vec<f64> = Vec::from_slice([
+		1.0, 2.0, -1.0,
+		0.5, 3.0,  1.5
+	])
+	let inputs = Matrix{ rows: 2, cols: 3, data: input_data }
 
-	let mut col = Vec.new()
-	col.push(row1)
-	col.push(row2)
+	// 2. Layer Weights (3 inputs -> 2 output neurons)
+	let weight_data: Vec<f64> = Vec::from_slice([
+		0.2, 0.8,
+		-0.5, 0.1,
+		0.9, -0.4
+	])
+	let weights = Matrix{ rows: 3, cols: 2, data: weight_data }
 
-	let m = Matrix{ raw: col }
-	log!(m)
+	// 3. Biases (1 row, 2 columns - added to each neuron)
+	let bias_data: Vec<f64> = Vec::from_slice([
+		0.1, 0.1,
+		0.1, 0.1
+	])
+	let biases = Matrix{ rows: 2, cols: 2, data: bias_data }
+
+	// 4. FORWARD PASS IN A NEURAL NETWORK
+	log!("--- Inputs ---")
+	log!(&inputs)
+	log!("--- Weights ---")
+	log!(&weights)
+
+	// Step A: Linear Combination (Input * Weights)
+	let linear_output = inputs.mtp(weights)
+	log!("--- Linear Output ---")
+	log!(&linear_output)
+
+	// Step B: Add Bias
+	let biased_output = linear_output.add(biases)
+	log!("--- Biased Output ---")
+	log!(&biased_output)
+
+	// Step C: Activation Function (ReLU)
+	let final_output = biased_output.relu()
+
+	log!("--- Neural Network Layer Output ---")
+	log!(&final_output)

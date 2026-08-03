@@ -290,7 +290,12 @@ pub fn check_semantics(
             let mangled = format!("std_libc_{}", ef.name);
             extern_fn_names.insert(mangled.clone());
             extern_map.insert(mangled.clone(), res_ret);
-            extern_signatures.insert(mangled, (res_params, res_ret));
+            extern_signatures.insert(mangled, (res_params.clone(), res_ret));
+
+            let mangled_math = format!("std_math_{}", ef.name);
+            extern_fn_names.insert(mangled_math.clone());
+            extern_map.insert(mangled_math.clone(), res_ret);
+            extern_signatures.insert(mangled_math, (res_params, res_ret));
         }
     }
 

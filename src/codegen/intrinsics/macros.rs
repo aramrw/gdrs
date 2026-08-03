@@ -292,7 +292,11 @@ pub fn compile_macro_call<M: Module>(
         "log" | "println" => {
             let mut last_val = builder.ins().iconst(types::I64, 0);
             for arg in args {
-                let (raw_val, type_tag) = match arg.ty() {
+                let effective_ty = match arg.ty() {
+                    Type::Ref(inner) | Type::MutRef(inner) => *inner,
+                    other => other,
+                };
+                let (raw_val, type_tag) = match effective_ty {
                     Type::Int | Type::I32 => (
                         compile_expr(builder, arg, vars, var_counter, module, struct_layouts),
                         0,

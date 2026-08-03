@@ -59,43 +59,55 @@ pub fn math_parser<'a>(
             .at_least(1)
             .map(|parts| parts.join("::"));
 
+        let layout_junk = just(Token::Newline)
+            .or(just(Token::Indent))
+            .or(just(Token::Dedent))
+            .repeated();
+
         let struct_init = path
             .clone()
             .then(
-                field_init
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+                layout_junk.clone().ignore_then(
+                    field_init
+                        .padded_by(layout_junk.clone())
+                        .separated_by(just(Token::Comma).then_ignore(layout_junk.clone()))
+                        .allow_trailing(),
+                )
+                .then_ignore(layout_junk.clone())
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
             )
             .map_with_span(|(name, fields), span| Expr::ObjInit(name, fields, span));
 
-        let parenthesized_args = just(Token::Newline)
-            .repeated()
+        let parenthesized_args = layout_junk.clone()
             .ignore_then(
                 math.clone()
-                    .separated_by(just(Token::Comma))
+                    .padded_by(layout_junk.clone())
+                    .separated_by(just(Token::Comma).then_ignore(layout_junk.clone()))
                     .allow_trailing(),
             )
-            .then_ignore(just(Token::Newline).repeated())
+            .then_ignore(layout_junk.clone())
             .delimited_by(just(Token::LParen), just(Token::RParen));
+
+        let bracketed_args = layout_junk.clone()
+            .ignore_then(
+                math.clone()
+                    .padded_by(layout_junk.clone())
+                    .separated_by(just(Token::Comma).then_ignore(layout_junk.clone()))
+                    .allow_trailing(),
+            )
+            .then_ignore(layout_junk.clone())
+            .delimited_by(just(Token::LBracket), just(Token::RBracket));
 
         let call_expr = path
             .clone()
             .then(parenthesized_args.clone())
             .map_with_span(|(name, args), span| Expr::Call(name, args, span));
 
-        let array_init = math
+        let array_init = bracketed_args
             .clone()
-            .separated_by(just(Token::Comma))
-            .allow_trailing()
-            .delimited_by(just(Token::LBracket), just(Token::RBracket))
             .map_with_span(|elems, span| Expr::ArrayInit(elems, span));
 
-        let macro_args = parenthesized_args.clone().or(math
-            .clone()
-            .separated_by(just(Token::Comma))
-            .allow_trailing()
-            .delimited_by(just(Token::LBracket), just(Token::RBracket)));
+        let macro_args = parenthesized_args.clone().or(bracketed_args.clone());
 
         let macro_call = select! { Token::MacroIdent(name) => name }
             .then(macro_args)

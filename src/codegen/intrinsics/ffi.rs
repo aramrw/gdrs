@@ -170,6 +170,41 @@ pub extern "C" fn intrinsic_int_to_str(n: i64) -> *mut std::os::raw::c_char {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn gdrs_exp(x: f64) -> f64 {
+    x.exp()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdrs_sqrt(x: f64) -> f64 {
+    x.sqrt()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdrs_sin(x: f64) -> f64 {
+    x.sin()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdrs_cos(x: f64) -> f64 {
+    x.cos()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdrs_tan(x: f64) -> f64 {
+    x.tan()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdrs_pow(base: f64, exp: f64) -> f64 {
+    base.powf(exp)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdrs_fabs(x: f64) -> f64 {
+    x.abs()
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn intrinsic_float_to_str(bits: u64) -> *mut std::os::raw::c_char {
     let f = f64::from_bits(bits);
     let s = format!("{f}");

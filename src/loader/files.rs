@@ -129,7 +129,21 @@ pub fn load_file_recursive(
         merged_program.trait_aliases.push(ta);
     }
 
-    merged_program.externs.extend(program.externs);
+    for mut ext in program.externs {
+        if !prefix_str.is_empty() {
+            let mut mangled_funcs = Vec::new();
+            for ef in &ext.functions {
+                mangled_funcs.push(crate::ast::ExternFnDecl {
+                    name: format!("{}{}", prefix_str, ef.name),
+                    params: ef.params.clone(),
+                    return_type: ef.return_type.clone(),
+                    span: ef.span.clone(),
+                });
+            }
+            ext.functions.extend(mangled_funcs);
+        }
+        merged_program.externs.push(ext);
+    }
 
     // Mangle and push structs
     for mut s in program.structs {
