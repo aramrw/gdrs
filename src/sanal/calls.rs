@@ -342,7 +342,11 @@ pub fn type_check_call<'a>(
     // 2. Auto-monomorphize static method calls like `Vec2_new(1.0, 2.0)` or `Vec3_new(1.0, 2.0, 3.0)`
     if resolved_name == name || !type_ctx.contains_fn(&resolved_name) || is_generic_fn {
         let target_type = if !typed_args.is_empty() {
-            match typed_args[0].ty() {
+            let t0 = match typed_args[0].ty() {
+                Type::Ref(inner) | Type::MutRef(inner) => *inner,
+                other => other,
+            };
+            match t0 {
                 Type::Obj(s) | Type::Enum(s) => Some(s.to_string()),
                 Type::Vec(_) => Some("Vec".to_string()),
                 Type::String => Some("String".to_string()),
@@ -445,6 +449,11 @@ pub fn type_check_call<'a>(
                     }
                 }
             }
+            let direct_method = format!("{base_struct}_{method_name}");
+            let is_generic_template = type_ctx.get_fn(&direct_method).map(|f| {
+                f.params.iter().any(|p| matches!(p.ty, Type::Generic(_))) || matches!(f.return_type, Type::Generic(_))
+            }).unwrap_or(false) || type_ctx.mono.borrow().struct_templates.contains_key(&base_struct);
+
             if !type_args.is_empty() {
                 let lookup_base = base_struct.clone();
                 if let Some(mangled_struct) = crate::sanal::mono::monomorphize_struct(
@@ -458,7 +467,15 @@ pub fn type_check_call<'a>(
                 ) {
                     let mangled_fn = format!("{mangled_struct}_{method_name}");
                     resolved_name = mangled_fn;
+                } else if !is_generic_template && type_ctx.contains_fn(&direct_method) {
+                    resolved_name = direct_method;
+                } else {
+                    resolved_name = direct_method;
                 }
+            } else if !is_generic_template && type_ctx.contains_fn(&direct_method) {
+                resolved_name = direct_method;
+            } else {
+                resolved_name = direct_method;
             }
         }
     }
