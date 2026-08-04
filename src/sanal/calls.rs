@@ -370,13 +370,35 @@ pub fn type_check_call<'a>(
         if base_struct.ends_with("_t") || base_struct.ends_with("_T") {
             base_struct = base_struct[..base_struct.len() - 2].to_string();
         }
-        if base_struct.starts_with("std_vec_") {
+        if base_struct == "Vec" || base_struct.starts_with("std_vec_") || base_struct.starts_with("std_vec") {
             base_struct = "std_vec_Vec".to_string();
+        } else if base_struct == "String" || base_struct.starts_with("std_string_") || base_struct.starts_with("std_string") {
+            base_struct = "std_string_String".to_string();
+        } else if base_struct == "Option" || base_struct.starts_with("std_core_Option") {
+            base_struct = "std_core_Option".to_string();
+        } else if base_struct == "Result" || base_struct.starts_with("std_core_Result") {
+            base_struct = "std_core_Result".to_string();
         } else if base_struct.starts_with("std_") {
             if let Some((clean, _)) = base_struct.rsplit_once('_') {
                 if type_ctx.struct_map.borrow().contains_key(clean) || type_ctx.enum_map.borrow().contains_key(clean) {
                     base_struct = clean.to_string();
                 }
+            }
+        }
+
+        if !type_ctx.struct_map.borrow().contains_key(&base_struct)
+            && !type_ctx.enum_map.borrow().contains_key(&base_struct)
+            && !type_ctx.mono.borrow().struct_templates.contains_key(&base_struct)
+            && !type_ctx.mono.borrow().enum_templates.contains_key(&base_struct)
+        {
+            if let Some(k) = type_ctx.mono.borrow().struct_templates.keys().find(|k| k.ends_with(&format!("_{base_struct}"))).cloned() {
+                base_struct = k;
+            } else if let Some(k) = type_ctx.struct_map.borrow().keys().find(|k| k.ends_with(&format!("_{base_struct}"))).cloned() {
+                base_struct = k;
+            } else if let Some(k) = type_ctx.mono.borrow().enum_templates.keys().find(|k| k.ends_with(&format!("_{base_struct}"))).cloned() {
+                base_struct = k;
+            } else if let Some(k) = type_ctx.enum_map.borrow().keys().find(|k| k.ends_with(&format!("_{base_struct}"))).cloned() {
+                base_struct = k;
             }
         }
 
