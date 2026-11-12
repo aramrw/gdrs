@@ -49,6 +49,7 @@ fn format_type_name(ty: &Type) -> String {
         Type::MutRef(inner) => format!("&mut {}", format_type_name(inner)),
         Type::Ptr(inner) => format!("*{}", format_type_name(inner)),
         Type::Infer(id) => format!("?{id}"),
+        Type::Error => "{error}".to_string(),
     }
 }
 

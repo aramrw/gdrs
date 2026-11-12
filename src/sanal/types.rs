@@ -42,6 +42,9 @@ pub struct TypeCtx<'a> {
     pub extern_c_names: &'a HashMap<String, String>,
     pub trait_methods: &'a HashMap<String, Vec<(String, Vec<Type>, Type)>>,
     pub trait_impls: &'a std::collections::HashSet<(String, String)>,
+    pub current_module: Vec<String>,
+    pub enum_vis: &'a HashMap<String, (crate::ast::Visibility, Vec<String>)>,
+    pub extern_vis: &'a HashMap<String, (crate::ast::Visibility, Vec<String>)>,
     pub is_unsafe: bool,
     pub loop_depth: usize,
     pub current_return_type: Option<Type>,
@@ -258,6 +261,7 @@ impl<'a> TypeCtx<'a> {
                         }
                     }
                     let mut field_offsets = HashMap::new();
+                    let mut field_vis = HashMap::new();
                     let mut offset = 0u32;
                     for field in &decl.fields {
                         let resolved_ty = self
@@ -265,12 +269,16 @@ impl<'a> TypeCtx<'a> {
                             .borrow_mut()
                             .resolve(crate::sanal::mono::substitute_type(field.ty, &env));
                         field_offsets.insert(field.name.clone(), (offset, resolved_ty));
+                        field_vis.insert(field.name.clone(), field.vis);
                         offset += 8;
                     }
                     return Some(StructLayout {
                         name: name.to_string(),
                         total_size: offset,
                         field_offsets,
+                        vis: decl.vis,
+                        module_path: decl.module_path.clone(),
+                        field_vis,
                     });
                 }
             }

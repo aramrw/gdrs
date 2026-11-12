@@ -37,6 +37,9 @@ pub struct StructLayout {
     pub name: String,
     pub total_size: u32,
     pub field_offsets: HashMap<String, (u32, Type)>,
+    pub vis: crate::ast::Visibility,
+    pub module_path: Vec<String>,
+    pub field_vis: HashMap<String, crate::ast::Visibility>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -274,8 +277,10 @@ pub fn check_semantics(
         if !has_generic_fields_or_bounds {
             let mut total_size = 0u32;
             let mut field_offsets = HashMap::new();
+            let mut field_vis = HashMap::new();
             for field in &s.fields {
                 field_offsets.insert(field.name.clone(), (total_size, field.ty));
+                field_vis.insert(field.name.clone(), field.vis);
                 total_size += 8;
             }
             struct_map.insert(
@@ -284,6 +289,9 @@ pub fn check_semantics(
                     name: s.name.clone(),
                     total_size,
                     field_offsets,
+                    vis: s.vis,
+                    module_path: s.module_path.clone(),
+                    field_vis,
                 },
             );
         }
@@ -292,7 +300,63 @@ pub fn check_semantics(
     let enum_names: std::collections::HashSet<String> =
         program.enums.iter().map(|e| e.name.clone()).collect();
     let mut enum_map = HashMap::new();
+    let mut enum_vis_map = HashMap::new();
     for e in &program.enums {
+        let has_derive_error = e
+            .attributes
+            .iter()
+            .any(|a| a.name == "derive" && a.args.iter().any(|arg| arg == "Error"));
+        if has_derive_error {
+            for v in &e.variants {
+                if let Some(err_attr) = v.attributes.iter().find(|a| a.name == "error" || a.name == "err") {
+                    if let Some(tmpl) = err_attr.args.first() {
+                        let chars: Vec<char> = tmpl.chars().collect();
+                        let mut ci = 0;
+                        while ci < chars.len() {
+                            if chars[ci] == '{' {
+                                if let Some(close_rel) = chars[ci + 1..].iter().position(|&c| c == '}') {
+                                    let inner: String = chars[ci + 1..ci + 1 + close_rel].iter().collect();
+                                    if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
+                                        if let Ok(idx) = inner.parse::<usize>() {
+                                            if idx >= v.payload_types.len() {
+                                                let help_msg = if v.payload_types.is_empty() {
+                                                    format!("Variant `{}` has no payload fields", v.name)
+                                                } else if v.payload_types.len() == 1 {
+                                                    format!("Valid field index for `{}` is `0`", v.name)
+                                                } else {
+                                                    format!(
+                                                        "Valid field indices for `{}` are `0..={}`",
+                                                        v.name,
+                                                        v.payload_types.len() - 1
+                                                    )
+                                                };
+                                                errors.push(SemanticError {
+                                                    code: "E0001",
+                                                    message: format!(
+                                                        "Format placeholder `{{{idx}}}` is out of bounds for `{}::{}` (has {} field(s))",
+                                                        e.name,
+                                                        v.name,
+                                                        v.payload_types.len()
+                                                    ),
+                                                    label: format!("Index `{idx}` is out of bounds"),
+                                                    secondary_label: None,
+                                                    help: Some(help_msg),
+                                                    span: err_attr.span.clone(),
+                                                });
+                                            }
+                                            ci += close_rel + 2;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                            ci += 1;
+                        }
+                    }
+                }
+            }
+        }
+        enum_vis_map.insert(e.name.clone(), (e.vis, e.module_path.clone()));
         for variant in &e.variants {
             if variant.payload_types.iter().any(type_contains_ref) {
                 errors.push(SemanticError {
@@ -386,6 +450,9 @@ pub fn check_semantics(
                 where_clause: method.where_clause.clone(),
                 body: method.body.clone(),
                 is_track_caller: method.is_track_caller,
+                vis: method.vis,
+                module_path: method.module_path.clone(),
+                is_trait_impl: impl_block.trait_name.is_some(),
             });
         }
     }
@@ -420,6 +487,9 @@ pub fn check_semantics(
                             where_clause: method.where_clause.clone(),
                             body: method.body.clone(),
                             is_track_caller: method.is_track_caller,
+                            vis: crate::ast::Visibility::Pub,
+                            module_path: s.module_path.clone(),
+                            is_trait_impl: true,
                         });
                     }
                 }
@@ -463,8 +533,10 @@ pub fn check_semantics(
     let mut extern_map = HashMap::new();
     let mut extern_signatures = HashMap::new();
     let mut extern_c_names = HashMap::new();
+    let mut extern_vis_map = HashMap::new();
     for ext in &program.externs {
         for ef in &ext.functions {
+            extern_vis_map.insert(ef.name.clone(), (ef.vis, ef.module_path.clone()));
             let res_ret = resolve_type(ef.return_type, &enum_names, 0..1, &mut errors);
             let res_params: Vec<Type> = ef
                 .params
@@ -496,6 +568,43 @@ pub fn check_semantics(
             extern_c_names
                 .entry(mangled_math)
                 .or_insert_with(|| ef.c_name.clone());
+        }
+    }
+
+    for u in &program.uses {
+        let target = &u.resolved_target;
+        if target.is_empty() {
+            continue;
+        }
+        let mut vis_info: Option<(crate::ast::Visibility, Vec<String>)> = None;
+        if let Some(s) = struct_map.get(target) {
+            vis_info = Some((s.vis, s.module_path.clone()));
+        } else if let Some(s) = mono_cell.borrow().struct_templates.get(target) {
+            vis_info = Some((s.vis, s.module_path.clone()));
+        } else if let Some(e) = enum_vis_map.get(target) {
+            vis_info = Some(e.clone());
+        } else if let Some(f) = fn_map.get(target) {
+            vis_info = Some((f.vis, f.module_path.clone()));
+        } else if let Some(ext) = extern_vis_map.get(target) {
+            vis_info = Some(ext.clone());
+        } else if let Some(t) = program.traits.iter().find(|t| t.name == *target) {
+            vis_info = Some((t.vis, t.module_path.clone()));
+        } else if let Some(ta) = program.trait_aliases.iter().find(|ta| ta.name == *target) {
+            vis_info = Some((ta.vis, ta.module_path.clone()));
+        }
+
+        if let Some((vis, decl_mod)) = vis_info {
+            if !crate::ast::is_visible(vis, &decl_mod, &u.module_path) {
+                let sym = u.path.last().map(|s| s.as_str()).unwrap_or(target);
+                errors.push(SemanticError {
+                    code: "E0603",
+                    message: format!("Item `{sym}` in `{}` is private", u.path.join("::")),
+                    label: "Private item imported here".to_string(),
+                    secondary_label: None,
+                    help: Some(format!("Mark `{sym}` with `pub` in its defining module")),
+                    span: u.span.clone(),
+                });
+            }
         }
     }
 
@@ -657,6 +766,9 @@ fn substitute_self_type(ty: Type, target_ty: Type) -> Type {
         extern_c_names: &extern_c_names,
         trait_methods: &trait_methods,
         trait_impls: &trait_impls,
+        current_module: Vec::new(),
+        enum_vis: &enum_vis_map,
+        extern_vis: &extern_vis_map,
         is_unsafe: false,
         loop_depth: 0,
         current_return_type: None,
@@ -693,6 +805,7 @@ fn substitute_self_type(ty: Type, target_ty: Type) -> Type {
         let resolved_return_type = func.return_type;
         let mut resolved_params = Vec::new();
         let mut fn_ctx = type_ctx.clone();
+        fn_ctx.current_module = func.module_path.clone();
         fn_ctx.current_return_type = Some(resolved_return_type);
         fn_ctx.infer = &fn_infer_cell;
 

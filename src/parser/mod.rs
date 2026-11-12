@@ -236,9 +236,22 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
 
     let fn_body = colon_fn_body.or(braced_fn_body);
 
-    // Function signature: #[track_caller] fn name(params) -> return_type where T: Bounds:
+    let opt_vis = just(Token::Pub)
+        .ignore_then(
+            just(Token::Crate)
+                .to(Visibility::PubCrate)
+                .or(just(Token::Super).to(Visibility::PubSuper))
+                .delimited_by(just(Token::LParen), just(Token::RParen))
+                .or_not(),
+        )
+        .map(|inner| inner.unwrap_or(Visibility::Pub))
+        .or_not()
+        .map(|opt| opt.unwrap_or(Visibility::Private));
+
+    // Function signature: #[track_caller] pub fn name(params) -> return_type where T: Bounds:
     let function = opt_attributes
         .clone()
+        .then(opt_vis.clone())
         .then_ignore(just(Token::Fn))
         .then(select! { Token::Ident(s) => s })
         .then_ignore(just(Token::LParen))
@@ -248,13 +261,16 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
         .then(opt_where.clone())
         .then(fn_body)
         .map_with_span(
-            |(((((attributes, name), params), opt_ret), where_clause), body), _| FuncDecl {
+            |((((((attributes, vis), name), params), opt_ret), where_clause), body), _| FuncDecl {
                 name,
                 params,
                 return_type: opt_ret.unwrap_or(Type::Unit),
                 where_clause,
                 body,
                 is_track_caller: attributes.iter().any(|a| a.name == "track_caller"),
+                vis,
+                module_path: Vec::new(),
+                is_trait_impl: false,
             },
         )
         .boxed();
@@ -277,6 +293,9 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             where_clause,
             body: Vec::new(),
             is_track_caller: attributes.iter().any(|a| a.name == "track_caller"),
+            vis: Visibility::Pub,
+            module_path: Vec::new(),
+            is_trait_impl: false,
         });
 
     let trait_method = function.clone().or(func_sig);
@@ -302,18 +321,24 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
 
     let trait_methods = colon_trait_methods.or(braced_trait_methods);
 
-    let trait_decl = just(Token::Trait)
-        .ignore_then(select! { Token::Ident(s) => s })
+    let trait_decl = opt_vis
+        .clone()
+        .then_ignore(just(Token::Trait))
+        .then(select! { Token::Ident(s) => s })
         .then(trait_methods)
-        .map_with_span(|(name, methods), span| TraitDecl {
+        .map_with_span(|((vis, name), methods), span| TraitDecl {
             name,
             methods,
+            vis,
+            module_path: Vec::new(),
             span,
         })
         .boxed();
 
-    let trait_alias_decl = just(Token::TypeKw)
-        .ignore_then(select! { Token::Ident(s) => s })
+    let trait_alias_decl = opt_vis
+        .clone()
+        .then_ignore(just(Token::TypeKw))
+        .then(select! { Token::Ident(s) => s })
         .then_ignore(just(Token::Assign))
         .then(
             select! { Token::Ident(s) => s }
@@ -321,14 +346,27 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
                 .at_least(1),
         )
         .then_ignore(just(Token::Newline).or_not())
-        .map_with_span(|(name, traits), span| TraitAliasDecl { name, traits, span });
+        .map_with_span(|((vis, name), traits), span| TraitAliasDecl {
+            name,
+            traits,
+            vis,
+            module_path: Vec::new(),
+            span,
+        });
 
     let field_decl = opt_attributes
         .clone()
+        .then(opt_vis.clone())
         .then(select! { Token::Ident(name) => name })
         .then_ignore(just(Token::Colon))
         .then(type_parser.clone())
-        .map_with_span(|((attributes, name), ty), span| FieldDecl { name, ty, attributes, span })
+        .map_with_span(|(((attributes, vis), name), ty), span| FieldDecl {
+            name,
+            ty,
+            vis,
+            attributes,
+            span,
+        })
         .then_ignore(just(Token::Comma).or_not())
         .then_ignore(just(Token::Newline).or_not());
 
@@ -354,13 +392,16 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
 
     let obj_decl = opt_attributes
         .clone()
+        .then(opt_vis.clone())
         .then_ignore(just(Token::Obj))
         .then(select! { Token::Ident(s) => s })
         .then(opt_where.clone())
         .then(obj_fields)
-        .map_with_span(|(((attributes, name), where_clause), fields), span| StructDecl {
+        .map_with_span(|((((attributes, vis), name), where_clause), fields), span| StructDecl {
             name,
             fields,
+            vis,
+            module_path: Vec::new(),
             attributes,
             where_clause,
             span,
@@ -409,13 +450,16 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
 
     let enum_decl = opt_attributes
         .clone()
+        .then(opt_vis.clone())
         .then_ignore(just(Token::Enum))
         .then(select! { Token::Ident(s) => s })
         .then(opt_where.clone())
         .then(enum_variants)
-        .map_with_span(|(((attributes, name), where_clause), variants), span| EnumDecl {
+        .map_with_span(|((((attributes, vis), name), where_clause), variants), span| EnumDecl {
             name,
             variants,
+            vis,
+            module_path: Vec::new(),
             attributes,
             where_clause,
             span,
@@ -521,16 +565,21 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
         .then(as_keyword.ignore_then(select! { Token::Ident(s) => s }).or_not())
         .map(|(path, alias)| vec![(path, alias)]);
 
-    let use_decl = just(Token::Use)
-        .ignore_then(multi_use_path.or(single_use_path))
+    let use_decl = opt_vis
+        .clone()
+        .then_ignore(just(Token::Use))
+        .then(multi_use_path.or(single_use_path))
         .then_ignore(just(Token::Newline).or_not())
-        .map_with_span(|entries, span: Span| {
+        .map_with_span(|(vis, entries), span: Span| {
             Item::Uses(
                 entries
                     .into_iter()
                     .map(|(path, alias)| UseDecl {
                         path,
                         alias,
+                        vis,
+                        module_path: Vec::new(),
+                        resolved_target: String::new(),
                         span: span.clone(),
                     })
                     .collect(),
@@ -538,18 +587,22 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
         })
         .boxed();
 
-    let extern_fn_sig = just(Token::Fn)
-        .ignore_then(select! { Token::Ident(s) => s })
+    let extern_fn_sig = opt_vis
+        .clone()
+        .then_ignore(just(Token::Fn))
+        .then(select! { Token::Ident(s) => s })
         .then_ignore(just(Token::LParen))
         .then(param.clone().separated_by(just(Token::Comma)).allow_trailing())
         .then_ignore(just(Token::RParen))
         .then(just(Token::Arrow).ignore_then(type_parser.clone()).or_not())
         .then_ignore(just(Token::Newline).or_not())
-        .map_with_span(|((name, params), opt_ret), span| ExternFnDecl {
+        .map_with_span(|(((vis, name), params), opt_ret), span| ExternFnDecl {
             c_name: name.clone(),
             name,
             params,
             return_type: opt_ret.unwrap_or(Type::Unit),
+            vis,
+            module_path: Vec::new(),
             span,
         });
 

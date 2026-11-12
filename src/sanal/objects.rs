@@ -39,13 +39,18 @@ fn lookup_struct_layout_for_type<'a>(
             })
             .map(|decl| {
                 let mut field_offsets = std::collections::HashMap::new();
+                let mut field_vis = std::collections::HashMap::new();
                 for f in &decl.fields {
                     field_offsets.insert(f.name.clone(), (0, f.ty));
+                    field_vis.insert(f.name.clone(), f.vis);
                 }
                 StructLayout {
                     name: decl.name.clone(),
                     total_size: 0,
                     field_offsets,
+                    vis: decl.vis,
+                    module_path: decl.module_path.clone(),
+                    field_vis,
                 }
             })
     })?;
@@ -398,6 +403,29 @@ pub fn type_check_obj_init<'a>(
     }
 
     let obj_ty_name = if let Some(layout) = found_struct {
+        if !crate::ast::is_visible(layout.vis, &layout.module_path, &type_ctx.current_module) {
+            errors.push(SemanticError {
+                code: "E0603",
+                message: format!("Struct `{name}` is private"),
+                label: "Private struct".to_string(),
+                secondary_label: None,
+                help: Some(format!("Mark `{name}` with `pub` if it should be accessible outside its module")),
+                span: span.clone(),
+            });
+        }
+        for (f_name, f_vis) in &layout.field_vis {
+            if !crate::ast::is_visible(*f_vis, &layout.module_path, &type_ctx.current_module) {
+                errors.push(SemanticError {
+                    code: "E0603",
+                    message: format!("Cannot construct `{name}` directly because field `{f_name}` is private"),
+                    label: "Private field in struct literal".to_string(),
+                    secondary_label: None,
+                    help: Some(format!("Use a public constructor function on `{name}`, or mark `{f_name}` as `pub`")),
+                    span: span.clone(),
+                });
+                break;
+            }
+        }
         for (expected_field, (_, expected_ty)) in &layout.field_offsets {
             if !typed_fields.iter().any(|(f, _)| f == expected_field) {
                 errors.push(SemanticError {
@@ -543,6 +571,24 @@ pub fn type_check_field_access<'a>(
             });
         }
     } else if let Some((struct_name, layout)) = lookup_struct_layout_for_type(type_ctx, target_ty) {
+        let is_slice_len = matches!(
+            unwrapped_tuple,
+            Type::Slice(_) | Type::Array(_, _) | Type::Vec(_)
+        ) && field_name == "len";
+        if !is_slice_len {
+            if let Some(&f_vis) = layout.field_vis.get(field_name) {
+                if !crate::ast::is_visible(f_vis, &layout.module_path, &type_ctx.current_module) {
+                    errors.push(SemanticError {
+                        code: "E0616",
+                        message: format!("Field `{field_name}` of struct `{struct_name}` is private"),
+                        label: "Private field".to_string(),
+                        secondary_label: None,
+                        help: Some(format!("Mark `{field_name}` with `pub` if it should be accessible outside its module")),
+                        span: span.clone(),
+                    });
+                }
+            }
+        }
         if let Some((_, fty)) = layout.field_offsets.get(field_name) {
             field_ty = match fty {
                 Type::Generic(g) => {

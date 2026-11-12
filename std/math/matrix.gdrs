@@ -3,17 +3,19 @@ use std::fmt::Display
 use std::rand::Rng
 
 #[derive(Error)]
-enum MatrixError:
-	#[err("cannot perform `add` or `sub` on matrices of different dimensions `{0}` and `{1}`")]
+pub enum MatrixError:
+	#[err("Cannot perform `add` or `sub` on matrices of different dimensions `{0}` and `{1}`")]
 	ShapeMismatch((i32, i32), (i32, i32))
-	#[err("cannot multiply matrices with unequal rows & cols `{0}` and `{1}`")]
+	#[err("Cannot multiply matrices with unequal rows & cols `{0}` and `{1}`")]
 	MatMulMisalignment((i32, i32), (i32, i32))
-	#[err("cannot construct or update matrix: expected data length `{0}`, got `{1}`")]
+	#[err("Cannot construct or update matrix: Expected data length `{0}`, got `{1}`")]
 	DataLengthMismatch(i32, i32)
+	#[err("Bias matrix must have 1 row & {2} cols. Found {0} rows {1} cols")]
+	BroadcastBiasMisalignment(i32, i32, i32)
 
-obj Matrix:
-	rows: i32
-	cols: i32
+pub obj Matrix:
+	pub rows: i32
+	pub cols: i32
 	data: Vec<f64>
 
 impl Display for Matrix:
@@ -31,7 +33,7 @@ impl Display for Matrix:
 		return res
 
 impl Matrix:
-	fn len(&self) -> i32:
+	pub fn len(&self) -> i32:
 		return self.rows * self.cols
 	
 	fn shapes_match(&self, o: &Matrix) -> Result<(), MatrixError>:
@@ -41,7 +43,7 @@ impl Matrix:
 		return Ok(())
 
 	// constructors 
-	fn zeros(rows: i32, cols: i32) -> Matrix {
+	pub fn zeros(rows: i32, cols: i32) -> Matrix {
 		let len = rows * cols
 		let mut data: Vec<f64> = Vec::with_capacity(len)
 		for i in 0..len:
@@ -49,7 +51,7 @@ impl Matrix:
 		return Matrix{ rows: rows, cols: cols, data: data }
 	}
 
-	fn ones(rows: i32, cols: i32) -> Matrix {
+	pub fn ones(rows: i32, cols: i32) -> Matrix {
 		let len = rows * cols
 		let mut data: Vec<f64> = Vec::with_capacity(len)
 		for i in 0..len:
@@ -57,7 +59,7 @@ impl Matrix:
 		return Matrix{ rows: rows, cols: cols, data: data }
 	}
 
-	fn rand(rows: i32, cols: i32) -> Matrix {
+	pub fn rand(rows: i32, cols: i32) -> Matrix {
 		let len = rows * cols
 		let mut rng = Rng::new()
 		let mut data: Vec<f64> = Vec::with_capacity(len)
@@ -66,25 +68,25 @@ impl Matrix:
 		return Matrix{ rows: rows, cols: cols, data: data }
 	}
 
-	fn from_vec(rows: i32, cols: i32, data: Vec<f64>) -> Result<Matrix, MatrixError>:
+	pub fn from_vec(rows: i32, cols: i32, data: Vec<f64>) -> Result<Matrix, MatrixError>:
 		if rows * cols != data.len():
 			return Err(MatrixError::DataLengthMismatch(rows * cols, data.len()))
 		let m = Matrix{ rows: rows, cols: cols, data: data }
 		return Ok(m)
 
 	// accesors 
-	fn get(&self, r: i32, c: i32) -> f64:
+	pub fn get(&self, r: i32, c: i32) -> f64:
 		return self.data[r * self.cols + c]
 
-	fn set(&mut self, r: i32, c: i32, val: f64):
+	pub fn set(&mut self, r: i32, c: i32, val: f64):
 		let i = r * self.cols + c
 		self.data[i] = val
 	
-	fn shape(&self) -> (i32, i32):
+	pub fn shape(&self) -> (i32, i32):
 		return (self.rows, self.cols)
 		
 	// algebra
-	fn transpose(&self) -> Matrix {
+	pub fn transpose(&self) -> Matrix {
 		let data = &self.data
 		let mut m = Matrix::zeros(self.cols, self.rows)
 
@@ -95,7 +97,7 @@ impl Matrix:
 		return m
 	}
 
-	fn add(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
+	pub fn add(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
 		self.shapes_match(o)?
 		let len = self.len()
 		let mut r: Vec<f64> = Vec::with_capacity(len)
@@ -105,7 +107,7 @@ impl Matrix:
 		return Ok(m)
 	}
 
-	fn sub(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
+	pub fn sub(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
 		self.shapes_match(o)?
 		let len = self.len()
 		let mut r: Vec<f64> = Vec::with_capacity(len)
@@ -115,7 +117,7 @@ impl Matrix:
 		return Ok(m)
 	}
 
-	fn hadamard(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
+	pub fn hadamard(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
 		self.shapes_match(o)?
 		let len = self.len()
 		let mut r: Vec<f64> = Vec::with_capacity(len)
@@ -125,7 +127,7 @@ impl Matrix:
 		return Ok(m)
 	}
 
-	fn matmul(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
+	pub fn matmul(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
 		if self.cols != o.rows:
 			return Err(MatrixError::MatMulMisalignment(self.shape(), o.shape()))
 		let mut rm = Matrix::zeros(self.rows, o.cols)
@@ -138,7 +140,7 @@ impl Matrix:
 		return Ok(rm)
 	}
 
-	fn scale(&self, s: f64) -> Matrix {
+	pub fn scale(&self, s: f64) -> Matrix {
 		let len = self.len()
 		let mut rv: Vec<f64> = Vec::with_capacity(len)
 		for i in 0..len:
@@ -146,11 +148,39 @@ impl Matrix:
 		return Matrix{ rows: self.rows, cols: self.cols, data: rv }
 	}
 
-	fn map(&self, f: fn(f64) -> f64) -> Matrix {
-		let len = self.len()
-		let mut rv: Vec<f64> = Vec::with_capacity(len)
-		for i in 0..len:
-			rv.push(f(self.data[i]))
-		return Matrix{ rows: self.rows, cols: self.cols, data: rv }
+	pub fn add_row(&self, bias: &Matrix) -> Result<Matrix, MatrixError> {
+		if bias.rows != 1 || bias.cols != self.cols:
+			return Err(MatrixError::BroadcastBiasMisalignment(bias.rows, bias.cols, self.cols))
+		let mut rm = Matrix::zeros(self.rows, self.cols)
+
+		for r in 0..self.rows:
+			for c in 0..self.cols:
+				let bv = bias.get(0, c)
+				let val = self.get(r, c)
+				let sum = bv + val
+				rm.set(r, c, sum)
+		return Ok(rm)
 	}
+
+	pub fn sub_rows(&self, bias: &Matrix) -> Result<Matrix, MatrixError> {
+		if bias.rows != 1 || bias.cols != self.cols:
+			return Err(MatrixError::BroadcastBiasMisalignment(bias.rows, bias.cols, self.cols))
+		let mut rm = Matrix::zeros(self.rows, self.cols)
+
+		for r in 0..self.rows:
+			for c in 0..self.cols:
+				let bv = bias.get(0, c)
+				let val = self.get(r, c)
+				let sum = bv - val
+				rm.set(r, c, sum)
+		return Ok(rm)
+	}
+
+	// fn map(&self, f: fn(f64) -> f64) -> Matrix {
+	// 	let len = self.len()
+	// 	let mut rv: Vec<f64> = Vec::with_capacity(len)
+	// 	for i in 0..len:
+	// 		rv.push(f(self.data[i]))
+	// 	return Matrix{ rows: self.rows, cols: self.cols, data: rv }
+	// }
 

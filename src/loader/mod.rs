@@ -355,7 +355,8 @@ fn rewrite_type(
         | Type::Void
         | Type::Generic(_)
         | Type::DynTrait(_)
-        | Type::Infer(_) => {}
+        | Type::Infer(_)
+        | Type::Error => {}
     }
 }
 

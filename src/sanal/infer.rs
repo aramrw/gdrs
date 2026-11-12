@@ -183,7 +183,7 @@ impl InferCtx {
     pub fn unify(&mut self, expected: Type, actual: Type) -> Result<(), (Type, Type)> {
         let a = self.probe(expected);
         let b = self.probe(actual);
-        if a == b || a == Type::Void || b == Type::Void {
+        if a == b || a == Type::Void || b == Type::Void || a == Type::Error || b == Type::Error {
             return Ok(());
         }
         if matches!(a, Type::Generic(_)) || matches!(b, Type::Generic(_)) {

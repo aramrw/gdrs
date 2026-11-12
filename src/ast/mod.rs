@@ -182,6 +182,12 @@ pub enum Token {
     RBracket,
     #[token(";")]
     Semicolon,
+    #[token("pub")]
+    Pub,
+    #[token("crate")]
+    Crate,
+    #[token("super")]
+    Super,
 
     #[token("obj")]
     Obj,
@@ -254,6 +260,8 @@ pub enum Type {
     Ptr(&'static Type),
     Ref(&'static Type),
     MutRef(&'static Type),
+    /// Poison type produced after an error to suppress cascading diagnostics.
+    Error,
     /// Internal compiler inference variable used only during semantic analysis.
     Infer(u32),
 }
@@ -349,6 +357,36 @@ pub fn normalize_type_name(name: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    #[default]
+    Private,
+    Pub,
+    PubCrate,
+    PubSuper,
+}
+
+/// Checks whether an item declared in `decl_mod` with `vis` is visible from `caller_mod`.
+pub fn is_visible(vis: Visibility, decl_mod: &[String], caller_mod: &[String]) -> bool {
+    match vis {
+        Visibility::Pub => true,
+        Visibility::Private => caller_mod.starts_with(decl_mod),
+        Visibility::PubSuper => {
+            let parent = if decl_mod.is_empty() {
+                &[]
+            } else {
+                &decl_mod[..decl_mod.len() - 1]
+            };
+            caller_mod.starts_with(parent)
+        }
+        Visibility::PubCrate => {
+            let decl_is_std = decl_mod.first().map(|s| s.as_str()) == Some("std");
+            let caller_is_std = caller_mod.first().map(|s| s.as_str()) == Some("std");
+            decl_is_std == caller_is_std
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Attribute {
     pub name: String,
@@ -360,6 +398,7 @@ pub struct Attribute {
 pub struct FieldDecl {
     pub name: String,
     pub ty: Type,
+    pub vis: Visibility,
     pub attributes: Vec<Attribute>,
     pub span: Span,
 }
@@ -368,6 +407,8 @@ pub struct FieldDecl {
 pub struct StructDecl {
     pub name: String,
     pub fields: Vec<FieldDecl>,
+    pub vis: Visibility,
+    pub module_path: Vec<String>,
     pub attributes: Vec<Attribute>,
     pub where_clause: Option<WhereClause>,
     pub span: Span,
@@ -385,6 +426,8 @@ pub struct EnumVariantDecl {
 pub struct EnumDecl {
     pub name: String,
     pub variants: Vec<EnumVariantDecl>,
+    pub vis: Visibility,
+    pub module_path: Vec<String>,
     pub attributes: Vec<Attribute>,
     pub where_clause: Option<WhereClause>,
     pub span: Span,
@@ -778,6 +821,9 @@ pub struct ModDecl {
 pub struct UseDecl {
     pub path: Vec<String>,
     pub alias: Option<String>,
+    pub vis: Visibility,
+    pub module_path: Vec<String>,
+    pub resolved_target: String,
     pub span: Span,
 }
 
@@ -785,6 +831,8 @@ pub struct UseDecl {
 pub struct TraitDecl {
     pub name: String,
     pub methods: Vec<FuncDecl>,
+    pub vis: Visibility,
+    pub module_path: Vec<String>,
     pub span: Span,
 }
 
@@ -792,6 +840,8 @@ pub struct TraitDecl {
 pub struct TraitAliasDecl {
     pub name: String,
     pub traits: Vec<String>,
+    pub vis: Visibility,
+    pub module_path: Vec<String>,
     pub span: Span,
 }
 
@@ -808,6 +858,8 @@ pub struct ExternFnDecl {
     pub c_name: String,
     pub params: Vec<Param>,
     pub return_type: Type,
+    pub vis: Visibility,
+    pub module_path: Vec<String>,
     pub span: Span,
 }
 
@@ -839,6 +891,9 @@ pub struct FuncDecl {
     pub where_clause: Option<WhereClause>,
     pub body: Vec<Expr>, // The indented block of code
     pub is_track_caller: bool,
+    pub vis: Visibility,
+    pub module_path: Vec<String>,
+    pub is_trait_impl: bool,
 }
 
 #[derive(Debug)]

@@ -8,10 +8,10 @@ use std::vec::Vec
 use std::string::String
 
 fn buffer_to_string(ptr: *void, size: i64) -> String:
-	return String{ ptr: ptr as *i64, len: size, cap: size + 1 }
+	return String::from_raw_parts(ptr as *i64, size, size + 1)
 
 #[derive(Error)]
-enum IoError:
+pub enum IoError:
 	#[err("Failed to open file or directory at path: '{0}'")]
 	OpenFailed(String)
 	#[err("Failed to allocate memory for file read")]
@@ -27,39 +27,39 @@ extern "C":
 	fn fclose(stream: i64) -> i32
 	fn gdrs_fs_read_dir(path: str, out_vec: *void) -> i64
 
-obj DirEntry:
+pub obj DirEntry:
 	path_str: String
 	name_str: String
 	is_directory: bool
 	is_regular_file: bool
 
 impl DirEntry:
-	fn path(&self) -> String:
+	pub fn path(&self) -> String:
 		return String::from(self.path_str.as_str())
 
-	fn file_name(&self) -> String:
+	pub fn file_name(&self) -> String:
 		return String::from(self.name_str.as_str())
 
-	fn is_dir(&self) -> bool:
+	pub fn is_dir(&self) -> bool:
 		return self.is_directory
 
-	fn is_file(&self) -> bool:
+	pub fn is_file(&self) -> bool:
 		return self.is_regular_file
 
-fn read_dir(path: str) -> Result<Vec<DirEntry>, IoError>:
+pub fn read_dir(path: str) -> Result<Vec<DirEntry>, IoError>:
 	unsafe:
 		let mut vec_val: Vec<DirEntry> = Vec::new()
 		if gdrs_fs_read_dir(path, (&mut vec_val) as *void) != 0:
 			return Err(IoError::OpenFailed(String::from(path)))
 		return Ok(vec_val)
 
-fn read_to_string(path: str) -> Result<String, IoError>:
+pub fn read_to_string(path: str) -> Result<String, IoError>:
 	let file_res = File::open(path)
 	match file_res:
 		Result::Ok(f) => f.read_to_string()
 		Result::Err(e) => Err(e)
 
-obj File:
+pub obj File:
 	handle: i64
 
 impl Drop for File:
@@ -70,7 +70,7 @@ impl Drop for File:
 				self.handle = 0
 
 impl File:
-	fn open(path: str) -> Result<File, IoError>:
+	pub fn open(path: str) -> Result<File, IoError>:
 		unsafe:
 			let ptr = fopen(path, "r")
 			if ptr == 0:
@@ -78,7 +78,7 @@ impl File:
 			
 			return Ok(File{handle: ptr})
 
-	fn read_to_string(mut self) -> Result<String, IoError>:
+	pub fn read_to_string(mut self) -> Result<String, IoError>:
 		unsafe:
 			let stream = self.handle
 			if stream == 0:
@@ -116,7 +116,7 @@ impl File:
 
 			return Ok(buffer_to_string(buffer, actual_size))
 
-	fn close(mut self) -> i32:
+	pub fn close(mut self) -> i32:
 		unsafe:
 			if self.handle == 0:
 				return 0

@@ -6,24 +6,24 @@ use std::core::{Option}
 extern "C":
 	fn clock_gettime(clk_id: i32, tp: *void) -> i32
 
-obj Instant:
-	sec: i64
-	nsec: i64
+pub obj Instant:
+	pub sec: i64
+	pub nsec: i64
 
 impl Instant:
-	fn now() -> Instant:
+	pub fn now() -> Instant:
 		unsafe:
 			let mut ts = Instant{sec: 0, nsec: 0}
 			clock_gettime(8, (&mut ts) as *void)
 			return ts
 
-	fn ms(self) -> i64:
+	pub fn ms(self) -> i64:
 		let end = Instant::now()
 		let sec_diff = end.sec - self.sec
 		let nsec_diff = end.nsec - self.nsec
 		return (sec_diff * 1_000_000_000 + nsec_diff) / 1_000_000
 
-	fn us(self) -> i64:
+	pub fn us(self) -> i64:
 		let end = Instant::now()
 		let sec_diff = end.sec - self.sec
 		let nsec_diff = end.nsec - self.nsec

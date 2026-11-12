@@ -32,6 +32,9 @@ fn main() {
         }) => {
             build_and_run(&src, &lib_dirs, &libs, &args);
         }
+        Some(Commands::Check { src }) => {
+            check_program(src.as_deref());
+        }
         None => {
             if cli.srcs.is_empty() {
                 eprintln!("Usage: gdrs run <file.gdrs> or gdrs build <file.gdrs> -o <binary>");
@@ -40,6 +43,44 @@ fn main() {
             for src in &cli.srcs {
                 build_and_run(src, &cli.lib_dirs, &cli.libs, &[]);
             }
+        }
+    }
+}
+
+fn check_program(entry_path: Option<&Path>) {
+    let dummy_path = std::env::temp_dir().join(format!("gdrs_check_std_{}.gdrs", std::process::id()));
+    let (target_path, cleanup) = match entry_path {
+        Some(p) => (p.to_path_buf(), false),
+        None => {
+            let _ = std::fs::write(&dummy_path, "");
+            (dummy_path.clone(), true)
+        }
+    };
+
+    let (ast, source_map) = match crate::loader::load_program(&target_path) {
+        Ok(res) => res,
+        Err(e) => {
+            if cleanup {
+                let _ = std::fs::remove_file(&dummy_path);
+            }
+            eprintln!("[LOAD ERROR] {}", e);
+            std::process::exit(1);
+        }
+    };
+    if cleanup {
+        let _ = std::fs::remove_file(&dummy_path);
+    }
+
+    match crate::sanal::check_semantics(&ast) {
+        Ok(_) => {
+            match entry_path {
+                Some(p) => println!("Check passed: {}", p.display()),
+                None => println!("Check passed: std/"),
+            }
+        }
+        Err(errors) => {
+            crate::diagnostics::print_semantic_errors(&source_map, errors);
+            std::process::exit(1);
         }
     }
 }

@@ -137,6 +137,15 @@ fn test_scale() {
 	log!("scaled (2.5x) =\n{}", scaled.fmt())
 }
 
+fn test_add_sub_rows() {
+	log!("--- 7. Add & Sub rows (Broadcasting) ---")
+	let v: Vec<f64> = vec![0.0, 1.0, 2.0]
+	let b = Matrix::from_vec(1, 3, v).unwrap()
+	let m = Matrix::rand(4, 3)
+	let added = m.add_row(&b).unwrap()
+	log!("added: {}", added.fmt())
+}
+
 fn main() {
 	test_constructors_and_accessors()
 	test_addition_and_subtraction()
@@ -144,5 +153,6 @@ fn main() {
 	test_transpose()
 	test_matmul()
 	test_scale()
+	test_add_sub_rows()
 	log!("All Matrix tests passed successfully!")
 }

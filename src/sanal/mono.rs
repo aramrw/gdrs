@@ -302,6 +302,7 @@ pub fn type_suffix(ty: &Type) -> String {
         Type::Ref(t) => format!("ref_{}", type_suffix(t)),
         Type::MutRef(t) => format!("mutref_{}", type_suffix(t)),
         Type::Infer(id) => format!("infer_{id}"),
+        Type::Error => "error".to_string(),
     }
 }
 
@@ -818,9 +819,11 @@ pub fn monomorphize_struct(
 
     let mut total_size = 0u32;
     let mut field_offsets = HashMap::new();
+    let mut field_vis = HashMap::new();
     for field in &decl.fields {
         let field_ty = substitute_type(field.ty, &env);
         field_offsets.insert(field.name.clone(), (total_size, field_ty));
+        field_vis.insert(field.name.clone(), field.vis);
         total_size += 8;
     }
 
@@ -830,6 +833,9 @@ pub fn monomorphize_struct(
             name: mangled_name.clone(),
             total_size,
             field_offsets,
+            vis: decl.vis,
+            module_path: decl.module_path.clone(),
+            field_vis,
         },
     );
 
@@ -985,6 +991,9 @@ pub fn monomorphize_struct(
                     where_clause: None,
                     body,
                     is_track_caller: method.is_track_caller,
+                    vis: method.vis,
+                    module_path: method.module_path.clone(),
+                    is_trait_impl: method.is_trait_impl,
                 };
 
                 fn_map
@@ -1220,6 +1229,9 @@ pub fn monomorphize_enum(
                     where_clause: None,
                     body,
                     is_track_caller: method.is_track_caller,
+                    vis: method.vis,
+                    module_path: method.module_path.clone(),
+                    is_trait_impl: method.is_trait_impl,
                 };
 
                 fn_map
@@ -1384,6 +1396,9 @@ pub fn monomorphize_fn(
         where_clause: None,
         body,
         is_track_caller: decl.is_track_caller,
+        vis: decl.vis,
+        module_path: decl.module_path.clone(),
+        is_trait_impl: decl.is_trait_impl,
     };
 
     fn_map

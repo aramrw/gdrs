@@ -3,5 +3,5 @@
 use std::fmt::Display
 use std::core::Option
 
-trait Error:
+pub trait Error:
 	fn source(self) -> Option<String>

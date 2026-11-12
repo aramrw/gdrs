@@ -76,6 +76,9 @@ fn build_substituted_method(
         where_clause: None,
         body: Vec::new(),
         is_track_caller: tpl_method.is_track_caller,
+        vis: tpl_method.vis,
+        module_path: tpl_method.module_path.clone(),
+        is_trait_impl: tpl_method.is_trait_impl,
     }
 }
 
@@ -206,6 +209,7 @@ pub fn type_check_call<'a>(
 ) -> Option<TypedExpr> {
     let is_method_syntax = raw_name_arg.starts_with('.');
     let raw_name = raw_name_arg.strip_prefix('.').unwrap_or(raw_name_arg);
+
     if args.len() == 2 {
         if let Expr::Ident(ref smart_ptr, _) = args[0] {
             if (smart_ptr == "rc" || smart_ptr == "arc")
@@ -587,8 +591,30 @@ pub fn type_check_call<'a>(
                 name.clone()
             };
             (tt.clone(), mn)
-        } else if let Some((bs, mn)) = name.split_once('_') {
-            (bs.to_string(), mn.to_string())
+        } else if let Some((bs, mn)) = {
+            let mono = type_ctx.mono.borrow();
+            let mut found = None;
+            for (idx, _) in name.match_indices('_') {
+                let candidate = &name[..idx];
+                let is_known = type_ctx.struct_map.borrow().contains_key(candidate)
+                    || type_ctx.enum_map.borrow().contains_key(candidate)
+                    || mono.struct_templates.contains_key(candidate)
+                    || mono.enum_templates.contains_key(candidate)
+                    || mono.struct_templates.iter().any(|(k, _)| k.ends_with(&format!("_{candidate}")))
+                    || mono.enum_templates.iter().any(|(k, _)| k.ends_with(&format!("_{candidate}")));
+                if is_known {
+                    found = Some((candidate.to_string(), name[idx + 1..].to_string()));
+                }
+            }
+            found.or_else(|| {
+                if raw_name.contains("::") {
+                    raw_name.rsplit_once("::").map(|(b, m)| (b.replace("::", "_"), m.to_string()))
+                } else {
+                    name.split_once('_').map(|(b, m)| (b.to_string(), m.to_string()))
+                }
+            })
+        } {
+            (bs, mn)
         } else {
             (String::new(), String::new())
         };
@@ -1043,6 +1069,9 @@ pub fn type_check_call<'a>(
                     where_clause: tpl_fn.where_clause.clone(),
                     body: Vec::new(),
                     is_track_caller: tpl_fn.is_track_caller,
+                    vis: tpl_fn.vis,
+                    module_path: tpl_fn.module_path.clone(),
+                    is_trait_impl: tpl_fn.is_trait_impl,
                 });
             }
         } else if let Some(mangled_fn) = crate::sanal::mono::monomorphize_fn(
@@ -1130,6 +1159,34 @@ pub fn type_check_call<'a>(
         deferred_target_func.or_else(|| type_ctx.get_fn(&resolved_name))
     };
     let ret_ty = if let Some(target_func) = target_func_opt {
+        if !target_func.is_trait_impl
+            && !crate::ast::is_visible(
+                target_func.vis,
+                &target_func.module_path,
+                &type_ctx.current_module,
+            )
+        {
+            let clean_name = name.trim_start_matches('.');
+            if is_method_syntax {
+                errors.push(SemanticError {
+                    code: "E0624",
+                    message: format!("Method `{clean_name}` is private"),
+                    label: "Private method".to_string(),
+                    secondary_label: None,
+                    help: Some(format!("Mark `{clean_name}` with `pub fn` if it should be callable outside its module")),
+                    span: span.clone(),
+                });
+            } else {
+                errors.push(SemanticError {
+                    code: "E0603",
+                    message: format!("Function `{clean_name}` is private"),
+                    label: "Private function".to_string(),
+                    secondary_label: None,
+                    help: Some(format!("Mark `{clean_name}` with `pub fn` if it should be callable outside its module")),
+                    span: span.clone(),
+                });
+            }
+        }
         if target_func.params.len() != typed_args.len() && !typed_args.is_empty() {
             if (target_func.params.is_empty() || target_func.params[0].name != "self")
                 && target_func.params.len() == typed_args.len() - 1
@@ -1570,6 +1627,18 @@ pub fn type_check_call<'a>(
     } else if let Some((param_decl_types, ext_ret_ty)) =
         type_ctx.extern_signatures.get(&resolved_name)
     {
+        if let Some((ext_vis, ext_mod)) = type_ctx.extern_vis.get(&resolved_name) {
+            if !crate::ast::is_visible(*ext_vis, ext_mod, &type_ctx.current_module) {
+                errors.push(SemanticError {
+                    code: "E0603",
+                    message: format!("Extern function `{resolved_name}` is private"),
+                    label: "Private extern function".to_string(),
+                    secondary_label: None,
+                    help: Some(format!("Mark `{resolved_name}` with `pub fn` if it should be callable outside its module")),
+                    span: span.clone(),
+                });
+            }
+        }
         if param_decl_types.len() != typed_args.len() {
             errors.push(SemanticError {
                 code: "E0061",
@@ -1624,19 +1693,21 @@ pub fn type_check_call<'a>(
     } else if scopes.lookup(&resolved_name).is_some() {
         Type::Int
     } else if is_method_syntax && !typed_args.is_empty() {
-        errors.push(SemanticError {
-            code: "E0599",
-            message: format!(
-                "No method named `{}` found for type `{}`",
-                raw_name,
-                crate::sanal::compat::format_type(&typed_args[0].ty())
-            ),
-            label: format!("Method `{}` not found on this type", raw_name),
-            secondary_label: None,
-            help: None,
-            span: span.clone(),
-        });
-        Type::Unit
+        if typed_args[0].ty() != Type::Error {
+            errors.push(SemanticError {
+                code: "E0599",
+                message: format!(
+                    "No method named `{}` found for type `{}`",
+                    raw_name,
+                    crate::sanal::compat::format_type(&typed_args[0].ty())
+                ),
+                label: format!("Method `{}` not found on this type", raw_name),
+                secondary_label: None,
+                help: None,
+                span: span.clone(),
+            });
+        }
+        Type::Error
     } else {
         errors.push(SemanticError {
             code: "E0425",
@@ -1646,7 +1717,7 @@ pub fn type_check_call<'a>(
             help: None,
             span: span.clone(),
         });
-        Type::Unit
+        Type::Error
     };
 
     let call_target = if type_ctx.extern_signatures.contains_key(&resolved_name) {

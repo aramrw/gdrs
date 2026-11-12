@@ -1,7 +1,7 @@
 // std/convert.gdrs - Value conversion traits
 
-trait From:
+pub trait From:
 	fn from(val: $T) -> Self
 
-trait Into:
+pub trait Into:
 	fn into(self) -> $T

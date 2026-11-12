@@ -1,23 +1,23 @@
 // std/iter.gdrs - Standard iterator trait and Range iterator
 
-obj Range:
-	start: i64
-	end: i64
+pub obj Range:
+	pub start: i64
+	pub end: i64
 
-trait Iterator:
+pub trait Iterator:
 	fn next(&mut self) -> Option<i64>
 
-trait IntoIterator:
+pub trait IntoIterator:
 	fn into_iter(self) -> Self
 
 impl Range:
-	fn into_iter(self) -> Range:
+	pub fn into_iter(self) -> Range:
 		return self
 
-	fn iter(self) -> Range:
+	pub fn iter(self) -> Range:
 		return self
 
-	fn next(&mut self) -> Option<i64>:
+	pub fn next(&mut self) -> Option<i64>:
 		if self.start < self.end:
 			let val = self.start
 			self.start = self.start + 1

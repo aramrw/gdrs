@@ -2,12 +2,12 @@
 use std::libc::{malloc, realloc, free}
 use std::core::{Option, Drop}
 
-obj Vec:
+pub obj Vec:
 	ptr: *u8
 	len: i64
 	cap: i64
 
-obj VecIter:
+pub obj VecIter:
 	vec_ptr: *u8
 	idx: i64
 	len: i64
@@ -22,10 +22,10 @@ impl Drop for Vec:
 				self.cap = 0
 
 impl Vec:
-	fn new() -> Vec:
+	pub fn new() -> Vec:
 		return Vec{ ptr: 0 as *u8, len: 0, cap: 0 }
 
-	fn with_capacity(capacity: i64) -> Vec:
+	pub fn with_capacity(capacity: i64) -> Vec:
 		if capacity <= 0:
 			return Vec{ ptr: 0 as *u8, len: 0, cap: 0 }
 		unsafe:
@@ -37,10 +37,10 @@ impl Vec:
 				return Vec{ ptr: 0 as *u8, len: 0, cap: 0 }
 			return Vec{ ptr: p as *u8, len: 0, cap: capacity }
 
-	fn capacity(&self) -> i64:
+	pub fn capacity(&self) -> i64:
 		return self.cap
 
-	fn from_slice(slice: [$T]) -> Vec:
+	pub fn from_slice(slice: [$T]) -> Vec:
 		if slice.len <= 0:
 			return Vec::new()
 		unsafe:
@@ -59,7 +59,7 @@ impl Vec:
 				i = i + 1
 			return v
 
-	fn push(&mut self, elem: $T):
+	pub fn push(&mut self, elem: $T):
 		unsafe:
 			let elem_size = ((0 as *$T) + 1) as i64
 			if elem_size == 0:
@@ -81,7 +81,7 @@ impl Vec:
 			*slot = elem
 		self.len = self.len + 1
 
-	fn pop(&mut self) -> Option<$T>:
+	pub fn pop(&mut self) -> Option<$T>:
 		if self.len == 0:
 			return Option::None
 		self.len = self.len - 1
@@ -89,26 +89,26 @@ impl Vec:
 			let slot = (self.ptr as *$T) + self.len
 			return Option::Some(*slot)
 
-	fn len(&self) -> i64:
+	pub fn len(&self) -> i64:
 		return self.len
 
-	fn is_empty(&self) -> bool:
+	pub fn is_empty(&self) -> bool:
 		return self.len == 0
 
-	fn into_iter(&self) -> VecIter:
+	pub fn into_iter(&self) -> VecIter:
 		return VecIter{ vec_ptr: self.ptr, idx: 0, len: self.len }
 
-	fn iter(&self) -> VecIter:
+	pub fn iter(&self) -> VecIter:
 		return VecIter{ vec_ptr: self.ptr, idx: 0, len: self.len }
 
 impl VecIter:
-	fn into_iter(self) -> VecIter:
+	pub fn into_iter(self) -> VecIter:
 		return self
 
-	fn iter(self) -> VecIter:
+	pub fn iter(self) -> VecIter:
 		return self
 
-	fn next(&mut self) -> Option<$T>:
+	pub fn next(&mut self) -> Option<$T>:
 		if self.idx < self.len:
 			let idx = self.idx
 			self.idx = idx + 1

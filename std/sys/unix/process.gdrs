@@ -1,8 +1,8 @@
 use std::sys::unix::imp
 
-obj Command:
+pub obj Command:
 	inner: imp::ImpCommand
 
 impl Command:
-	fn spawn(program: str) -> i32:
+	pub fn spawn(program: str) -> i32:
 		imp::ImpCommand.spawn(program)

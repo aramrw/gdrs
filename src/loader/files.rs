@@ -98,24 +98,97 @@ pub fn load_file_recursive(
             }
         }
 
+        // If not found as a direct file, check if mod_parts is a directory
+        if found_file.is_none() {
+            for i in (1..=u.path.len()).rev() {
+                let mod_parts = &u.path[0..i];
+                let dir_candidates = vec![
+                    base_dir.join(mod_parts.join("/")),
+                    Path::new(".").join(mod_parts.join("/")),
+                    Path::new("std").join(mod_parts[1..].join("/")),
+                    Path::new("std").join(mod_parts.join("/")),
+                ];
+                for dir in dir_candidates {
+                    if dir.is_dir() {
+                        if i == u.path.len() {
+                            let self_file = dir.join(format!("{}.gdrs", dir.file_name().unwrap().to_string_lossy()));
+                            if self_file.is_file() {
+                                let mut prefix = mod_parts.to_vec();
+                                if dir.to_string_lossy().contains("std/") && prefix.first().map(|s| s.as_str()) != Some("std") {
+                                    prefix.insert(0, "std".to_string());
+                                }
+                                found_file = Some((self_file, prefix, i));
+                                break;
+                            }
+                        } else {
+                            let sym = &u.path[i];
+                            if let Ok(entries) = std::fs::read_dir(&dir) {
+                                for entry in entries.flatten() {
+                                    let path = entry.path();
+                                    if path.extension().map_or(false, |ext| ext == "gdrs") {
+                                        if let Ok(content) = std::fs::read_to_string(&path) {
+                                            let pat_obj = format!("obj {sym}");
+                                            let pat_enum = format!("enum {sym}");
+                                            let pat_fn = format!("fn {sym}");
+                                            let pat_trait = format!("trait {sym}");
+                                            if content.contains(&pat_obj)
+                                                || content.contains(&pat_enum)
+                                                || content.contains(&pat_fn)
+                                                || content.contains(&pat_trait)
+                                            {
+                                                let file_stem = path.file_stem().unwrap().to_string_lossy().to_string();
+                                                let mut prefix = mod_parts.to_vec();
+                                                if dir.to_string_lossy().contains("std/") && prefix.first().map(|s| s.as_str()) != Some("std") {
+                                                    prefix.insert(0, "std".to_string());
+                                                }
+                                                prefix.push(file_stem);
+                                                found_file = Some((path, prefix, i));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if found_file.is_some() {
+                        break;
+                    }
+                }
+                if found_file.is_some() {
+                    break;
+                }
+            }
+        }
+
         if let Some((sub_file, sub_prefix, matched_len)) = found_file {
             let sub_base = sub_file.parent().unwrap_or_else(|| Path::new("."));
             load_file_recursive(&sub_file, sub_base, &sub_prefix, loaded_files, merged_program, source_map)?;
 
             let sub_prefix_str = format!("{}_", sub_prefix.join("_"));
-            if matched_len < u.path.len() {
+            let resolved_target = if matched_len < u.path.len() {
                 let sym = &u.path[matched_len];
                 let alias = u.alias.as_ref().unwrap_or(sym);
-                use_aliases.insert(alias.clone(), format!("{}{}", sub_prefix_str, sym));
+                let target = format!("{}{}", sub_prefix_str, sym);
+                use_aliases.insert(alias.clone(), target.clone());
+                target
             } else {
                 let sym = u.path.last().unwrap();
                 let alias = u.alias.as_ref().unwrap_or(sym);
-                use_aliases.insert(alias.clone(), sub_prefix_str.trim_end_matches('_').to_string());
-            }
+                let target = sub_prefix_str.trim_end_matches('_').to_string();
+                use_aliases.insert(alias.clone(), target.clone());
+                target
+            };
+
+            let mut recorded_use = u.clone();
+            recorded_use.module_path = mod_prefix.to_vec();
+            recorded_use.resolved_target = resolved_target;
+            merged_program.uses.push(recorded_use);
         }
     }
 
     for mut t in program.traits {
+        t.module_path = mod_prefix.to_vec();
         if !prefix_str.is_empty() {
             t.name = format!("{}{}", prefix_str, t.name);
         }
@@ -123,6 +196,7 @@ pub fn load_file_recursive(
     }
 
     for mut ta in program.trait_aliases {
+        ta.module_path = mod_prefix.to_vec();
         if !prefix_str.is_empty() {
             ta.name = format!("{}{}", prefix_str, ta.name);
         }
@@ -130,6 +204,9 @@ pub fn load_file_recursive(
     }
 
     for mut ext in program.externs {
+        for ef in &mut ext.functions {
+            ef.module_path = mod_prefix.to_vec();
+        }
         if !prefix_str.is_empty() {
             let mut mangled_funcs = Vec::new();
             for ef in &ext.functions {
@@ -138,6 +215,8 @@ pub fn load_file_recursive(
                     c_name: ef.c_name.clone(),
                     params: ef.params.clone(),
                     return_type: ef.return_type.clone(),
+                    vis: ef.vis,
+                    module_path: ef.module_path.clone(),
                     span: ef.span.clone(),
                 });
             }
@@ -148,6 +227,7 @@ pub fn load_file_recursive(
 
     // Mangle and push structs
     for mut s in program.structs {
+        s.module_path = mod_prefix.to_vec();
         if !prefix_str.is_empty() {
             s.name = format!("{}{}", prefix_str, s.name);
         }
@@ -159,6 +239,7 @@ pub fn load_file_recursive(
 
     // Mangle and push enums
     for mut e in program.enums {
+        e.module_path = mod_prefix.to_vec();
         if !prefix_str.is_empty() {
             e.name = format!("{}{}", prefix_str, e.name);
         }
@@ -187,6 +268,8 @@ pub fn load_file_recursive(
         }
 
         for method in &mut i.methods {
+            method.module_path = mod_prefix.to_vec();
+            method.is_trait_impl = i.trait_name.is_some();
             rewrite_type(&mut method.return_type, &local_types, &use_aliases, &prefix_str);
             for p in &mut method.params {
                 rewrite_type(&mut p.ty, &local_types, &use_aliases, &prefix_str);
@@ -200,6 +283,7 @@ pub fn load_file_recursive(
 
     // Mangle and push functions
     for mut f in program.functions {
+        f.module_path = mod_prefix.to_vec();
         if !prefix_str.is_empty() && f.name != "main" {
             f.name = format!("{}{}", prefix_str, f.name);
         }

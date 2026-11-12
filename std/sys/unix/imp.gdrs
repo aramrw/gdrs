@@ -5,11 +5,11 @@ extern "C":
 	fn intrinsic_execvp(file: str) -> i32
 	fn intrinsic_waitpid(pid: i32) -> i32
 
-obj ImpCommand:
+pub obj ImpCommand:
 	program: str
 
 impl ImpCommand:
-	fn spawn(program: str) -> i32:
+	pub fn spawn(program: str) -> i32:
 		unsafe:
 			let pid = fork()
 

@@ -58,6 +58,12 @@ pub enum Commands {
         #[arg(short = 'l', value_name = "LIB")]
         libs: Vec<String>,
     },
+    /// Parse and type-check a program (or stdlib if no file is given) without codegen
+    Check {
+        /// Optional source file to check (omit to check std/)
+        #[arg(value_parser = validate_gdrs_extension)]
+        src: Option<PathBuf>,
+    },
 }
 
 fn validate_gdrs_extension(val: &str) -> Result<PathBuf, String> {

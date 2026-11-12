@@ -2,7 +2,7 @@
 use std::libc::{malloc, realloc, free, memcpy, memset, strlen, strdup}
 use std::core::{Option, Drop}
 
-obj String:
+pub obj String:
 	ptr: *i64
 	len: i64
 	cap: i64
@@ -13,10 +13,13 @@ impl Drop for String:
 			self.free()
 
 impl String:
-	fn new() -> String:
+	pub fn new() -> String:
 		return String{ ptr: 0 as *i64, len: 0, cap: 0 }
 
-	fn from(s: str) -> String:
+	pub(crate) fn from_raw_parts(ptr: *i64, len: i64, cap: i64) -> String:
+		return String{ ptr: ptr, len: len, cap: cap }
+
+	pub fn from(s: str) -> String:
 		unsafe:
 			let length = strlen(s)
 			if length == 0:
@@ -27,13 +30,13 @@ impl String:
 			let p_val = p as *i64
 			return String{ ptr: p_val, len: length, cap: length + 1 }
 
-	fn len(&self) -> i64:
+	pub fn len(&self) -> i64:
 		return self.len
 
-	fn is_empty(&self) -> bool:
+	pub fn is_empty(&self) -> bool:
 		return self.len == 0
 
-	fn clone(&self) -> String:
+	pub fn clone(&self) -> String:
 		if self.len == 0 || (self.ptr as i64) == 0:
 			return String::new()
 		unsafe:
@@ -45,7 +48,7 @@ impl String:
 			memset(end_ptr as *void, 0, 1)
 			return String{ ptr: p as *i64, len: self.len, cap: self.len + 1 }
 
-	fn push_str(mut self, s: str) -> String:
+	pub fn push_str(mut self, s: str) -> String:
 		unsafe:
 			let s_len = strlen(s)
 			if s_len == 0:
@@ -78,10 +81,10 @@ impl String:
 				memset(end_ptr as *void, 0, 1)
 		return self
 
-	fn as_str(&self) -> str:
+	pub fn as_str(&self) -> str:
 		return self.ptr as str
 
-	fn free(&mut self):
+	pub fn free(&mut self):
 		unsafe:
 			if (self.ptr as i64) != 0 && self.cap > 0:
 				free(self.ptr as *void)

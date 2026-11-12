@@ -2284,3 +2284,165 @@ fn main():
         "E0277",
     );
 }
+
+#[test]
+fn round21_visibility_and_pub() {
+    // 1. Private struct field access on std::vec::Vec -> E0616
+    assert_err_code(
+        "round21_private_vec_field",
+        r#"
+use std::vec::Vec
+
+fn main():
+	let mut v: Vec<i64> = Vec::new()
+	v.push(1)
+	log!("{}", v.cap)
+"#,
+        "E0616",
+    );
+
+    // 2. Direct struct literal construction with private fields -> E0603
+    assert_err_code(
+        "round21_private_struct_literal",
+        r#"
+use std::vec::Vec
+
+fn main():
+	let v: Vec<i64> = Vec{ ptr: 0 as *u8, len: 0, cap: 0 }
+"#,
+        "E0603",
+    );
+
+    // 3. pub(crate) in std is not callable from user crate -> E0603
+    assert_err_code(
+        "round21_pub_crate_std_blocked",
+        r#"
+use std::string::String
+
+fn main():
+	let s = String::from_raw_parts(0 as *i64, 0, 0)
+"#,
+        "E0603",
+    );
+
+    // 4. Multi-file module visibility: pub works, private method -> E0624, private fn -> E0603
+    let tmp_dir = std::env::temp_dir().join(format!("gdrs_vis_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let mod_file = tmp_dir.join("encap.gdrs");
+    std::fs::write(
+        &mod_file,
+        r#"
+pub obj Counter:
+	pub label: str
+	count: i64
+
+impl Counter:
+	pub fn new(label: str) -> Counter:
+		return Counter{ label: label, count: 0 }
+
+	pub fn inc(&mut self):
+		self.bump()
+
+	fn bump(&mut self):
+		self.count = self.count + 1
+
+	pub fn value(&self) -> i64:
+		return self.count
+
+fn secret_helper() -> i64:
+	return 42
+
+pub fn public_helper() -> i64:
+	return 42
+"#,
+    )
+    .unwrap();
+
+    let ok_main = tmp_dir.join("main_ok.gdrs");
+    std::fs::write(
+        &ok_main,
+        r#"
+use encap::{Counter, public_helper}
+
+fn main():
+	let mut c = Counter::new("hits")
+	c.inc()
+	c.inc()
+	log!("{} {} {}", c.label, c.value(), public_helper())
+"#,
+    )
+    .unwrap();
+
+    let ok_out = std::process::Command::new(env!("CARGO_BIN_EXE_gdrs"))
+        .arg("run")
+        .arg(&ok_main)
+        .output()
+        .expect("Failed to run gdrs");
+    assert!(
+        ok_out.status.success(),
+        "Expected multi-module visibility test to succeed, got:\n{}\n{}",
+        String::from_utf8_lossy(&ok_out.stdout),
+        String::from_utf8_lossy(&ok_out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&ok_out.stdout);
+    assert!(stdout.contains("hits 2 42"), "Unexpected stdout: {stdout}");
+
+    let err_method = tmp_dir.join("main_err_method.gdrs");
+    std::fs::write(
+        &err_method,
+        r#"
+use encap::Counter
+
+fn main():
+	let mut c = Counter::new("hits")
+	c.bump()
+"#,
+    )
+    .unwrap();
+    let method_out = std::process::Command::new(env!("CARGO_BIN_EXE_gdrs"))
+        .arg("run")
+        .arg(&err_method)
+        .output()
+        .expect("Failed to run gdrs");
+    assert!(!method_out.status.success());
+    let method_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&method_out.stdout),
+        String::from_utf8_lossy(&method_out.stderr)
+    );
+    assert!(
+        method_combined.contains("E0624"),
+        "Expected E0624, got:\n{method_combined}"
+    );
+
+    let err_import = tmp_dir.join("main_err_import.gdrs");
+    std::fs::write(
+        &err_import,
+        r#"
+use encap::secret_helper
+
+fn main():
+	log!("{}", secret_helper())
+"#,
+    )
+    .unwrap();
+    let import_out = std::process::Command::new(env!("CARGO_BIN_EXE_gdrs"))
+        .arg("run")
+        .arg(&err_import)
+        .output()
+        .expect("Failed to run gdrs");
+    assert!(!import_out.status.success());
+    let import_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&import_out.stdout),
+        String::from_utf8_lossy(&import_out.stderr)
+    );
+    assert!(
+        import_combined.contains("E0603"),
+        "Expected E0603, got:\n{import_combined}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

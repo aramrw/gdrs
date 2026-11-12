@@ -1,9 +1,9 @@
-obj Vec2 where $T: Add:
-	x: $T
-	y: $T
+pub obj Vec2 where $T: Add:
+	pub x: $T
+	pub y: $T
 
 impl Vec2:
-	fn new(x: $T, y: $T) -> Vec2:
+	pub fn new(x: $T, y: $T) -> Vec2:
 		Vec2{x: x, y: y}
 
 impl Add for Vec2 where $T: Add: 
@@ -18,13 +18,13 @@ impl Sub for Vec2 where $T: Sub:
 		let y = self.y - other.y
 		return self.new(x, y)
 
-obj Vec3 where $T: Add:
-	x: $T
-	y: $T
-	z: $T
+pub obj Vec3 where $T: Add:
+	pub x: $T
+	pub y: $T
+	pub z: $T
 
 impl Vec3:
-	fn new(x: $T, y: $T, z: $T) -> Vec3:
+	pub fn new(x: $T, y: $T, z: $T) -> Vec3:
 		Vec3{x: x, y: y, z: z}
 
 impl Add for Vec3: 

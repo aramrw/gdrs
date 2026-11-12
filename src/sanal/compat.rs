@@ -74,6 +74,7 @@ pub fn format_type(ty: &Type) -> String {
         Type::MutRef(inner) => format!("&mut {}", format_type(inner)),
         Type::Ptr(inner) => format!("*{}", format_type(inner)),
         Type::Infer(id) => format!("?{id}"),
+        Type::Error => "{error}".to_string(),
     }
 }
 
@@ -83,6 +84,7 @@ pub fn is_type_compatible(expected: &Type, found: &Type) -> bool {
         return true;
     }
     match (expected, found) {
+        (Type::Error, _) | (_, Type::Error) => true,
         (_, Type::Void) => true,
         (Type::Generic(_), _) | (_, Type::Generic(_)) => true,
         (Type::Infer(_), _) | (_, Type::Infer(_)) => true,

@@ -1,4 +1,4 @@
 // std/fmt.gdrs - Formatting traits
 
-trait Display:
+pub trait Display:
 	fn fmt(self) -> String

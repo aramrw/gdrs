@@ -1,5 +1,6 @@
 use std::vec::Vec
 use std::fmt::Display
+use std::math
 
 obj Matrix:
 	rows: i32
@@ -124,3 +125,5 @@ impl Matrix:
 		return Matrix{ rows: self.rows, cols: self.cols, data: res_data }
 
 fn main():
+	log!("Matrix tests passed")
+

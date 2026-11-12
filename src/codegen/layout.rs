@@ -129,7 +129,8 @@ fn scalar_cl_ty(ty: &Type) -> Option<cranelift_codegen::ir::Type> {
         | Type::Arc(_)
         | Type::DynTrait(_)
         | Type::Generic(_)
-        | Type::Infer(_) => Some(types::I64),
+        | Type::Infer(_)
+        | Type::Error => Some(types::I64),
         Type::Enum(name) if is_npo_enum(name) => Some(types::I64),
         Type::Obj(s) => {
             let norm = normalize_type_name(s);
@@ -177,7 +178,8 @@ fn size_and_align_inner(
         | Type::Arc(_)
         | Type::DynTrait(_)
         | Type::Generic(_)
-        | Type::Infer(_) => (8, 8),
+        | Type::Infer(_)
+        | Type::Error => (8, 8),
         Type::Vec(_) | Type::String => (24, 8),
         Type::Slice(_) => (16, 8),
         Type::Array(elem, len) => {

@@ -1,117 +1,79 @@
-# Design: Public vs. Private Visibility (`pub`) in GDRS
+# Design: Rust-Compatible Visibility (`pub`) in GDRS
 
 ## 1. Overview
 
-In systems programming, **encapsulation** is essential to prevent data invariants from being violated and to maintain stable API boundaries.
-
-In GDRS today, all functions, structs, enums, traits, methods, and struct fields are implicitly public. This creates two immediate risks:
-1. **Safety & Invariants**: Complex types like `Vec<T>` (`ptr`, `len`, `cap`) and `Matrix` (`data`, `rows`, `cols`) can have their internal state corrupted by external code (e.g. `m.rows = 999` without resizing `m.data`).
-2. **The "Private by Default" Breaking-Change Trap**: If visibility is introduced late after extensive code is written, turning on private-by-default breaks every file across the ecosystem unless retrofitted with `pub`.
-
-This document specifies the design for Rust-compatible visibility in GDRS.
+In GDRS today, all functions, structs (`obj`), enums, traits, methods, and struct fields are implicitly public. This spec defines **100% Rust-compatible visibility** for `gdrsc`:
+- Everything is **private by default**.
+- Visibility is **module-tree-scoped** (a module and all of its descendant submodules can see private items in that module).
+- `pub`, `pub(crate)`, `pub(super)`, and `pub use` re-exports work just like Rust.
 
 ---
 
-## 2. Core Visibility Rules (Matching Rust)
+## 2. Visibility Rules (Matching Rust)
 
-### Rule 1: Private by Default
-Any item, field, or method without an explicit `pub` modifier is private to its declaring module.
+### 2.1 Visibility Levels (`Visibility`)
+Every item, struct field, and inherent `impl` method carries a `Visibility`:
+* **`Private` (default, no modifier):** Visible to the declaring module **and all of its descendant submodules** (`caller_mod.starts_with(decl_mod)`).
+* **`pub` (`Pub`):** Visible everywhere, across all modules and crates (`std` and user code).
+* **`pub(crate)` (`PubCrate`):** Visible anywhere within the same crate (`std` items are visible throughout `std`; user program items are visible throughout the user program).
+* **`pub(super)` (`PubSuper`):** Visible to the parent module of the declaring module and all of its descendants (`caller_mod.starts_with(parent(decl_mod))`).
 
-```gdrs
-// std/math/matrix.gdrs
-pub obj Matrix:
-    pub rows: i32
-    pub cols: i32
-    data: Vec<f64> // private to std::math::matrix!
+### 2.2 Structs (`obj`) & Fields
+* Fields default to private; mark public fields with `pub field: T`.
+* **Field access / mutation (`m.data`):** Rejected with `[E0616]` if `!is_visible(field.vis, struct.module_path, caller_mod)`.
+* **Struct literal construction (`Matrix { ... }`):** Rejected with `[E0603]` if *any* field of the struct is not visible from `caller_mod` (even if the caller tries to supply a value for it). Callers must use a `pub` constructor (e.g. `Matrix::new(...)`).
 
-pub fn helper(): // public to importers
-    ...
+### 2.3 Enums & Variants
+* Enums are visible as a unit: if `pub enum Result` is visible, all of its variants (`Ok`, `Err`) are visible. Per-variant `pub` is not allowed.
 
-fn internal_compute(): // private to std::math::matrix
-    ...
-```
+### 2.4 `impl` Blocks & Methods
+* **Inherent `impl Foo:` blocks:** Methods default to private; mark public methods with `pub fn`. Calling a private method from outside emits `[E0624]`.
+* **Trait `impl Trait for Foo:` blocks:** Trait impl methods automatically share the visibility of `Trait` (no `pub` needed or allowed on individual trait impl methods).
 
-### Rule 2: Module-Scoped Privacy (The Intra-Module Exception)
-Inside the **same module/file**, all code has full access to all private items, methods, and struct fields declared in that module.
-- Single-file scripts and test files (`examples/test.gdrs`) will **not** be broken by private-by-default, because their `main()` function lives in the same module as the structs it defines.
-- Privacy boundaries only take effect when crossing module/file boundaries (`use ...`).
+### 2.5 Traits & Trait Bounds
+* `trait` declarations default to private; mark public traits with `pub trait`.
 
-### Rule 3: Struct Field Privacy & Constructor Enforcement
-If a struct has **at least one private field**:
-- External modules **cannot access or mutate** that field (`m.data` -> `[E0616] field 'data' is private`).
-- External modules **cannot instantiate the struct using a struct literal** (`Matrix { rows: 1, cols: 1, data: v }` -> `[E0603] cannot construct 'Matrix' directly; field 'data' is private`).
-- External modules **must** call a public constructor (e.g. `Matrix::new(...)`, `Matrix::zeros(...)`, `Matrix::from_vec(...)`).
+### 2.6 Re-exports (`pub use`)
+* `use path::Item` imports `Item` privately into the current module (cannot be re-imported by callers of the current module).
+* `pub use path::Item` (and `pub use path::{A, B}`) re-exports `Item` with `pub` visibility under the current module's path, provided `Item` is visible from the current module.
 
-### Rule 4: Enum Variant Visibility
-Enums are public as an atomic unit: if `pub enum Result<T, E>` is marked `pub`, all of its variants (`Ok(T)`, `Err(E)`) are automatically public.
-
-### Rule 5: Methods in `impl` Blocks
-- In inherent `impl Foo:` blocks, methods default to private unless marked `pub fn`.
-- In trait `impl Trait for Foo:` blocks, methods automatically inherit the visibility of `Trait` (they cannot be made private).
-
-### Rule 6: Re-exporting (`pub use`)
-Modules can re-export items from submodules:
-```gdrs
-// std/math.gdrs
-pub use matrix::Matrix
-pub use matrix::MatrixError
-```
-This allows consumers to write `use std::math::Matrix` without knowing the internal file structure.
+### 2.7 `extern "C"` & `type` Aliases
+* `extern "C"` declarations and `type` trait aliases follow the same default-private / `pub` rules.
 
 ---
 
-## 3. Implementation Architecture in `gdrsc`
+## 3. Compiler Architecture
 
-### Phase 1: Lexer & AST
-1. Add `Token::Pub` (`#[token("pub")]`) to `src/ast/mod.rs`.
-2. Add `is_pub: bool` to AST definitions:
-   - `StructDecl { is_pub: bool, ... }`
-   - `FieldDecl { is_pub: bool, ... }`
-   - `EnumDecl { is_pub: bool, ... }`
-   - `FuncDecl { is_pub: bool, ... }`
-   - `TraitDecl { is_pub: bool, ... }`
-   - `UseDecl { is_pub: bool, ... }`
+### Phase 1: Lexer & AST (`src/ast/mod.rs`)
+1. Add `Token::Pub` (`#[token("pub")]`), `Token::Crate` (`#[token("crate")]`), and `Token::Super` (`#[token("super")]`).
+2. Add `Visibility` enum (`Private`, `Pub`, `PubCrate`, `PubSuper`).
+3. Add `vis: Visibility` and `module_path: Vec<String>` to:
+   * `StructDecl`, `FieldDecl`, `EnumDecl`, `FuncDecl`, `TraitDecl`, `TraitAliasDecl`, `ExternFnDecl`, `UseDecl`.
+4. Add `is_trait_impl: bool` (or preserve `trait_name: Option<String>`) on lowered `FuncDecl`s so trait impl methods are recognized during visibility checks.
 
-### Phase 2: Parser (`src/parser/`)
-- In `src/parser/mod.rs`, parse optional `Token::Pub` before item declarations.
-- In struct field parser, parse optional `Token::Pub` before each field definition:
-  ```gdrs
-  pub obj Matrix:
-      pub rows: i32
-      data: Vec<f64>
-  ```
+### Phase 2: Parser (`src/parser/mod.rs`)
+* Parse optional `vis` prefix (`pub`, `pub(crate)`, `pub(super)`) before:
+  * Top-level declarations (`obj`, `enum`, `fn`, `trait`, `type`, `use`, `extern "C"` functions).
+  * Struct fields (`pub rows: i32`).
+  * Methods inside `impl` blocks (`pub fn ...`).
 
-### Phase 3: Module Loader (`src/loader/files.rs`)
-- Each parsed item is stamped with `module_path: String` (e.g. `"std::math::matrix"` or `""` for root crate).
-- When resolving `use path::Item`:
-  - Check if `Item.is_pub || Item.module_path == current_file.module_path`.
-  - If not, emit `[E0603] Error: struct 'Item' in module 'path' is private`.
+### Phase 3: Module Loader (`src/loader/files.rs` & `src/loader/mod.rs`)
+* Stamp every parsed item with its `module_path: Vec<String>` (e.g. `["std", "math", "matrix"]`, `[]` for entry file).
+* Resolve `use` and `pub use` paths with visibility checking:
+  * An imported item must be visible to the importing module (`is_visible`).
+  * `pub use` creates a visible alias/re-export entry at the current `module_path` so downstream modules can `use` it.
 
-### Phase 4: Semantic Analysis Checks (`src/sanal/`)
-1. **Field Access (`m.data`)**:
-   In `src/sanal/objects.rs` (`type_check_field_access`):
-   ```rust
-   if !field.is_pub && struct_def.module_path != current_module {
-       errors.push(SemanticError {
-           code: "E0616",
-           message: format!("Field '{}' of type '{}' is private", field_name, struct_name),
-           ...
-       });
-   }
-   ```
-2. **Struct Literal Construction (`Matrix { ... }`)**:
-   In `src/sanal/objects.rs` (`type_check_obj_init`):
-   If any field has `!field.is_pub` and `struct_def.module_path != current_module`:
-   Emit `[E0603] Cannot construct struct '{}' directly because field '{}' is private. Use a constructor function instead.`
-3. **Method Calls (`m.internal_helper()`)**:
-   In `src/sanal/calls.rs` (`type_check_method_call`):
-   If `!method.is_pub && method.module_path != current_module`:
-   Emit `[E0624] Method '{}' of type '{}' is private`.
+### Phase 4: Semantic Analysis (`src/sanal/`)
+Track `caller_mod: &[String]` from the enclosing `FuncDecl.module_path` (defaulting to `[]` for top-level/entry) and enforce `is_visible` at:
+1. **Type resolution (`sanal/mod.rs`, `sanal/vars.rs`):** Referring to a private `obj`, `enum`, or `trait` from another module emits `[E0603]`.
+2. **Field access (`sanal/objects.rs`):** Accessing or assigning a non-visible field emits `[E0616]`.
+3. **Struct literal construction (`sanal/objects.rs`):** Constructing a struct with any non-visible field emits `[E0603]`.
+4. **Function & method calls (`sanal/calls.rs`):** Calling a non-visible free function emits `[E0603]`; calling a non-visible inherent method emits `[E0624]`.
 
 ---
 
-## 4. Rollout Strategy
+## 4. Standard Library (`std/`) Migration & Verification
 
-1. **Step 1**: Add `pub` keyword to lexer and parser. Mark items with `is_pub`.
-2. **Step 2**: Mark all public APIs in `std/` (`std::vec::Vec`, `std::math::matrix::Matrix`, `std::string::String`, etc.) as `pub`.
-3. **Step 3**: Turn on compiler enforcement in `sanal` and verify existing tests pass.
+1. Mark all public types, traits, constructors, and public methods/fields in `std/*.gdrs` with `pub` (keeping internal representation fields like `Vec.{ptr, len, cap}`, `String.{ptr, len, cap}`, and `Matrix.data` private).
+2. Keep single-file examples/tests working automatically (since `main()` and its types share `module_path = []`).
+3. Add multi-module positive & negative tests (`E0603`, `E0616`, `E0624`, `pub use`, `pub(crate)`, `pub(super)`, child-module access to parent private items).

@@ -169,6 +169,13 @@ pub fn type_check_ident<'a>(
                     name: decl.name.clone(),
                     total_size: 0,
                     field_offsets: std::collections::HashMap::new(),
+                    vis: decl.vis,
+                    module_path: decl.module_path.clone(),
+                    field_vis: decl
+                        .fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.vis))
+                        .collect(),
                 })
         });
         let found_enum = type_ctx.get_enum(&normalized);

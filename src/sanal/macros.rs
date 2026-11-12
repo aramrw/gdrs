@@ -254,7 +254,8 @@ pub fn is_displayable_type(ty: Type, type_ctx: &TypeCtx<'_>) -> bool {
     }
 
     match inner {
-        Type::Bool
+        Type::Error
+        | Type::Bool
         | Type::Str
         | Type::String
         | Type::Infer(_) => true,
