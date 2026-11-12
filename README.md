@@ -41,11 +41,45 @@ fn main():
     let v1 = Vec2{x: 10.0, y: 20.0}
     let v2 = Vec2{x: 5.0, y: 5.0}
     let v3 = v1.add(v2)
-    log!("v3.x:", v3.x, "v3.y:", v3.y)
+    log!("v3.x: {} v3.y: {}", v3.x, v3.y)
 
     let res = Res::Ok(42)
-    log!("res:", res.unwrap())
+    log!("res: {}", res.unwrap())
 ```
+
+## Error Handling
+
+GDRS uses Rust-style explicit error handling with `Result<T, E>`, `Option<T>`, the `?` propagation operator, and `panic!` for unrecoverable failures:
+
+1. **Recoverable Errors (`Result` & `Option` in `std::core`)**:
+   - `Result` (`Ok(val)` / `Err(err)`) and `Option` (`Some(val)` / `None`) provide `.is_ok()`, `.is_err()`, `.is_some()`, `.is_none()`, and `.unwrap()`.
+   - Handle variants explicitly with `match`, or propagate early with `?` on `Result` and `Option` values:
+
+   ```gdrs
+   use std::fs::File
+
+   fn read_config(path: str) -> Result<String, IoError>:
+       let file = File::open(path)?
+       let contents = file.read_to_string()?
+       return Result::Ok(contents)
+   ```
+
+2. **Custom Errors (`#[derive(Error)]`)**:
+   - Annotate an `enum` or `obj` with `#[derive(Error)]` and `#[err("...")]` (or `#[error("...")]`) to automatically generate `.to_string()` and `.fmt()` for `{}` formatting:
+
+   ```gdrs
+   #[derive(Error)]
+   enum ParseError:
+       #[err("invalid token at line {0}")]
+       InvalidToken(i64)
+       #[err("unexpected end of input")]
+       UnexpectedEof
+   ```
+
+   - The `std::error::Error` trait also provides `fn source(self) -> Option<String>`.
+
+3. **Unrecoverable Errors (`panic!` & Assertions)**:
+   - `panic!("msg: {}", val)`, `assert!(cond)`, `assert_eq!(a, b)`, and `assert_ne!(a, b)` print a diagnostic with source location to `stderr` and terminate the process with exit code `101`.
 
 ## Roadmap
 

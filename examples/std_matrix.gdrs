@@ -18,7 +18,7 @@ fn main():
 	log!("{} {}", shape.0, shape.1)
 
 	let m4 = m3.sub(&m2)
-	log!("{}", &m4)
-	
-	log!("{}", 20.0)
-	log!("{}", 20.1)
+	let r2_c1 = m4.get(1, 0)
+	assert!(r2_c1 == 20.0)
+
+
