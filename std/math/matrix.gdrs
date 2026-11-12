@@ -1,6 +1,8 @@
 use std::vec::Vec
 use std::fmt::Display
 
+obj 
+
 obj Matrix:
 	rows: i32
 	cols: i32
@@ -66,5 +68,7 @@ impl Matrix:
 		for i in 0..len:
 			r.push(self.data[i] - o.data[i])
 		return Matrix{ rows: self.rows, cols: self.cols, data: r}
+		
+	fn matmul(&self, o: &Matrix) -> Matrix:
 		
 
