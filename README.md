@@ -1,6 +1,6 @@
 # GDRS
 
-A compiled programming language featuring Python/Nim-style indented syntax with Rust-like type semantics, compiled to native machine code via Cranelift.
+A compiled programming language featuring Python/Nim-style indented syntax with Rust-like type semantics, compiled to native machine code via Cranelift, interops with `C`.
 
 ## Usage
 
