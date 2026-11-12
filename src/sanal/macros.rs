@@ -276,6 +276,7 @@ pub fn is_displayable_type(ty: Type, type_ctx: &TypeCtx<'_>) -> bool {
             ) || fn_map.contains_key(&format!("{tn}_fmt"))
                 || fn_map.contains_key(&format!("{tn}_to_string"))
         }
+        Type::Tuple(elems) => elems.iter().all(|e| is_displayable_type(*e, type_ctx)),
         _ => false,
     }
 }

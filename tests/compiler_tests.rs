@@ -1831,7 +1831,36 @@ fn main():
         "fn main():\n\tunknown_macro!(1)\n",
         "E0425",
     );
+
+    // 6. Tuple display in log!, format!, #[derive(Error)], and assert_eq!
+    assert_ok_output(
+        "round15_tuple_display",
+        r#"
+use std::string::String
+
+#[derive(Error)]
+enum MatrixError:
+	#[err("cannot perform on matrices of different dimensions `{0}` and `{1}`")]
+	ShapeMismatch((i32, i32), (i32, i32))
+
+fn main():
+	let t: (i32, i32) = (2, 3)
+	let nested = (t, String::from("ok"))
+	let single = (7,)
+	log!("t={} nested={} single={}", t, nested, single)
+	let e = MatrixError::ShapeMismatch((2, 2), (3, 4))
+	log!("err={}", e)
+"#,
+        &[
+            "t=(2, 3) nested=((2, 3), ok) single=(7,)",
+            "err=\"cannot perform on matrices of different dimensions `(2, 2)` and `(3, 4)`\"",
+        ],
+    );
+
+    // 7. Non-displayable element inside a tuple must still fail with E0277
+    assert_err_code(
+        "round15_tuple_non_displayable_elem",
+        "obj NoFmt:\n\tx: i64\nfn main():\n\tlet t = (1, NoFmt{ x: 2 })\n\tlog!(\"{}\", t)\n",
+        "E0277",
+    );
 }
-
-
-

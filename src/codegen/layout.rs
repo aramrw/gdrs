@@ -226,6 +226,12 @@ fn size_and_align_inner(
                     let computed = align_up(max_end, max_align);
                     (computed.max(layout.total_size), max_align)
                 }
+            } else if find_enum_layout(name, enum_layouts).is_some() {
+                if is_npo_enum(name) {
+                    (8, 8)
+                } else {
+                    enum_size_and_align_inner(name, struct_layouts, enum_layouts, visited)
+                }
             } else {
                 (8, 8)
             };

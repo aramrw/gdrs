@@ -1,7 +1,8 @@
 use std::math::matrix::Matrix
+use std::math::matrix::MatrixError
 use std::vec::Vec
 
-fn main():
+fn add():
 	// manual init
 	let mut m1 = Matrix::zeros(2, 2)
 	m1.set(1, 0, 20.0)
@@ -11,14 +12,24 @@ fn main():
 	let r2_c1 = m2.get(1, 0)
 	assert!(r2_c1 == 20.0)
 
-	let m3 = m1.add(&m2)
-	log!("{}", &m3)
+	let m3 = m1.add(&m2).unwrap()
+	log!("{}", &m3.fmt())
 
-	let shape = m1.shape()
-	log!("{} {}", shape.0, shape.1)
+fn mismatched_shape() -> Result<Matrix, MatrixError>:
+	let m1 = Matrix::ones(2, 2)
+	let m2 = Matrix::ones(6, 6)
+	m1.add(&m2)
 
-	let m4 = m3.sub(&m2)
-	let r2_c1 = m4.get(1, 0)
-	assert!(r2_c1 == 20.0)
+fn matmul():
+	let m1 = Matrix::ones(2, 2)
+	let m2 = Matrix::ones(2, 2)
+	
+fn main():
+	add()
+
+	// this should error
+	match mismatched_shape():
+		Ok(_) => log!("valid")
+		Err(e) => log!("{}", e.fmt())
 
 

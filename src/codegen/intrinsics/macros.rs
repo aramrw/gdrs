@@ -9,7 +9,8 @@ use cranelift_module::{Linkage, Module};
 
 use crate::ast::{Span, Type, TypedExpr};
 use crate::codegen::ctx::CodegenCtx;
-use crate::codegen::expr::{coerce_val, compile_expr, compile_string_constant};
+use crate::codegen::expr::{coerce_val, compile_expr, compile_string_constant, cranelift_type_of};
+use crate::codegen::layout::{is_aggregate_type, tuple_field_offsets};
 use crate::sanal::macros::{parse_format_string, FormatChunk};
 
 fn format_type_name(ty: &Type) -> String {
@@ -191,7 +192,10 @@ fn emit_val_to_cstr<M: Module>(
 ) -> (Value, bool, Option<(Value, Type)>) {
     let ty = match raw_ty {
         Type::Ref(inner) | Type::MutRef(inner)
-            if matches!(*inner, Type::String | Type::Obj(_) | Type::Enum(_)) =>
+            if matches!(
+                *inner,
+                Type::String | Type::Obj(_) | Type::Enum(_) | Type::Tuple(_)
+            ) =>
         {
             *inner
         }
@@ -254,12 +258,68 @@ fn emit_val_to_cstr<M: Module>(
                 (fallback, false, None)
             }
         }
+        Type::Tuple(elems) => emit_tuple_to_cstr(builder, val, elems, cg, module),
         _ => (
             compile_string_constant(builder, &format!("<{}>", format_type_name(&ty)), module),
             false,
             None,
         ),
     }
+}
+
+/// Formats a tuple `(e0, e1, ...)` into an owned malloc'd C string `"(v0, v1, ...)"`.
+fn emit_tuple_to_cstr<M: Module>(
+    builder: &mut FunctionBuilder,
+    tuple_ptr: Value,
+    elems: &[Type],
+    cg: &CodegenCtx,
+    module: &mut M,
+) -> (Value, bool, Option<(Value, Type)>) {
+    if elems.is_empty() {
+        return (compile_string_constant(builder, "()", module), false, None);
+    }
+
+    let (_, _, offsets) =
+        tuple_field_offsets(elems, &cg.meta.struct_layouts, cg.meta.enum_layouts);
+    let mut parts: Vec<(Value, bool)> = Vec::new();
+    let mut temp_drops: Vec<(Value, Type)> = Vec::new();
+
+    parts.push((compile_string_constant(builder, "(", module), false));
+    for (i, &e_ty) in elems.iter().enumerate() {
+        if i > 0 {
+            parts.push((compile_string_constant(builder, ", ", module), false));
+        }
+        let off = offsets.get(i).copied().unwrap_or((i * 8) as u32);
+        let elem_val = if is_aggregate_type(&e_ty, &cg.meta.struct_layouts, cg.meta.enum_layouts) {
+            builder.ins().iadd_imm(tuple_ptr, off as i64)
+        } else {
+            let cl_ty = cranelift_type_of(&e_ty);
+            builder
+                .ins()
+                .load(cl_ty, MemFlags::new(), tuple_ptr, off as i32)
+        };
+        let (cstr_ptr, is_owned, drop_opt) = emit_val_to_cstr(builder, elem_val, e_ty, cg, module);
+        if let Some(d) = drop_opt {
+            temp_drops.push(d);
+        }
+        parts.push((cstr_ptr, is_owned));
+    }
+    let close_lit = if elems.len() == 1 { ",)" } else { ")" };
+    parts.push((compile_string_constant(builder, close_lit, module), false));
+
+    let joined = emit_format_join_parts(builder, &parts, module);
+    for (tmp_val, tmp_ty) in temp_drops {
+        crate::codegen::drops::emit_drop_for_value(
+            builder,
+            tmp_val,
+            &tmp_ty,
+            &cg.meta.known_drop_fns,
+            &cg.meta.struct_layouts,
+            cg.meta.enum_layouts,
+            module,
+        );
+    }
+    (joined, true, None)
 }
 
 /// Evaluates `args` where `args[0]` is a format string literal and returns `(cstr_ptr, temp_drops)`.
@@ -349,6 +409,7 @@ fn compile_print_macro<M: Module>(
                     other => other,
                 };
                 let mut temp_string_drop: Option<(Value, Type)> = None;
+                let mut temp_cstr_free: Option<Value> = None;
                 let (raw_val, type_tag) = match effective_ty {
                     Type::Int | Type::I32 => (compile_expr(builder, arg, cg, module), 0),
                     Type::Bool => (compile_expr(builder, arg, cg, module), 1),
@@ -379,6 +440,16 @@ fn compile_print_macro<M: Module>(
                             )
                         }
                     }
+                    Type::Tuple(elems) => {
+                        let tuple_ptr = compile_expr(builder, arg, cg, module);
+                        let (cstr_ptr, is_owned, drop_opt) =
+                            emit_tuple_to_cstr(builder, tuple_ptr, elems, cg, module);
+                        temp_string_drop = drop_opt;
+                        if is_owned {
+                            temp_cstr_free = Some(cstr_ptr);
+                        }
+                        (cstr_ptr, 2)
+                    }
                     _ => (compile_expr(builder, arg, cg, module), 0),
                 };
 
@@ -397,6 +468,13 @@ fn compile_print_macro<M: Module>(
                 };
 
                 last_val = emit_log_part(builder, module, type_tag, value_bits, suffix);
+                if let Some(cstr_ptr) = temp_cstr_free {
+                    let mut sig = module.make_signature();
+                    sig.params.push(AbiParam::new(types::I64));
+                    let callee = module.declare_function("free", Linkage::Import, &sig).unwrap();
+                    let local_callee = module.declare_func_in_func(callee, builder.func);
+                    builder.ins().call(local_callee, &[cstr_ptr]);
+                }
                 if let Some((tmp_val, tmp_ty)) = temp_string_drop {
                     crate::codegen::drops::emit_drop_for_value(
                         builder,

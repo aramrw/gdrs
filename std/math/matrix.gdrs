@@ -1,7 +1,12 @@
 use std::vec::Vec
 use std::fmt::Display
 
-obj 
+#[derive(Error)]
+enum MatrixError:
+	#[err("cannot perform `add` or `sub` on matrices of different dimensions `{0}` and `{1}`")]
+	ShapeMismatch((i32, i32), (i32, i32))
+	#[err("cannot multiply matrices with unequal rows & cols `{0}` and `{1}`")]
+	MatMulMisalignment((i32, i32), (i32, i32))
 
 obj Matrix:
 	rows: i32
@@ -25,6 +30,12 @@ impl Display for Matrix:
 impl Matrix:
 	fn len(&self) -> i32:
 		return self.rows * self.cols
+	
+	fn shapes_match(&self, o: &Matrix) -> Result<(), MatrixError>:
+		let shapes = (self.shape(), o.shape())
+		if shapes.0 != shapes.1:
+			return Err(MatrixError::ShapeMismatch(shapes.0, shapes.1))
+		return Ok(())
 
 	// constructors 
 	fn zeros(rows: i32, cols: i32) -> Matrix:
@@ -55,20 +66,37 @@ impl Matrix:
 		return (self.rows, self.cols)
 		
 	// algebra
-	fn add(&self, o: &Matrix) -> Matrix:
+	fn add(&self, o: &Matrix) -> Result<Matrix, MatrixError>:
+		self.shapes_match(o)?
 		let len = self.len()
 		let mut r: Vec<f64> = Vec::new()
 		for i in 0..len:
 			r.push(self.data[i] + o.data[i])
-		return Matrix{ rows: self.rows, cols: self.cols, data: r }
+		let m = Matrix{ rows: self.rows, cols: self.cols, data: r }
+		return Ok(m)
 
-	fn sub(&self, o: &Matrix) -> Matrix:
+	fn sub(&self, o: &Matrix) -> Result<Matrix, MatrixError>:
+		self.shapes_match(o)?
 		let len = self.len()
 		let mut r: Vec<f64> = Vec::new()
 		for i in 0..len:
 			r.push(self.data[i] - o.data[i])
-		return Matrix{ rows: self.rows, cols: self.cols, data: r}
+		let m = Matrix{ rows: self.rows, cols: self.cols, data: r }
+		return Ok(m)
 		
-	fn matmul(&self, o: &Matrix) -> Matrix:
+	fn matmul(&self, o: &Matrix) -> Result<Matrix, MatrixError>:
+		if self.cols != o.rows:
+			return Err(MatrixError::MatMulMisalignment(self.shape(), self.shape()))
+		let r: Vec<f64> = Vec::new()
+		for x in 0..self.len():
+			for y in 0..o.len():
+				r.push(self.data[x] * o.data[y])
 		
+		let sum = 0
+		for i in 0..r.len():
+			sum += r[i]
+
+		let mut m = Matrix::zeros(1, 1)
+		m.set(0,0, sum)
+
 

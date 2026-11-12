@@ -148,6 +148,27 @@ pub fn type_satisfies_bound(
                     .all(|t| type_satisfies_bound(*t, "Eq", trait_methods, trait_impls, fn_map));
             }
         }
+        "Display" => {
+            if matches!(
+                ty,
+                Type::Int
+                    | Type::I32
+                    | Type::Float
+                    | Type::F32
+                    | Type::Bool
+                    | Type::Str
+                    | Type::String
+                    | Type::Obj("String")
+                    | Type::Obj("std_string_String")
+            ) {
+                return true;
+            }
+            if let Type::Tuple(tys) = ty {
+                return tys
+                    .iter()
+                    .all(|t| type_satisfies_bound(*t, "Display", trait_methods, trait_impls, fn_map));
+            }
+        }
         _ => {}
     }
 

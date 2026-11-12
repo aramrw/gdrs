@@ -132,7 +132,15 @@ pub fn type_check_tuple_init<'a>(
         if let Some(te) = type_check_expr(scopes, errors, &elem_ctx, e) {
             type_ctx.check_not_moved_from_projection(&te, errors);
             mark_expr_moved_if_ident(scopes, errors, &te);
-            let resolved_ty = type_ctx.infer.borrow_mut().resolve(te.ty());
+            let mut resolved_ty = type_ctx.infer.borrow_mut().resolve(te.ty());
+            if let Some(exp_ty) = elem_ctx.current_expected_type {
+                if matches!(
+                    (exp_ty, resolved_ty),
+                    (Type::I32, Type::Int) | (Type::F32, Type::Float)
+                ) {
+                    resolved_ty = exp_ty;
+                }
+            }
             elem_tys.push(resolved_ty);
             typed_elems.push(te);
         }
@@ -752,9 +760,15 @@ pub fn type_check_enum_construct<'a>(
     args: &[Expr],
     span: &Span,
 ) -> Option<TypedExpr> {
+    let expected_payloads: Option<Vec<Type>> = type_ctx
+        .get_enum(enum_name)
+        .and_then(|(_, variants)| variants.get(variant_name).map(|(_, tys)| tys.clone()));
+
     let mut typed_args = Vec::new();
-    for a in args {
-        if let Some(ta) = type_check_expr(scopes, errors, type_ctx, a) {
+    for (i, a) in args.iter().enumerate() {
+        let mut arg_ctx = type_ctx.clone();
+        arg_ctx.current_expected_type = expected_payloads.as_ref().and_then(|v| v.get(i).copied());
+        if let Some(ta) = type_check_expr(scopes, errors, &arg_ctx, a) {
             type_ctx.check_not_moved_from_projection(&ta, errors);
             mark_expr_moved_if_ident(scopes, errors, &ta);
             typed_args.push(ta);
