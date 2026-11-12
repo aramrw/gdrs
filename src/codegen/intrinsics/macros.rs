@@ -234,7 +234,19 @@ fn emit_val_to_cstr<M: Module>(
             let empty_str = compile_string_constant(builder, "", module);
             (builder.ins().select(is_null, empty_str, str_ptr), false, None)
         }
-        Type::Int | Type::I32 => {
+        _ if ty.is_unsigned_integer() => {
+            let val_i64 = coerce_val(builder, val, types::I64);
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let callee = module
+                .declare_function("intrinsic_uint_to_str", Linkage::Import, &sig)
+                .unwrap();
+            let local_callee = module.declare_func_in_func(callee, builder.func);
+            let call_inst = builder.ins().call(local_callee, &[val_i64]);
+            (builder.inst_results(call_inst)[0], true, None)
+        }
+        Type::Int | Type::I32 | Type::I16 | Type::I8 => {
             let val_i64 = coerce_val(builder, val, types::I64);
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64));

@@ -184,6 +184,13 @@ char* intrinsic_int_to_str(int64_t n) {
     return buf;
 }
 
+char* intrinsic_uint_to_str(uint64_t n) {
+    char* buf = (char*)malloc(32);
+    if (!buf) return NULL;
+    snprintf(buf, 32, "%llu", (unsigned long long)n);
+    return buf;
+}
+
 char* intrinsic_float_to_str(uint64_t bits) {
     double f = 0.0;
     memcpy(&f, &bits, sizeof(double));

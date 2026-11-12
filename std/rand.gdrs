@@ -1,5 +1,9 @@
 // std/rand.gdrs
-use std::time::Instant
+extern "C":
+	fn arc4random_buf(buf: *void, nbytes: usize)
+	fn log(x: f64) -> f64
+	fn sqrt(x: f64) -> f64
+	fn cos(x: f64) -> f64
 
 obj Rng:
 	state: u64
@@ -8,29 +12,49 @@ impl Rng:
 	fn from_seed(seed: u64) -> Rng:
 		return Rng{state: seed}
 
-	fn new() -> Rng {
-		let t = Instant::now()
-		let mut dummy: u64 = 0
-		let ptr_bits = (&mut dummy) as *void as u64
-		let time_bits = ((t.sec as u64) * 1000000000) ^ (t.nsec as u64)
-		return Rng{state: time_bits ^ (ptr_bits << 17)}
-	}
+	fn new() -> Rng:
+		let mut seed: u64 = 0
+		unsafe:
+			arc4random_buf((&mut seed) as *void, 8)
+		return Rng{state: seed}
 
-	fn next_u64(&mut self) -> u64 {
+	fn next_u64(&mut self) -> u64:
 		self.state = self.state + 0x9e3779b97f4a7c15
 		let mut z = self.state
 		z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
 		z = (z ^ (z >> 27)) * 0x94d049bb133111eb
 		return z ^ (z >> 31)
-	}
 
 	fn next_f64(&mut self) -> f64:
 		// 2^-53 = 1.1102230246251565e-16
 		return ((self.next_u64() >> 11) as f64) * 1.1102230246251565e-16
 
+	fn next_bool(&mut self) -> bool:
+		return (self.next_u64() >> 63) == 1
+
+	fn chance(&mut self, p: f64) -> bool:
+		return self.next_f64() < p
+
 	fn range_f64(&mut self, min: f64, max: f64) -> f64:
 		return min + self.next_f64() * (max - min)
 
 	fn range_i64(&mut self, min: i64, max: i64) -> i64:
-		let span = (max - min + 1) as u64
-		return min + ((self.next_u64() % span) as i64)
+		let span = (max as u64) - (min as u64) + 1
+		if span == 0:
+			return self.next_u64() as i64
+		let limit = (0xffffffffffffffff as u64) - ((0xffffffffffffffff as u64) % span)
+		let mut r = self.next_u64()
+		while r >= limit:
+			r = self.next_u64()
+		return min + ((r % span) as i64)
+
+	fn next_gaussian(&mut self) -> f64:
+		let u1 = 1.0 - self.next_f64()
+		let u2 = self.next_f64()
+		unsafe:
+			let radius = sqrt(-2.0 * log(u1))
+			let theta = 6.283185307179586 * u2
+			return radius * cos(theta)
+
+	fn gaussian(&mut self, mean: f64, std_dev: f64) -> f64:
+		return mean + self.next_gaussian() * std_dev

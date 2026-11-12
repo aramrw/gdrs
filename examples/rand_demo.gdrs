@@ -1,17 +1,60 @@
 use std::rand::Rng
 
 fn main() {
-	let mut rng = Rng::from_seed(42)
-	let r1 = rng.next_u64()
-	let r2 = rng.next_u64()
-	log!("seed 42 r1: {}", r1)
-	log!("seed 42 r2: {}", r2)
-	log!("next_f64: {}", rng.next_f64())
-	log!("range_i64: {}", rng.range_i64(10, 20))
-	log!("range_f64: {}", rng.range_f64(1.0, 5.0))
+	// 1. Determinism & Compiler Codegen Verification (u64 wrap + logical shift)
+	// Reference SplitMix64 outputs for seed = 42:
+	// Step 1: 0xbdd7_3226_2feb_6e95 (13679457532755275413)
+	// Step 2: 0x28ef_e333_b266_f103 (2949826092126892291)
+	let mut rng1 = Rng::from_seed(42)
+	let mut rng1_copy = Rng::from_seed(42)
 
-	let mut rng2 = Rng::new()
-	log!("rng2 next_u64: {}", rng2.next_u64())
-	log!("rng2 next_f64: {}", rng2.next_f64())
-	log!("rng2 range_i64: {}", rng2.range_i64(100, 200))
+	let r1 = rng1.next_u64()
+	let r2 = rng1.next_u64()
+
+	let r1f: u64 = 0xbdd7_3226_2feb_6e95
+	let r2f: u64 = 0x28ef_e333_b266_f103
+	assert_eq!(r1, r1f)
+	assert_eq!(r2, r2f)
+	assert!(r1 == rng1_copy.next_u64())
+	assert!(r2 == rng1_copy.next_u64())
+	log!("Deterministic seed=42 verified: r1={}, r2={}", r1, r2)
+
+	// 2. Bounds & Invariant Stress Test (1,000 iterations)
+	for i in 0..1000:
+		let f = rng1.next_f64()
+		assert!(f >= 0.0)
+		assert!(f < 1.0)
+
+		let rf = rng1.range_f64(-10.0, 25.0)
+		assert!(rf >= -10.0)
+		assert!(rf < 25.0)
+
+		// Test across negative-to-positive boundary to verify signed cast safety
+		let ri = rng1.range_i64(-50, 50)
+		assert!(ri >= -50)
+		assert!(ri <= 50)
+
+	assert!(rng1.chance(1.0) == true)
+	assert!(rng1.chance(0.0) == false)
+	log!("1,000 range and probability assertions passed.")
+
+	// 3. Entropy Seeding & Distribution Sanity Check
+	let mut rng_a = Rng::new()
+	let mut rng_b = Rng::new()
+	let sample_a = rng_a.next_u64()
+	let sample_b = rng_b.next_u64()
+
+	// Two consecutive Rng::new() calls must not collide
+	assert!(sample_a != sample_b)
+	log!("Entropy check: rng_a={}, rng_b={}", sample_a, sample_b)
+
+	// 4. Gaussian (Box-Muller) Sanity Check (~0.0 mean over 1,000 samples)
+	let mut sum: f64 = 0.0
+	for i in 0..1000:
+		sum += rng_a.next_gaussian()
+	let mean = sum / 1000.0
+	// Standard error of the mean for N=1000 is ~0.0316; |mean| < 0.2 is a safe sanity bound
+	assert!(mean > -0.2)
+	assert!(mean < 0.2)
+	log!("Gaussian N=1000 sample mean: {}", mean)
 }
