@@ -124,13 +124,15 @@ pub fn type_satisfies_bound(
                 return true;
             }
         }
-        "Eq" | "PartialEq" => {
+        "PartialEq" => {
             if ty.is_numeric()
                 || matches!(
                     ty,
                     Type::Bool
                         | Type::Str
                         | Type::String
+                        | Type::Unit
+                        | Type::Ptr(_)
                         | Type::Enum(_)
                         | Type::Obj("String")
                         | Type::Obj("std_string_String")
@@ -141,7 +143,39 @@ pub fn type_satisfies_bound(
             if let Type::Tuple(tys) = ty {
                 return tys
                     .iter()
+                    .all(|t| type_satisfies_bound(*t, "PartialEq", trait_methods, trait_impls, fn_map));
+            }
+            if let Type::Ref(inner) | Type::MutRef(inner) = ty {
+                return type_satisfies_bound(*inner, "PartialEq", trait_methods, trait_impls, fn_map);
+            }
+            if let Some(tname) = type_name_opt {
+                if fn_map.contains_key(&format!("{tname}_eq")) {
+                    return true;
+                }
+            }
+        }
+        "Eq" => {
+            if ty.is_integer()
+                || matches!(
+                    ty,
+                    Type::Bool
+                        | Type::Str
+                        | Type::String
+                        | Type::Unit
+                        | Type::Ptr(_)
+                        | Type::Obj("String")
+                        | Type::Obj("std_string_String")
+                )
+            {
+                return true;
+            }
+            if let Type::Tuple(tys) = ty {
+                return tys
+                    .iter()
                     .all(|t| type_satisfies_bound(*t, "Eq", trait_methods, trait_impls, fn_map));
+            }
+            if let Type::Ref(inner) | Type::MutRef(inner) = ty {
+                return type_satisfies_bound(*inner, "Eq", trait_methods, trait_impls, fn_map);
             }
         }
         "Display" => {

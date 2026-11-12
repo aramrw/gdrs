@@ -2186,3 +2186,101 @@ fn main() {
         ],
     );
 }
+
+#[test]
+fn round20_partial_eq_and_eq() {
+    assert_ok_output(
+        "round20_partial_eq_pos",
+        r#"
+use std::core::{PartialEq, Eq}
+use std::string::String
+
+#[derive(PartialEq, Eq)]
+obj Point:
+	x: i64
+	y: i64
+
+#[derive(PartialEq, Eq)]
+enum Color:
+	Red
+	Rgb(i64, i64, i64)
+
+obj Tag:
+	name: String
+
+impl PartialEq for Tag:
+	fn eq(&self, other: &Tag) -> bool:
+		return self.name == other.name
+
+fn same_eq(a: $T, b: $T) -> bool where $T: Eq:
+	return a == b
+
+fn same_peq(a: $T, b: $T) -> bool where $T: PartialEq:
+	return a == b
+
+fn main():
+	let p1 = Point{ x: 1, y: 2 }
+	let p2 = Point{ x: 1, y: 2 }
+	let p3 = Point{ x: 3, y: 4 }
+	log!("p1==p2: {}", p1 == p2)
+	log!("p1!=p3: {}", p1 != p3)
+	// Verify p1 and p2 were borrowed, not moved
+	log!("p1.x: {}", p1.x)
+	log!("p2.y: {}", p2.y)
+
+	let t1 = Tag{ name: String::from("alpha") }
+	let t2 = Tag{ name: String::from("alpha") }
+	let t3 = Tag{ name: String::from("beta") }
+	log!("t1==t2: {}", t1 == t2)
+	log!("t1!=t3: {}", t1 != t3)
+	log!("t1: {}", t1.name.as_str())
+
+	let c1 = Color::Rgb(10, 20, 30)
+	let c2 = Color::Rgb(10, 20, 30)
+	log!("c1==c2: {}", c1 == c2)
+
+	log!("same_eq int: {}", same_eq(5, 5))
+	log!("same_peq float: {}", same_peq(1.5, 1.5))
+"#,
+        &[
+            "p1==p2: true",
+            "p1!=p3: true",
+            "p1.x: 1",
+            "p2.y: 2",
+            "t1==t2: true",
+            "t1!=t3: true",
+            "t1: alpha",
+            "c1==c2: true",
+            "same_eq int: true",
+            "same_peq float: true",
+        ],
+    );
+
+    assert_err_code(
+        "round20_missing_partial_eq",
+        r#"
+obj NoEq:
+	x: i64
+
+fn main():
+	let a = NoEq{ x: 1 }
+	let b = NoEq{ x: 1 }
+	log!("{}", a == b)
+"#,
+        "E0369",
+    );
+
+    assert_err_code(
+        "round20_float_not_eq",
+        r#"
+use std::core::Eq
+
+fn need_eq(a: $T, b: $T) -> bool where $T: Eq:
+	return a == b
+
+fn main():
+	log!("{}", need_eq(1.0, 1.0))
+"#,
+        "E0277",
+    );
+}

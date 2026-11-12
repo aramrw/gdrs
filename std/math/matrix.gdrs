@@ -146,5 +146,11 @@ impl Matrix:
 		return Matrix{ rows: self.rows, cols: self.cols, data: rv }
 	}
 
-
+	fn map(&self, f: fn(f64) -> f64) -> Matrix {
+		let len = self.len()
+		let mut rv: Vec<f64> = Vec::with_capacity(len)
+		for i in 0..len:
+			rv.push(f(self.data[i]))
+		return Matrix{ rows: self.rows, cols: self.cols, data: rv }
+	}
 

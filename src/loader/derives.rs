@@ -1,14 +1,137 @@
 use crate::ast::*;
 
+fn has_derive(attrs: &[Attribute], trait_name: &str) -> bool {
+    attrs
+        .iter()
+        .any(|a| a.name == "derive" && a.args.iter().any(|arg| arg == trait_name))
+}
+
+fn build_eq_fn(target_name: &str, is_enum: bool, body: Vec<Expr>, span: &Span) -> FuncDecl {
+    let leaked_name: &'static str = Box::leak(target_name.to_string().into_boxed_str());
+    let target_ty = if is_enum {
+        Type::Enum(leaked_name)
+    } else {
+        Type::Obj(leaked_name)
+    };
+    FuncDecl {
+        name: "eq".to_string(),
+        params: vec![
+            Param {
+                name: "self".to_string(),
+                is_mutable: false,
+                ty: Type::Ref(intern_type(Type::Unit)),
+                span: span.clone(),
+            },
+            Param {
+                name: "other".to_string(),
+                is_mutable: false,
+                ty: Type::Ref(intern_type(target_ty)),
+                span: span.clone(),
+            },
+        ],
+        return_type: Type::Bool,
+        where_clause: None,
+        is_track_caller: false,
+        body,
+    }
+}
+
 pub fn expand_derives(program: &mut Program) {
     let dummy_span = 0..0;
     let mut synthesized_impls = Vec::new();
 
-    // 1. Expand Enums with #[derive(Error)]
+    // 1. Expand Enums with #[derive(Error)], #[derive(PartialEq)], #[derive(Eq)]
     for e in &program.enums {
-        let has_derive_error = e.attributes.iter().any(|a| {
-            a.name == "derive" && a.args.iter().any(|arg| arg == "Error")
-        });
+        if has_derive(&e.attributes, "PartialEq") {
+            let mut outer_arms = Vec::new();
+            for v in &e.variants {
+                let mut lhs_bindings = Vec::new();
+                let mut rhs_bindings = Vec::new();
+                for i in 0..v.payload_types.len() {
+                    lhs_bindings.push(format!("__lhs_{i}"));
+                    rhs_bindings.push(format!("__rhs_{i}"));
+                }
+
+                let mut inner_body = Vec::new();
+                for i in 0..v.payload_types.len() {
+                    let neq = Expr::NotEqual(
+                        Box::new(Expr::Ident(lhs_bindings[i].clone(), dummy_span.clone())),
+                        Box::new(Expr::Ident(rhs_bindings[i].clone(), dummy_span.clone())),
+                        dummy_span.clone(),
+                    );
+                    inner_body.push(Expr::If(
+                        Box::new(neq),
+                        Box::new(Expr::Return(
+                            Some(Box::new(Expr::Bool(false, dummy_span.clone()))),
+                            dummy_span.clone(),
+                        )),
+                        dummy_span.clone(),
+                    ));
+                }
+                inner_body.push(Expr::Bool(true, dummy_span.clone()));
+
+                let inner_match = Expr::Match(
+                    Box::new(Expr::Ident("other".to_string(), dummy_span.clone())),
+                    vec![
+                        MatchArm {
+                            variant_name: format!("{}::{}", e.name, v.name),
+                            bindings: rhs_bindings,
+                            body: inner_body,
+                            span: dummy_span.clone(),
+                        },
+                        MatchArm {
+                            variant_name: "_".to_string(),
+                            bindings: Vec::new(),
+                            body: vec![Expr::Bool(false, dummy_span.clone())],
+                            span: dummy_span.clone(),
+                        },
+                    ],
+                    dummy_span.clone(),
+                );
+
+                outer_arms.push(MatchArm {
+                    variant_name: format!("{}::{}", e.name, v.name),
+                    bindings: lhs_bindings,
+                    body: vec![inner_match],
+                    span: dummy_span.clone(),
+                });
+            }
+
+            let eq_body = if outer_arms.is_empty() {
+                vec![Expr::Return(
+                    Some(Box::new(Expr::Bool(true, dummy_span.clone()))),
+                    dummy_span.clone(),
+                )]
+            } else {
+                vec![Expr::Return(
+                    Some(Box::new(Expr::Match(
+                        Box::new(Expr::Ident("self".to_string(), dummy_span.clone())),
+                        outer_arms,
+                        dummy_span.clone(),
+                    ))),
+                    dummy_span.clone(),
+                )]
+            };
+
+            synthesized_impls.push(ImplDecl {
+                trait_name: Some("PartialEq".to_string()),
+                target_type: e.name.clone(),
+                methods: vec![build_eq_fn(&e.name, true, eq_body, &dummy_span)],
+                where_clause: None,
+                span: dummy_span.clone(),
+            });
+        }
+        if has_derive(&e.attributes, "Eq") {
+            synthesized_impls.push(ImplDecl {
+                trait_name: Some("Eq".to_string()),
+                target_type: e.name.clone(),
+                methods: Vec::new(),
+                where_clause: None,
+                span: dummy_span.clone(),
+            });
+        }
+
+        let has_derive_error = has_derive(&e.attributes, "Error");
 
         if has_derive_error {
             let mut match_arms = Vec::new();
@@ -101,11 +224,58 @@ pub fn expand_derives(program: &mut Program) {
         }
     }
 
-    // 2. Expand Structs (obj) with #[derive(Error)]
+    // 2. Expand Structs (obj) with #[derive(Error)], #[derive(PartialEq)], #[derive(Eq)]
     for s in &program.structs {
-        let has_derive_error = s.attributes.iter().any(|a| {
-            a.name == "derive" && a.args.iter().any(|arg| arg == "Error")
-        });
+        if has_derive(&s.attributes, "PartialEq") {
+            let mut body_stmts = Vec::new();
+            for field in &s.fields {
+                let lhs = Expr::FieldAccess(
+                    Box::new(Expr::Ident("self".to_string(), dummy_span.clone())),
+                    field.name.clone(),
+                    dummy_span.clone(),
+                );
+                let rhs = Expr::FieldAccess(
+                    Box::new(Expr::Ident("other".to_string(), dummy_span.clone())),
+                    field.name.clone(),
+                    dummy_span.clone(),
+                );
+                let neq = Expr::NotEqual(Box::new(lhs), Box::new(rhs), dummy_span.clone());
+                body_stmts.push(Expr::If(
+                    Box::new(neq),
+                    Box::new(Expr::Return(
+                        Some(Box::new(Expr::Bool(false, dummy_span.clone()))),
+                        dummy_span.clone(),
+                    )),
+                    dummy_span.clone(),
+                ));
+            }
+            body_stmts.push(Expr::Return(
+                Some(Box::new(Expr::Bool(true, dummy_span.clone()))),
+                dummy_span.clone(),
+            ));
+
+            let eq_fn = build_eq_fn(&s.name, false, body_stmts, &dummy_span);
+
+            synthesized_impls.push(ImplDecl {
+                trait_name: Some("PartialEq".to_string()),
+                target_type: s.name.clone(),
+                methods: vec![eq_fn],
+                where_clause: None,
+                span: dummy_span.clone(),
+            });
+        }
+
+        if has_derive(&s.attributes, "Eq") {
+            synthesized_impls.push(ImplDecl {
+                trait_name: Some("Eq".to_string()),
+                target_type: s.name.clone(),
+                methods: Vec::new(),
+                where_clause: None,
+                span: dummy_span.clone(),
+            });
+        }
+
+        let has_derive_error = has_derive(&s.attributes, "Error");
 
         if has_derive_error {
             let top_err_attr = s.attributes.iter().find(|a| a.name == "error" || a.name == "err");

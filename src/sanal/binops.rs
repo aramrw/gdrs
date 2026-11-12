@@ -645,6 +645,60 @@ pub fn type_check_less_equal<'a>(
     ))
 }
 
+fn try_lower_equality_trait_call<'a>(
+    t_lhs: TypedExpr,
+    t_rhs: TypedExpr,
+    negate: bool,
+    type_ctx: &TypeCtx<'a>,
+    span: &Span,
+    errors: &mut Vec<SemanticError>,
+) -> Result<TypedExpr, (TypedExpr, TypedExpr)> {
+    let l_ty = type_ctx.infer.borrow_mut().resolve(t_lhs.ty());
+    let r_ty = type_ctx.infer.borrow_mut().resolve(t_rhs.ty());
+
+    let is_builtin_str = matches!(
+        l_ty,
+        Type::Obj("String") | Type::Obj("std_string_String")
+    );
+    if is_builtin_str || l_ty != r_ty {
+        return Err((t_lhs, t_rhs));
+    }
+
+    let type_name = match l_ty {
+        Type::Obj(name) | Type::Enum(name) => name,
+        _ => return Err((t_lhs, t_rhs)),
+    };
+
+    if let Some(eq_fn) = lookup_struct_method_fn(type_ctx, type_name, "eq") {
+        let ref_ty = Type::Ref(crate::ast::intern_type(l_ty));
+        let lhs_ref = TypedExpr::Ref(Box::new(t_lhs), false, ref_ty, span.clone());
+        let rhs_ref = TypedExpr::Ref(Box::new(t_rhs), false, ref_ty, span.clone());
+        let eq_call = TypedExpr::Call(
+            eq_fn.name.clone(),
+            vec![lhs_ref, rhs_ref],
+            Type::Bool,
+            span.clone(),
+        );
+        if negate {
+            return Ok(TypedExpr::Not(Box::new(eq_call), span.clone()));
+        }
+        return Ok(eq_call);
+    }
+
+    if matches!(l_ty, Type::Obj(_)) {
+        errors.push(SemanticError {
+            code: "E0369",
+            message: format!("Binary operation `{}` cannot be applied to type `{type_name}`", if negate { "!=" } else { "==" }),
+            label: format!("`{type_name}` does not implement `PartialEq`"),
+            secondary_label: None,
+            help: Some(format!("Implement `PartialEq` for `{type_name}` or add `#[derive(PartialEq)]`")),
+            span: span.clone(),
+        });
+    }
+
+    Err((t_lhs, t_rhs))
+}
+
 pub fn type_check_equal<'a>(
     scopes: &mut ScopeStack,
     errors: &mut Vec<SemanticError>,
@@ -662,11 +716,14 @@ pub fn type_check_equal<'a>(
 
     check_equality_operands(t_lhs.ty(), t_rhs.ty(), type_ctx, span, errors);
 
-    Some(TypedExpr::Equal(
-        Box::new(t_lhs),
-        Box::new(t_rhs),
-        span.clone(),
-    ))
+    match try_lower_equality_trait_call(t_lhs, t_rhs, false, type_ctx, span, errors) {
+        Ok(call_expr) => Some(call_expr),
+        Err((t_lhs, t_rhs)) => Some(TypedExpr::Equal(
+            Box::new(t_lhs),
+            Box::new(t_rhs),
+            span.clone(),
+        )),
+    }
 }
 
 pub fn type_check_not_equal<'a>(
@@ -686,11 +743,14 @@ pub fn type_check_not_equal<'a>(
 
     check_equality_operands(t_lhs.ty(), t_rhs.ty(), type_ctx, span, errors);
 
-    Some(TypedExpr::NotEqual(
-        Box::new(t_lhs),
-        Box::new(t_rhs),
-        span.clone(),
-    ))
+    match try_lower_equality_trait_call(t_lhs, t_rhs, true, type_ctx, span, errors) {
+        Ok(call_expr) => Some(call_expr),
+        Err((t_lhs, t_rhs)) => Some(TypedExpr::NotEqual(
+            Box::new(t_lhs),
+            Box::new(t_rhs),
+            span.clone(),
+        )),
+    }
 }
 
 pub fn type_check_and<'a>(

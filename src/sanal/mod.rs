@@ -569,7 +569,28 @@ pub fn check_semantics(
                                 if rp.name == "self" {
                                     continue;
                                 }
-                                let rp_ty = if rp.ty == Type::Unit { target_ty } else { resolve_type(rp.ty, &enum_names, impl_block.span.clone(), &mut errors) };
+fn substitute_self_type(ty: Type, target_ty: Type) -> Type {
+    match ty {
+        Type::Obj("Self") => target_ty,
+        Type::Ref(inner) => Type::Ref(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),
+        Type::MutRef(inner) => Type::MutRef(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),
+        Type::Ptr(inner) => Type::Ptr(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),
+        Type::Tuple(tys) => Type::Tuple(Box::leak(
+            tys.iter()
+                .map(|t| substitute_self_type(*t, target_ty))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )),
+        other => other,
+    }
+}
+
+                                let rp_ty = if rp.ty == Type::Unit {
+                                    target_ty
+                                } else {
+                                    let resolved = resolve_type(rp.ty, &enum_names, impl_block.span.clone(), &mut errors);
+                                    substitute_self_type(resolved, target_ty)
+                                };
                                 let ip_ty = resolve_type(ip.ty, &enum_names, ip.span.clone(), &mut errors);
                                 if !compat::is_type_compatible(&rp_ty, &ip_ty) {
                                     errors.push(SemanticError {

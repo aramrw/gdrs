@@ -3,6 +3,11 @@
 trait Drop:
 	fn drop(mut self)
 
+trait PartialEq:
+	fn eq(&self, other: &Self) -> bool
+
+trait Eq {}
+
 enum Option:
 	Some($T)
 	None
