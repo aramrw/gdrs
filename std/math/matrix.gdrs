@@ -1,5 +1,6 @@
 use std::vec::Vec
 use std::fmt::Display
+use std::rand::Rng
 
 #[derive(Error)]
 enum MatrixError:
@@ -40,19 +41,30 @@ impl Matrix:
 		return Ok(())
 
 	// constructors 
-	fn zeros(rows: i32, cols: i32) -> Matrix:
+	fn zeros(rows: i32, cols: i32) -> Matrix {
 		let len = rows * cols
-		let mut data: Vec<f64> = Vec::new()
+		let mut data: Vec<f64> = Vec::with_capacity(len)
 		for i in 0..len:
 			data.push(0.0)
 		return Matrix{ rows: rows, cols: cols, data: data }
+	}
 
-	fn ones(rows: i32, cols: i32) -> Matrix:
+	fn ones(rows: i32, cols: i32) -> Matrix {
 		let len = rows * cols
-		let mut data: Vec<f64> = Vec::new()
+		let mut data: Vec<f64> = Vec::with_capacity(len)
 		for i in 0..len:
 			data.push(1.0)
 		return Matrix{ rows: rows, cols: cols, data: data }
+	}
+
+	fn rand(rows: i32, cols: i32) -> Matrix {
+		let len = rows * cols
+		let mut rng = Rng::new()
+		let mut data: Vec<f64> = Vec::with_capacity(len)
+		for i in 0..len:
+			data.push(rng.next_f64())
+		return Matrix{ rows: rows, cols: cols, data: data }
+	}
 
 	fn from_vec(rows: i32, cols: i32, data: Vec<f64>) -> Result<Matrix, MatrixError>:
 		if rows * cols != data.len():
@@ -86,7 +98,7 @@ impl Matrix:
 	fn add(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
 		self.shapes_match(o)?
 		let len = self.len()
-		let mut r: Vec<f64> = Vec::new()
+		let mut r: Vec<f64> = Vec::with_capacity(len)
 		for i in 0..len:
 			r.push(self.data[i] + o.data[i])
 		let m = Matrix{ rows: self.rows, cols: self.cols, data: r }
@@ -96,7 +108,7 @@ impl Matrix:
 	fn sub(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
 		self.shapes_match(o)?
 		let len = self.len()
-		let mut r: Vec<f64> = Vec::new()
+		let mut r: Vec<f64> = Vec::with_capacity(len)
 		for i in 0..len:
 			r.push(self.data[i] - o.data[i])
 		let m = Matrix{ rows: self.rows, cols: self.cols, data: r }
@@ -105,8 +117,9 @@ impl Matrix:
 
 	fn hadamard(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
 		self.shapes_match(o)?
-		let mut r: Vec<f64> = Vec::new()
-		for i in 0..self.data.len():
+		let len = self.len()
+		let mut r: Vec<f64> = Vec::with_capacity(len)
+		for i in 0..len:
 			r.push(self.data[i] * o.data[i])
 		let m = Matrix{ rows: self.rows, cols: self.cols, data: r }
 		return Ok(m)
@@ -124,5 +137,14 @@ impl Matrix:
 				rm.set(r, c, sum)
 		return Ok(rm)
 	}
+
+	fn scale(&self, s: f64) -> Matrix {
+		let len = self.len()
+		let mut rv: Vec<f64> = Vec::with_capacity(len)
+		for i in 0..len:
+			rv.push(self.data[i] * s)
+		return Matrix{ rows: self.rows, cols: self.cols, data: rv }
+	}
+
 
 

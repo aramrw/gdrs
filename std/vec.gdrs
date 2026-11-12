@@ -25,6 +25,19 @@ impl Vec:
 	fn new() -> Vec:
 		return Vec{ ptr: 0 as *i64, len: 0, cap: 0 }
 
+	fn with_capacity(capacity: i64) -> Vec:
+		if capacity <= 0:
+			return Vec{ ptr: 0 as *i64, len: 0, cap: 0 }
+		unsafe:
+			let elem_size = ((0 as *$T) + 1) as i64
+			let p = malloc(capacity * elem_size)
+			if (p as i64) == 0:
+				return Vec{ ptr: 0 as *i64, len: 0, cap: 0 }
+			return Vec{ ptr: p as *i64, len: 0, cap: capacity }
+
+	fn capacity(&self) -> i64:
+		return self.cap
+
 	fn from_slice(slice: [$T]) -> Vec:
 		let mut v = Vec::new()
 		let mut i = 0

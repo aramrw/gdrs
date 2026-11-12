@@ -1,53 +1,148 @@
 use std::math::matrix::Matrix
 use std::math::matrix::MatrixError
 use std::vec::Vec
+use std::rand::rand_f64
 
-fn add():
-	// manual init
-	let mut m1 = Matrix::zeros(2, 2)
-	m1.set(1, 0, 20.0)
+fn test_constructors_and_accessors() {
+	log!("--- 1. Constructors & Accessors ---")
+	let mut m = Matrix::zeros(2, 3)
+	assert!(m.shape().0 == 2)
+	assert!(m.shape().1 == 3)
+	assert!(m.len() == 6)
+	assert!(m.get(0, 0) == 0.0)
 
-	let mut m2 = Matrix::zeros(2, 2)
-	m2.set(1, 0, 20.0)
-	let r2_c1 = m2.get(1, 0)
-	assert!(r2_c1 == 20.0)
+	m.set(0, 1, 42.0)
+	m.set(1, 2, 99.0)
+	assert!(m.get(0, 1) == 42.0)
+	assert!(m.get(1, 2) == 99.0)
+	log!("{}", m.fmt())
 
-	let m3 = m1.add(&m2).unwrap()
-	log!("{}", &m3.fmt())
+	let ones = Matrix::ones(2, 2)
+	assert!(ones.get(0, 0) == 1.0)
+	assert!(ones.get(1, 1) == 1.0)
 
-fn mismatched_shape() -> Result<Matrix, MatrixError>:
-	let m1 = Matrix::ones(2, 2)
-	let m2 = Matrix::ones(6, 6)
-	m1.add(&m2)
+	let v: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0]
+	let m_from = Matrix::from_vec(2, 2, v).unwrap()
+	assert!(m_from.get(0, 0) == 1.0)
+	assert!(m_from.get(1, 1) == 4.0)
 
-fn matmul():
-	let v1: Vec<f64> = vec![0.0, 1.0, 2.0]
-	let v2: Vec<f64> = vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]
-	let m1 = Matrix::from_vec(1, 3, v1).unwrap()
-	let m2 = Matrix::from_vec(4, 2, v2).unwrap()
-	let r = m1.matmul(&m2)
-	if let Err(e) = r:
-		log!("{}", e.fmt())
-	//log!("{}", r.fmt())
+	let random_val = rand_f64()
+	assert!(random_val >= 0.0 && random_val < 1.0)
 
-fn transpose():
-	let v: Vec<f64> = vec![0.0, 1.0, 2.0]
-	let m = Matrix::from_vec(1, 3, v).unwrap()
-	log!("{}", m)
+	let random_m = Matrix::rand(2, 3)
+	assert!(random_m.shape().0 == 2)
+	assert!(random_m.shape().1 == 3)
+	assert!(random_m.len() == 6)
+	assert!(random_m.get(0, 0) >= 0.0 && random_m.get(0, 0) < 1.0)
+	log!("Random (2x3):\n{}", random_m.fmt())
+
+	let mut cap_vec: Vec<f64> = Vec::with_capacity(10)
+	assert!(cap_vec.capacity() == 10)
+	assert!(cap_vec.len() == 0)
+	cap_vec.push(123.45)
+	assert!(cap_vec.len() == 1)
+	assert!(cap_vec[0] == 123.45)
+}
+
+fn test_addition_and_subtraction() {
+	log!("--- 2. Matrix Addition & Subtraction ---")
+	let v1: Vec<f64> = vec![10.0, 20.0, 30.0, 40.0]
+	let v2: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0]
+	let m1 = Matrix::from_vec(2, 2, v1).unwrap()
+	let m2 = Matrix::from_vec(2, 2, v2).unwrap()
+
+	let added = m1.add(&m2).unwrap()
+	assert!(added.get(0, 0) == 11.0)
+	assert!(added.get(1, 1) == 44.0)
+	log!("m1 + m2 =\n{}", added.fmt())
+
+	let subbed = m1.sub(&m2).unwrap()
+	assert!(subbed.get(0, 0) == 9.0)
+	assert!(subbed.get(1, 1) == 36.0)
+	log!("m1 - m2 =\n{}", subbed.fmt())
+
+	// Catch shape mismatch error with if let
+	let bad_shape = Matrix::zeros(3, 3)
+	if let Err(e) = m1.add(&bad_shape):
+		log!("Caught expected error: {}", e.fmt())
+}
+
+fn test_hadamard() {
+	log!("--- 3. Hadamard (Element-wise) Product ---")
+	let v1: Vec<f64> = vec![2.0, 3.0, 4.0, 5.0]
+	let v2: Vec<f64> = vec![10.0, 10.0, 10.0, 10.0]
+	let m1 = Matrix::from_vec(2, 2, v1).unwrap()
+	let m2 = Matrix::from_vec(2, 2, v2).unwrap()
+
+	let h = m1.hadamard(&m2).unwrap()
+	assert!(h.get(0, 0) == 20.0)
+	assert!(h.get(0, 1) == 30.0)
+	assert!(h.get(1, 0) == 40.0)
+	assert!(h.get(1, 1) == 50.0)
+	log!("m1 hadamard m2 =\n{}", h.fmt())
+}
+
+fn test_transpose() {
+	log!("--- 4. Transpose ---")
+	let v: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+	let m = Matrix::from_vec(2, 3, v).unwrap()
+	log!("Original (2x3):\n{}", m.fmt())
+
 	let mt = m.transpose()
-	log!("{}", mt)
+	assert!(mt.shape().0 == 3)
+	assert!(mt.shape().1 == 2)
+	assert!(mt.get(0, 0) == 1.0)
+	assert!(mt.get(1, 0) == 2.0)
+	assert!(mt.get(2, 0) == 3.0)
+	assert!(mt.get(0, 1) == 4.0)
+	assert!(mt.get(1, 1) == 5.0)
+	assert!(mt.get(2, 1) == 6.0)
+	log!("Transposed (3x2):\n{}", mt)
+}
 
-	
-fn main():
-	add()
+fn test_matmul() {
+	log!("--- 5. Matrix Multiplication ---")
+	// m1 is (2, 3)
+	let v1: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+	let m1 = Matrix::from_vec(2, 3, v1).unwrap()
 
-	// this should error
-	// match mismatched_shape():
-	// 	Ok(_) => log!("valid")
-	// 	Err(e) => log!("{}", e.fmt())
+	// m2 is (3, 2)
+	let v2: Vec<f64> = vec![7.0, 8.0, 9.0, 1.0, 2.0, 3.0]
+	let m2 = Matrix::from_vec(3, 2, v2).unwrap()
 
-	transpose()
+	let product = m1.matmul(&m2).unwrap()
+	assert!(product.shape().0 == 2)
+	assert!(product.shape().1 == 2)
+	assert!(product.get(0, 0) == 31.0)
+	assert!(product.get(0, 1) == 19.0)
+	assert!(product.get(1, 0) == 85.0)
+	assert!(product.get(1, 1) == 55.0)
+	log!("(2x3) * (3x2) =\n{}", product.fmt())
 
+	// Check mismatched cols/rows error with if let
+	let incompatible = Matrix::zeros(4, 4)
+	if let Err(e) = m1.matmul(&incompatible):
+		log!("Caught expected matmul alignment error: {}", e.fmt())
+}
 
+fn test_scale() {
+	log!("--- 6. Scalar Multiplication (scale) ---")
+	let v: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0]
+	let m = Matrix::from_vec(2, 2, v).unwrap()
+	let scaled = m.scale(2.5)
+	assert!(scaled.get(0, 0) == 2.5)
+	assert!(scaled.get(0, 1) == 5.0)
+	assert!(scaled.get(1, 0) == 7.5)
+	assert!(scaled.get(1, 1) == 10.0)
+	log!("scaled (2.5x) =\n{}", scaled.fmt())
+}
 
-
+fn main() {
+	test_constructors_and_accessors()
+	test_addition_and_subtraction()
+	test_hadamard()
+	test_transpose()
+	test_matmul()
+	test_scale()
+	log!("All Matrix tests passed successfully!")
+}

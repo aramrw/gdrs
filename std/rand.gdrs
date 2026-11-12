@@ -58,3 +58,15 @@ impl Rng:
 
 	fn gaussian(&mut self, mean: f64, std_dev: f64) -> f64:
 		return mean + self.next_gaussian() * std_dev
+
+fn rand_f64() -> f64:
+	let mut rng = Rng::new()
+	return rng.next_f64()
+
+fn random_f64() -> f64:
+	return rand_f64()
+
+fn rand_range_f64(min: f64, max: f64) -> f64:
+	let mut rng = Rng::new()
+	return rng.range_f64(min, max)
+
