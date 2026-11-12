@@ -249,12 +249,12 @@ pub fn is_displayable_type(ty: Type, type_ctx: &TypeCtx<'_>) -> bool {
         other => other,
     };
 
+    if inner.is_numeric() {
+        return true;
+    }
+
     match inner {
-        Type::Int
-        | Type::I32
-        | Type::Float
-        | Type::F32
-        | Type::Bool
+        Type::Bool
         | Type::Str
         | Type::String
         | Type::Infer(_) => true,

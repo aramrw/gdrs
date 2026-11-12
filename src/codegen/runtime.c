@@ -157,6 +157,8 @@ int64_t intrinsic_log_part(int64_t type_tag, int64_t value_bits, int64_t suffix)
         printf("%s", buf);
     } else if (type_tag == 5) { // empty newline
         // prints suffix only
+    } else if (type_tag == 6) { // Unsigned Int (u64, u32, u16, u8)
+        printf("%llu", (unsigned long long)value_bits);
     } else {
         printf("<unknown type 0x%llx: 0x%llx>",
                (unsigned long long)type_tag,

@@ -115,11 +115,12 @@ pub fn normalize_struct_layouts(
 
 fn scalar_cl_ty(ty: &Type) -> Option<cranelift_codegen::ir::Type> {
     match ty {
-        Type::I32 => Some(types::I32),
-        Type::Int => Some(types::I64),
+        Type::I32 | Type::U32 => Some(types::I32),
+        Type::I16 | Type::U16 => Some(types::I16),
+        Type::I8 | Type::U8 | Type::Bool => Some(types::I8),
+        Type::Int | Type::U64 => Some(types::I64),
         Type::F32 => Some(types::F32),
         Type::Float => Some(types::F64),
-        Type::Bool => Some(types::I8),
         Type::Str
         | Type::Ptr(_)
         | Type::Ref(_)
@@ -135,6 +136,9 @@ fn scalar_cl_ty(ty: &Type) -> Option<cranelift_codegen::ir::Type> {
             match norm.as_str() {
                 "f64" | "float" => Some(types::F64),
                 "f32" => Some(types::F32),
+                "i32" | "u32" => Some(types::I32),
+                "i16" | "u16" => Some(types::I16),
+                "i8" | "u8" => Some(types::I8),
                 _ => None,
             }
         }
@@ -159,9 +163,11 @@ fn size_and_align_inner(
 ) -> (u32, u32) {
     match ty {
         Type::Unit | Type::Void => (0, 1),
-        Type::Bool => (1, 1),
-        Type::I32 | Type::F32 => (4, 4),
+        Type::Bool | Type::U8 | Type::I8 => (1, 1),
+        Type::U16 | Type::I16 => (2, 2),
+        Type::I32 | Type::U32 | Type::F32 => (4, 4),
         Type::Int
+        | Type::U64
         | Type::Float
         | Type::Str
         | Type::Ptr(_)

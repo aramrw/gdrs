@@ -79,11 +79,12 @@ pub fn compile_add<M: Module>(
     left = left_coerced;
     right = right_coerced;
 
-    if is_float_ty(ty) || is_float_val(builder, left) {
+    let res = if is_float_ty(ty) || is_float_val(builder, left) {
         builder.ins().fadd(left, right)
     } else {
         builder.ins().iadd(left, right)
-    }
+    };
+    coerce_val(builder, res, cranelift_type_of(ty))
 }
 
 pub fn compile_sub<M: Module>(
@@ -113,11 +114,12 @@ pub fn compile_sub<M: Module>(
     left = left_coerced;
     right = right_coerced;
 
-    if is_float_ty(ty) || is_float_val(builder, left) {
+    let res = if is_float_ty(ty) || is_float_val(builder, left) {
         builder.ins().fsub(left, right)
     } else {
         builder.ins().isub(left, right)
-    }
+    };
+    coerce_val(builder, res, cranelift_type_of(ty))
 }
 
 pub fn compile_mul<M: Module>(
@@ -131,11 +133,12 @@ pub fn compile_mul<M: Module>(
     let left = compile_expr(builder, lhs, cg, module);
     let right = compile_expr(builder, rhs, cg, module);
     let (left, right) = coerce_operands(builder, left, right);
-    if is_float_ty(ty) || is_float_val(builder, left) {
+    let res = if is_float_ty(ty) || is_float_val(builder, left) {
         builder.ins().fmul(left, right)
     } else {
         builder.ins().imul(left, right)
-    }
+    };
+    coerce_val(builder, res, cranelift_type_of(ty))
 }
 
 pub fn compile_div<M: Module>(
@@ -149,11 +152,14 @@ pub fn compile_div<M: Module>(
     let left = compile_expr(builder, lhs, cg, module);
     let right = compile_expr(builder, rhs, cg, module);
     let (left, right) = coerce_operands(builder, left, right);
-    if is_float_ty(ty) || is_float_val(builder, left) {
+    let res = if is_float_ty(ty) || is_float_val(builder, left) {
         builder.ins().fdiv(left, right)
+    } else if ty.is_unsigned_integer() || lhs.ty().is_unsigned_integer() {
+        builder.ins().udiv(left, right)
     } else {
         builder.ins().sdiv(left, right)
-    }
+    };
+    coerce_val(builder, res, cranelift_type_of(ty))
 }
 
 pub fn compile_mod<M: Module>(
@@ -167,14 +173,17 @@ pub fn compile_mod<M: Module>(
     let left = compile_expr(builder, lhs, cg, module);
     let right = compile_expr(builder, rhs, cg, module);
     let (left, right) = coerce_operands(builder, left, right);
-    if is_float_ty(ty) || is_float_val(builder, left) {
+    let res = if is_float_ty(ty) || is_float_val(builder, left) {
         let div = builder.ins().fdiv(left, right);
         let flr = builder.ins().floor(div);
         let mul = builder.ins().fmul(flr, right);
         builder.ins().fsub(left, mul)
+    } else if ty.is_unsigned_integer() || lhs.ty().is_unsigned_integer() {
+        builder.ins().urem(left, right)
     } else {
         builder.ins().srem(left, right)
-    }
+    };
+    coerce_val(builder, res, cranelift_type_of(ty))
 }
 
 pub fn compile_neg<M: Module>(
@@ -216,7 +225,11 @@ pub fn compile_caret<M: Module>(builder: &mut FunctionBuilder, lhs: &TypedExpr, 
 }
 
 pub fn compile_shr<M: Module>(builder: &mut FunctionBuilder, lhs: &TypedExpr, rhs: &TypedExpr, cg: &mut CodegenCtx, module: &mut M) -> Value {
-    bin_op!(builder, lhs, rhs, cg, module, |b: &mut FunctionBuilder, l, r| b.ins().sshr(l, r))
+    if lhs.ty().is_unsigned_integer() {
+        bin_op!(builder, lhs, rhs, cg, module, |b: &mut FunctionBuilder, l, r| b.ins().ushr(l, r))
+    } else {
+        bin_op!(builder, lhs, rhs, cg, module, |b: &mut FunctionBuilder, l, r| b.ins().sshr(l, r))
+    }
 }
 
 pub fn compile_shl<M: Module>(builder: &mut FunctionBuilder, lhs: &TypedExpr, rhs: &TypedExpr, cg: &mut CodegenCtx, module: &mut M) -> Value {
@@ -740,17 +753,21 @@ fn compile_ord_cmp<M: Module>(
 }
 
 pub fn compile_gt<M: Module>(builder: &mut FunctionBuilder, lhs: &TypedExpr, rhs: &TypedExpr, cg: &mut CodegenCtx, module: &mut M) -> Value {
-    compile_ord_cmp(builder, lhs, rhs, cg, module, FloatCC::GreaterThan, IntCC::SignedGreaterThan)
+    let icc = if lhs.ty().is_unsigned_integer() { IntCC::UnsignedGreaterThan } else { IntCC::SignedGreaterThan };
+    compile_ord_cmp(builder, lhs, rhs, cg, module, FloatCC::GreaterThan, icc)
 }
 
 pub fn compile_lt<M: Module>(builder: &mut FunctionBuilder, lhs: &TypedExpr, rhs: &TypedExpr, cg: &mut CodegenCtx, module: &mut M) -> Value {
-    compile_ord_cmp(builder, lhs, rhs, cg, module, FloatCC::LessThan, IntCC::SignedLessThan)
+    let icc = if lhs.ty().is_unsigned_integer() { IntCC::UnsignedLessThan } else { IntCC::SignedLessThan };
+    compile_ord_cmp(builder, lhs, rhs, cg, module, FloatCC::LessThan, icc)
 }
 
 pub fn compile_gte<M: Module>(builder: &mut FunctionBuilder, lhs: &TypedExpr, rhs: &TypedExpr, cg: &mut CodegenCtx, module: &mut M) -> Value {
-    compile_ord_cmp(builder, lhs, rhs, cg, module, FloatCC::GreaterThanOrEqual, IntCC::SignedGreaterThanOrEqual)
+    let icc = if lhs.ty().is_unsigned_integer() { IntCC::UnsignedGreaterThanOrEqual } else { IntCC::SignedGreaterThanOrEqual };
+    compile_ord_cmp(builder, lhs, rhs, cg, module, FloatCC::GreaterThanOrEqual, icc)
 }
 
 pub fn compile_lte<M: Module>(builder: &mut FunctionBuilder, lhs: &TypedExpr, rhs: &TypedExpr, cg: &mut CodegenCtx, module: &mut M) -> Value {
-    compile_ord_cmp(builder, lhs, rhs, cg, module, FloatCC::LessThanOrEqual, IntCC::SignedLessThanOrEqual)
+    let icc = if lhs.ty().is_unsigned_integer() { IntCC::UnsignedLessThanOrEqual } else { IntCC::SignedLessThanOrEqual };
+    compile_ord_cmp(builder, lhs, rhs, cg, module, FloatCC::LessThanOrEqual, icc)
 }

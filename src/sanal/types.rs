@@ -15,6 +15,12 @@ fn parse_suffix_to_type(s: &str) -> Option<Type> {
     match s {
         "i64" | "int" => Some(Type::Int),
         "i32" => Some(Type::I32),
+        "i16" => Some(Type::I16),
+        "i8" => Some(Type::I8),
+        "u64" | "uint" | "usize" => Some(Type::U64),
+        "u32" => Some(Type::U32),
+        "u16" => Some(Type::U16),
+        "u8" | "byte" => Some(Type::U8),
         "f64" | "float" => Some(Type::Float),
         "f32" => Some(Type::F32),
         "bool" => Some(Type::Bool),
@@ -48,6 +54,17 @@ pub struct TypeCtx<'a> {
 impl<'a> TypeCtx<'a> {
     pub fn resolve_type_annotation(&self, ty: Type) -> Type {
         match ty {
+            Type::Obj(name) if name == "u64" || name == "U64" || name == "usize" || name == "uint" => Type::U64,
+            Type::Obj(name) if name == "u32" || name == "U32" => Type::U32,
+            Type::Obj(name) if name == "u16" || name == "U16" => Type::U16,
+            Type::Obj(name) if name == "u8" || name == "U8" || name == "byte" => Type::U8,
+            Type::Obj(name) if name == "i64" || name == "I64" || name == "int" || name == "isize" => Type::Int,
+            Type::Obj(name) if name == "i32" || name == "I32" => Type::I32,
+            Type::Obj(name) if name == "i16" || name == "I16" => Type::I16,
+            Type::Obj(name) if name == "i8" || name == "I8" => Type::I8,
+            Type::Obj(name) if name == "f64" || name == "F64" || name == "float" => Type::Float,
+            Type::Obj(name) if name == "f32" || name == "F32" => Type::F32,
+            Type::Obj(name) if name == "bool" || name == "Bool" => Type::Bool,
             Type::Obj(name)
                 if name.starts_with("std_core_Option")
                     || name.starts_with("std_core_Result")

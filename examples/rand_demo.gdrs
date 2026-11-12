@@ -1,0 +1,17 @@
+use std::rand::Rng
+
+fn main() {
+	let mut rng = Rng::from_seed(42)
+	let r1 = rng.next_u64()
+	let r2 = rng.next_u64()
+	log!("seed 42 r1: {}", r1)
+	log!("seed 42 r2: {}", r2)
+	log!("next_f64: {}", rng.next_f64())
+	log!("range_i64: {}", rng.range_i64(10, 20))
+	log!("range_f64: {}", rng.range_f64(1.0, 5.0))
+
+	let mut rng2 = Rng::new()
+	log!("rng2 next_u64: {}", rng2.next_u64())
+	log!("rng2 next_f64: {}", rng2.next_f64())
+	log!("rng2 range_i64: {}", rng2.range_i64(100, 200))
+}

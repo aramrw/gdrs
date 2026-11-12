@@ -340,6 +340,12 @@ fn rewrite_type(
         }
         Type::Int
         | Type::I32
+        | Type::I16
+        | Type::I8
+        | Type::U64
+        | Type::U32
+        | Type::U16
+        | Type::U8
         | Type::Float
         | Type::F32
         | Type::Bool

@@ -116,13 +116,20 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
         select! {
             Token::TypeI64 => Type::Int,
             Token::TypeI32 => Type::I32,
+            Token::TypeI16 => Type::I16,
+            Token::TypeI8 => Type::I8,
+            Token::TypeU64 => Type::U64,
+            Token::TypeU32 => Type::U32,
+            Token::TypeU16 => Type::U16,
+            Token::TypeU8 => Type::U8,
+            Token::TypeUsize => Type::U64,
+            Token::TypeIsize => Type::Int,
             Token::TypeFloat => Type::Float,
             Token::TypeF32 => Type::F32,
             Token::TypeBool => Type::Bool,
             Token::TypeStr => Type::Str,
             Token::TypeString => Type::String,
             Token::TypeVoid => Type::Void,
-            Token::TypeU8 => Type::Int,
         }
         .or(ptr_type)
         .or(ref_type)

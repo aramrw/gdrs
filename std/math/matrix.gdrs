@@ -72,25 +72,7 @@ impl Matrix:
 		return (self.rows, self.cols)
 		
 	// algebra
-	fn add(&self, o: &Matrix) -> Result<Matrix, MatrixError>:
-		self.shapes_match(o)?
-		let len = self.len()
-		let mut r: Vec<f64> = Vec::new()
-		for i in 0..len:
-			r.push(self.data[i] + o.data[i])
-		let m = Matrix{ rows: self.rows, cols: self.cols, data: r }
-		return Ok(m)
-
-	fn sub(&self, o: &Matrix) -> Result<Matrix, MatrixError>:
-		self.shapes_match(o)?
-		let len = self.len()
-		let mut r: Vec<f64> = Vec::new()
-		for i in 0..len:
-			r.push(self.data[i] - o.data[i])
-		let m = Matrix{ rows: self.rows, cols: self.cols, data: r }
-		return Ok(m)
-
-	fn transpose(&self) -> Matrix:
+	fn transpose(&self) -> Matrix {
 		let data = &self.data
 		let mut m = Matrix::zeros(self.cols, self.rows)
 
@@ -99,8 +81,38 @@ impl Matrix:
 				let _rc = self.get(r, c)
 				m.set(c, r, _rc)
 		return m
+	}
 
-	fn matmul(&self, o: &Matrix) -> Result<Matrix, MatrixError>:
+	fn add(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
+		self.shapes_match(o)?
+		let len = self.len()
+		let mut r: Vec<f64> = Vec::new()
+		for i in 0..len:
+			r.push(self.data[i] + o.data[i])
+		let m = Matrix{ rows: self.rows, cols: self.cols, data: r }
+		return Ok(m)
+	}
+
+	fn sub(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
+		self.shapes_match(o)?
+		let len = self.len()
+		let mut r: Vec<f64> = Vec::new()
+		for i in 0..len:
+			r.push(self.data[i] - o.data[i])
+		let m = Matrix{ rows: self.rows, cols: self.cols, data: r }
+		return Ok(m)
+	}
+
+	fn hadamard(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
+		self.shapes_match(o)?
+		let mut r: Vec<f64> = Vec::new()
+		for i in 0..self.data.len():
+			r.push(self.data[i] * o.data[i])
+		let m = Matrix{ rows: self.rows, cols: self.cols, data: r }
+		return Ok(m)
+	}
+
+	fn matmul(&self, o: &Matrix) -> Result<Matrix, MatrixError> {
 		if self.cols != o.rows:
 			return Err(MatrixError::MatMulMisalignment(self.shape(), o.shape()))
 		let mut rm = Matrix::zeros(self.rows, o.cols)
@@ -111,5 +123,6 @@ impl Matrix:
 					sum += self.get(r, k) * o.get(k, c) 
 				rm.set(r, c, sum)
 		return Ok(rm)
+	}
 
 

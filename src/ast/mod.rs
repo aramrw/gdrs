@@ -84,10 +84,17 @@ pub enum Token {
 
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Ident(String),
-    #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().to_string())]
+    #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?", |lex| lex.slice().chars().filter(|c| *c != '_').collect::<String>())]
+    #[regex(r"[0-9][0-9_]*[eE][+-]?[0-9][0-9_]*", |lex| lex.slice().chars().filter(|c| *c != '_').collect::<String>())]
     Float(String),
-    #[regex(r"0[xX][0-9a-fA-F]+", |lex| i64::from_str_radix(&lex.slice()[2..], 16).unwrap_or_else(|_| u64::from_str_radix(&lex.slice()[2..], 16).map(|u| u as i64).unwrap_or(0)))]
-    #[regex("[0-9]+", |lex| lex.slice().parse::<i64>().unwrap())]
+    #[regex(r"0[xX][0-9a-fA-F][0-9a-fA-F_]*", |lex| {
+        let s: String = lex.slice()[2..].chars().filter(|c| *c != '_').collect();
+        i64::from_str_radix(&s, 16).unwrap_or_else(|_| u64::from_str_radix(&s, 16).map(|u| u as i64).unwrap_or(0))
+    })]
+    #[regex("[0-9][0-9_]*", |lex| {
+        let s: String = lex.slice().chars().filter(|c| *c != '_').collect();
+        s.parse::<i64>().unwrap_or_else(|_| s.parse::<u64>().map(|u| u as i64).unwrap_or(0))
+    })]
     Int(i64),
 
     // Catch newlines and count the spaces immediately after them
@@ -138,6 +145,20 @@ pub enum Token {
     TypeI64,
     #[token("i32")]
     TypeI32,
+    #[token("i16")]
+    TypeI16,
+    #[token("i8")]
+    TypeI8,
+    #[token("u64")]
+    TypeU64,
+    #[token("u32")]
+    TypeU32,
+    #[token("u16")]
+    TypeU16,
+    #[token("usize")]
+    TypeUsize,
+    #[token("isize")]
+    TypeIsize,
     #[token("f64")]
     TypeFloat,
     #[token("f32")]
@@ -207,6 +228,12 @@ pub type Span = std::ops::Range<usize>;
 pub enum Type {
     Int,
     I32,
+    I16,
+    I8,
+    U64,
+    U32,
+    U16,
+    U8,
     Float,
     F32,
     Bool,
@@ -232,13 +259,35 @@ pub enum Type {
 }
 
 impl Type {
+    pub fn is_integer(&self) -> bool {
+        matches!(
+            self,
+            Type::Int | Type::I32 | Type::I16 | Type::I8 | Type::U64 | Type::U32 | Type::U16 | Type::U8
+        )
+    }
+
+    pub fn is_signed_integer(&self) -> bool {
+        matches!(self, Type::Int | Type::I32 | Type::I16 | Type::I8)
+    }
+
+    pub fn is_unsigned_integer(&self) -> bool {
+        matches!(self, Type::U64 | Type::U32 | Type::U16 | Type::U8)
+    }
+
+    pub fn is_float(&self) -> bool {
+        matches!(self, Type::Float | Type::F32)
+    }
+
+    pub fn is_numeric(&self) -> bool {
+        self.is_integer() || self.is_float()
+    }
+
     pub fn is_copy(&self) -> bool {
+        if self.is_numeric() {
+            return true;
+        }
         match self {
-            Type::Int
-            | Type::I32
-            | Type::Float
-            | Type::F32
-            | Type::Bool
+            Type::Bool
             | Type::Str
             | Type::Unit
             | Type::Void
@@ -279,16 +328,23 @@ pub fn normalize_type_name(name: &str) -> String {
     let lower = name.to_lowercase();
     match lower.as_str() {
         "float" | "f64" => "f64".to_string(),
-        "f32" | "F32" => "f32".to_string(),
+        "f32" => "f32".to_string(),
         "i64" | "int" => "i64".to_string(),
-        "i32" | "I32" => "i32".to_string(),
-        "bool" | "Bool" | "boolean" => "bool".to_string(),
+        "i32" => "i32".to_string(),
+        "i16" => "i16".to_string(),
+        "i8" => "i8".to_string(),
+        "u64" | "uint" | "usize" => "u64".to_string(),
+        "u32" => "u32".to_string(),
+        "u16" => "u16".to_string(),
+        "u8" | "byte" => "u8".to_string(),
+        "isize" => "i64".to_string(),
+        "bool" | "boolean" => "bool".to_string(),
         "string" | "str" => "str".to_string(),
-        "void" | "Void" => "void".to_string(),
-        "none" | "None" => "none".to_string(),
-        "some" | "Some" => "some".to_string(),
-        "err" | "Err" => "err".to_string(),
-        "ok" | "Ok" => "ok".to_string(),
+        "void" => "void".to_string(),
+        "none" => "none".to_string(),
+        "some" => "some".to_string(),
+        "err" => "err".to_string(),
+        "ok" => "ok".to_string(),
         _ => lower,
     }
 }

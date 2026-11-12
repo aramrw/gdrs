@@ -33,17 +33,24 @@ pub(crate) fn is_float_val(builder: &FunctionBuilder, val: Value) -> bool {
 #[inline]
 pub fn cranelift_type_of(ty: &Type) -> cranelift_codegen::ir::Type {
     match ty {
-        Type::I32 => types::I32,
-        Type::Int => types::I64,
+        Type::I32 | Type::U32 => types::I32,
+        Type::I16 | Type::U16 => types::I16,
+        Type::I8 | Type::U8 | Type::Bool => types::I8,
+        Type::Int | Type::U64 => types::I64,
         Type::F32 => types::F32,
         Type::Float => types::F64,
-        Type::Bool => types::I8,
         Type::Obj(s) => {
             let normalized = crate::ast::normalize_type_name(s);
             if matches!(normalized.as_str(), "f64" | "float") {
                 types::F64
             } else if matches!(normalized.as_str(), "f32") {
                 types::F32
+            } else if matches!(normalized.as_str(), "i32" | "u32") {
+                types::I32
+            } else if matches!(normalized.as_str(), "i16" | "u16") {
+                types::I16
+            } else if matches!(normalized.as_str(), "i8" | "u8") {
+                types::I8
             } else {
                 types::I64
             }
@@ -66,8 +73,6 @@ pub(crate) fn coerce_operands(
         return (lhs, rhs);
     }
     match (lt, rt) {
-        (types::I32, types::I64) => lhs = builder.ins().sextend(types::I64, lhs),
-        (types::I64, types::I32) => rhs = builder.ins().sextend(types::I64, rhs),
         (types::F32, types::F64) => lhs = builder.ins().fpromote(types::F64, lhs),
         (types::F64, types::F32) => rhs = builder.ins().fpromote(types::F64, rhs),
         (types::I32, types::F32) => lhs = builder.ins().fcvt_from_sint(types::F32, lhs),
@@ -78,7 +83,22 @@ pub(crate) fn coerce_operands(
         (types::F64, types::I64) => rhs = builder.ins().fcvt_from_sint(types::F64, rhs),
         (types::I64, types::F32) => lhs = builder.ins().fcvt_from_sint(types::F32, lhs),
         (types::F32, types::I64) => rhs = builder.ins().fcvt_from_sint(types::F32, rhs),
-        _ => {}
+        _ => {
+            fn int_rank(t: cranelift_codegen::ir::Type) -> usize {
+                if t == types::I64 { 4 }
+                else if t == types::I32 { 3 }
+                else if t == types::I16 { 2 }
+                else if t == types::I8 { 1 }
+                else { 0 }
+            }
+            let lr = int_rank(lt);
+            let rr = int_rank(rt);
+            if lr > 0 && rr > 0 {
+                let max_t = if lr >= rr { lt } else { rt };
+                if lt != max_t { lhs = builder.ins().uextend(max_t, lhs); }
+                if rt != max_t { rhs = builder.ins().uextend(max_t, rhs); }
+            }
+        }
     }
     (lhs, rhs)
 }
@@ -406,9 +426,10 @@ pub(crate) fn coerce_typed_val(
     if val_ty == target_ty {
         return val;
     }
-    if matches!(src_ty, Type::Int | Type::I32)
-        && (target_ty == types::F64 || target_ty == types::F32)
-    {
+    if src_ty.is_unsigned_integer() && (target_ty == types::F64 || target_ty == types::F32) {
+        return builder.ins().fcvt_from_uint(target_ty, val);
+    }
+    if src_ty.is_signed_integer() && (target_ty == types::F64 || target_ty == types::F32) {
         return builder.ins().fcvt_from_sint(target_ty, val);
     }
     coerce_val(builder, val, target_ty)

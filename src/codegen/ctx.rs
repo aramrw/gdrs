@@ -180,10 +180,7 @@ impl<'a, 'b> CodegenCtx<'a, 'b> {
     }
 
     pub fn is_addressable_scalar(ty: &Type) -> bool {
-        matches!(
-            ty,
-            Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Bool | Type::Str | Type::Ptr(_)
-        )
+        ty.is_numeric() || matches!(ty, Type::Bool | Type::Str | Type::Ptr(_))
     }
 
     /// Binds `name` to `var` in the current lexical scope, saving any shadowed outer binding

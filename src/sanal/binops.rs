@@ -11,12 +11,12 @@ use crate::{
 
 #[inline]
 pub fn is_int(ty: Type) -> bool {
-    matches!(ty, Type::I32 | Type::Int)
+    ty.is_integer()
 }
 
 #[inline]
 pub fn is_float(ty: Type) -> bool {
-    matches!(ty, Type::F32 | Type::Float)
+    ty.is_float()
 }
 
 pub fn check_binary_op(
@@ -48,15 +48,55 @@ pub fn check_binary_op(
     }
     drop(infer);
 
+    if l_ty == r_ty && (is_int(l_ty) || (allow_float && is_float(l_ty))) {
+        return l_ty;
+    }
+    if (op_name == ">>" || op_name == "<<") && is_int(l_ty) && is_int(r_ty) {
+        return l_ty;
+    }
+    if is_int(l_ty) && is_int(r_ty) {
+        if l_ty.is_unsigned_integer() && r_ty == Type::Int {
+            return l_ty;
+        }
+        if r_ty.is_unsigned_integer() && l_ty == Type::Int {
+            return r_ty;
+        }
+        if l_ty.is_unsigned_integer() && r_ty.is_unsigned_integer() {
+            return if l_ty == Type::U64 || r_ty == Type::U64 {
+                Type::U64
+            } else if l_ty == Type::U32 || r_ty == Type::U32 {
+                Type::U32
+            } else if l_ty == Type::U16 || r_ty == Type::U16 {
+                Type::U16
+            } else {
+                Type::U8
+            };
+        }
+        return if l_ty == Type::Int || r_ty == Type::Int {
+            Type::Int
+        } else if l_ty == Type::I32 || r_ty == Type::I32 {
+            Type::I32
+        } else if l_ty == Type::I16 || r_ty == Type::I16 {
+            Type::I16
+        } else {
+            Type::I8
+        };
+    }
+    if allow_float && is_float(l_ty) && is_float(r_ty) {
+        return if l_ty == Type::Float || r_ty == Type::Float {
+            Type::Float
+        } else {
+            Type::F32
+        };
+    }
+    if allow_float && is_int(l_ty) && is_float(r_ty) {
+        return r_ty;
+    }
+    if allow_float && is_float(l_ty) && is_int(r_ty) {
+        return l_ty;
+    }
+
     match (l_ty, r_ty) {
-        (Type::I32, Type::I32) => Type::I32,
-        (Type::Int, Type::Int) => Type::Int,
-        (Type::I32, Type::Int) | (Type::Int, Type::I32) => Type::Int,
-        (Type::F32, Type::F32) if allow_float => Type::F32,
-        (Type::Float, Type::Float) if allow_float => Type::Float,
-        (Type::F32, Type::Float) | (Type::Float, Type::F32) if allow_float => Type::Float,
-        _ if allow_float && is_int(l_ty) && is_float(r_ty) => r_ty,
-        _ if allow_float && is_float(l_ty) && is_int(r_ty) => l_ty,
         (Type::Generic(g), _) | (_, Type::Generic(g)) => Type::Generic(g),
         (Type::Infer(id), Type::Infer(_)) => Type::Infer(id),
         (Type::Infer(_), other) if allow_float && (is_int(other) || is_float(other)) => other,
@@ -72,7 +112,7 @@ pub fn check_binary_op(
                 help: if !allow_float && (is_float(l_ty) || is_float(r_ty)) {
                     Some("Bitwise operations can only be used on integers.".into())
                 } else {
-                    Some("Both operands must be numeric types (i32, i64, f32, f64).".into())
+                    Some("Both operands must be numeric types.".into())
                 },
                 span: span.clone(),
             });
@@ -99,13 +139,9 @@ fn check_ord_comparison(
     }
     drop(infer);
 
-    if !matches!(
-        l,
-        Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_) | Type::Infer(_)
-    ) || !matches!(
-        r,
-        Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_) | Type::Infer(_)
-    ) {
+    let is_l_num = l.is_numeric() || matches!(l, Type::Generic(_) | Type::Infer(_));
+    let is_r_num = r.is_numeric() || matches!(r, Type::Generic(_) | Type::Infer(_));
+    if !is_l_num || !is_r_num {
         errors.push(SemanticError {
             code: "E0308",
             message: format!("Cannot compare types `{l:?}` and `{r:?}` with '{op_name}'"),
@@ -141,11 +177,7 @@ fn check_equality_operands(
         r,
         Type::Str | Type::String | Type::Obj("String") | Type::Obj("std_string_String")
     );
-    let numeric_compatible = matches!(
-        (l, r),
-        (Type::I32 | Type::Int, Type::I32 | Type::Int)
-            | (Type::F32 | Type::Float, Type::F32 | Type::Float)
-    );
+    let numeric_compatible = (l.is_integer() && r.is_integer()) || (l.is_float() && r.is_float());
     if l != r
         && !numeric_compatible
         && !is_str_eq

@@ -2095,3 +2095,94 @@ fn main():
         "Parse error",
     );
 }
+
+#[test]
+fn round19_unsigned_numbers_and_rand() {
+    // 1. Numeric underscores, scientific notation, and unsigned arithmetic/shifts/modulo
+    assert_ok_output(
+        "round19_unsigned_and_literals",
+        r#"
+fn main() {
+	let million = 1_000_000
+	let hex_val = 0xdead_beef
+	let sci_float = 2.5e3
+	let small_sci = 1.0e-3
+	log!("million: {}", million)
+	log!("hex: {}", hex_val)
+	log!("sci: {}", sci_float)
+	log!("small: {}", small_sci)
+
+	// Unsigned logical right shift vs signed arithmetic shift
+	let u_max: u64 = 0x8000_0000_0000_0000
+	let u_shifted = u_max >> 1
+	log!("u_shifted: {}", u_shifted)
+
+	// Unsigned comparison: 0xFF... is larger than 10
+	let u_all_ones: u64 = 0xffff_ffff_ffff_ffff
+	if u_all_ones > 10:
+		log!("unsigned gt ok")
+
+	// Unsigned modulo: 18446744073709551615 % 10 = 5
+	let u_mod = u_all_ones % 10
+	log!("u_mod: {}", u_mod)
+
+	// u32 and u8
+	let byte_val: u8 = 250
+	let b_add = byte_val + 5
+	log!("byte: {}", b_add)
+}
+"#,
+        &[
+            "million: 1000000",
+            "hex: 3735928559",
+            "sci: 2500",
+            "small: 0.001",
+            "u_shifted: 4611686018427387904",
+            "unsigned gt ok",
+            "u_mod: 5",
+            "byte: 255",
+        ],
+    );
+
+    // 2. Full std::rand::Rng test with SplitMix64 deterministic seed and time-based seed
+    assert_ok_output(
+        "round19_std_rand_test",
+        r#"
+use std::rand::Rng
+
+fn main() {
+	let mut rng = Rng::from_seed(42)
+	let r1 = rng.next_u64()
+	let r2 = rng.next_u64()
+	log!("seed42 r1: {}", r1)
+	log!("seed42 r2: {}", r2)
+
+	let f = rng.next_f64()
+	if f >= 0.0 && f < 1.0:
+		log!("f64 in range: ok")
+
+	let ri = rng.range_i64(10, 20)
+	if ri >= 10 && ri <= 20:
+		log!("range_i64: ok")
+
+	let rf = rng.range_f64(10.0, 50.0)
+	if rf >= 10.0 && rf <= 50.0:
+		log!("range_f64: ok")
+
+	let mut live_rng = Rng::new()
+	let lr = live_rng.next_u64()
+	let lf = live_rng.next_f64()
+	if lf >= 0.0 && lf < 1.0:
+		log!("live rng: ok")
+}
+"#,
+        &[
+            "seed42 r1: 13679457532755275413",
+            "seed42 r2: 2949826092126892291",
+            "f64 in range: ok",
+            "range_i64: ok",
+            "range_f64: ok",
+            "live rng: ok",
+        ],
+    );
+}

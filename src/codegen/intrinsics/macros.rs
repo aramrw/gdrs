@@ -17,6 +17,12 @@ fn format_type_name(ty: &Type) -> String {
     match ty {
         Type::Int => "i64".to_string(),
         Type::I32 => "i32".to_string(),
+        Type::I16 => "i16".to_string(),
+        Type::I8 => "i8".to_string(),
+        Type::U64 => "u64".to_string(),
+        Type::U32 => "u32".to_string(),
+        Type::U16 => "u16".to_string(),
+        Type::U8 => "u8".to_string(),
         Type::Float => "f64".to_string(),
         Type::F32 => "f32".to_string(),
         Type::Bool => "bool".to_string(),
@@ -429,7 +435,8 @@ fn compile_print_macro<M: Module>(
                 let mut temp_string_drop: Option<(Value, Type)> = None;
                 let mut temp_cstr_free: Option<Value> = None;
                 let (raw_val, type_tag) = match effective_ty {
-                    Type::Int | Type::I32 => (compile_expr(builder, arg, cg, module), 0),
+                    _ if effective_ty.is_unsigned_integer() => (compile_expr(builder, arg, cg, module), 6),
+                    Type::Int | Type::I32 | Type::I16 | Type::I8 => (compile_expr(builder, arg, cg, module), 0),
                     Type::Bool => (compile_expr(builder, arg, cg, module), 1),
                     Type::Str => (compile_expr(builder, arg, cg, module), 2),
                     Type::String | Type::Obj("String") | Type::Obj("std_string_String") => {
@@ -478,8 +485,12 @@ fn compile_print_macro<M: Module>(
                     } else if raw_ty == types::F32 {
                         let promoted = builder.ins().fpromote(types::F64, raw_val);
                         builder.ins().bitcast(types::I64, MemFlags::new(), promoted)
-                    } else if raw_ty == types::I32 || raw_ty == types::I8 {
-                        builder.ins().sextend(types::I64, raw_val)
+                    } else if raw_ty == types::I32 || raw_ty == types::I16 || raw_ty == types::I8 {
+                        if effective_ty.is_unsigned_integer() {
+                            builder.ins().uextend(types::I64, raw_val)
+                        } else {
+                            builder.ins().sextend(types::I64, raw_val)
+                        }
                     } else {
                         raw_val
                     }

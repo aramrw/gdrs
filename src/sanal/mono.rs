@@ -100,7 +100,7 @@ pub fn type_satisfies_bound(
             return !matches!(ty, Type::Rc(_) | Type::Ref(_) | Type::MutRef(_) | Type::Ptr(_));
         }
         "Add" | "Sub" | "Mul" | "Div" => {
-            if matches!(ty, Type::Int | Type::I32 | Type::Float | Type::F32) {
+            if ty.is_numeric() {
                 return true;
             }
             if let Some(tname) = type_name_opt {
@@ -111,35 +111,31 @@ pub fn type_satisfies_bound(
             }
         }
         "Display" => {
-            if matches!(
-                ty,
-                Type::Int
-                    | Type::I32
-                    | Type::Float
-                    | Type::F32
-                    | Type::Bool
-                    | Type::Str
-                    | Type::String
-                    | Type::Obj("String")
-                    | Type::Obj("std_string_String")
-            ) {
+            if ty.is_numeric()
+                || matches!(
+                    ty,
+                    Type::Bool
+                        | Type::Str
+                        | Type::String
+                        | Type::Obj("String")
+                        | Type::Obj("std_string_String")
+                )
+            {
                 return true;
             }
         }
         "Eq" | "PartialEq" => {
-            if matches!(
-                ty,
-                Type::Int
-                    | Type::I32
-                    | Type::Float
-                    | Type::F32
-                    | Type::Bool
-                    | Type::Str
-                    | Type::String
-                    | Type::Enum(_)
-                    | Type::Obj("String")
-                    | Type::Obj("std_string_String")
-            ) {
+            if ty.is_numeric()
+                || matches!(
+                    ty,
+                    Type::Bool
+                        | Type::Str
+                        | Type::String
+                        | Type::Enum(_)
+                        | Type::Obj("String")
+                        | Type::Obj("std_string_String")
+                )
+            {
                 return true;
             }
             if let Type::Tuple(tys) = ty {
@@ -242,6 +238,12 @@ pub fn type_suffix(ty: &Type) -> String {
     match ty {
         Type::Int => "i64".to_string(),
         Type::I32 => "i32".to_string(),
+        Type::I16 => "i16".to_string(),
+        Type::I8 => "i8".to_string(),
+        Type::U64 => "u64".to_string(),
+        Type::U32 => "u32".to_string(),
+        Type::U16 => "u16".to_string(),
+        Type::U8 => "u8".to_string(),
         Type::Float => "f64".to_string(),
         Type::F32 => "f32".to_string(),
         Type::Bool => "bool".to_string(),
@@ -859,8 +861,14 @@ pub fn monomorphize_struct(
 
                 fn suffix_part_to_type(s: &str) -> Type {
                     match s {
-                        "i64" | "int" => Type::Int,
+                        "i64" | "int" | "isize" => Type::Int,
                         "i32" => Type::I32,
+                        "i16" => Type::I16,
+                        "i8" => Type::I8,
+                        "u64" | "uint" | "usize" => Type::U64,
+                        "u32" => Type::U32,
+                        "u16" => Type::U16,
+                        "u8" | "byte" => Type::U8,
                         "f64" | "float" => Type::Float,
                         "f32" => Type::F32,
                         "bool" => Type::Bool,
