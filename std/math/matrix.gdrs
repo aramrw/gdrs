@@ -7,6 +7,8 @@ enum MatrixError:
 	ShapeMismatch((i32, i32), (i32, i32))
 	#[err("cannot multiply matrices with unequal rows & cols `{0}` and `{1}`")]
 	MatMulMisalignment((i32, i32), (i32, i32))
+	#[err("cannot construct or update matrix: expected data length `{0}`, got `{1}`")]
+	DataLengthMismatch(i32, i32)
 
 obj Matrix:
 	rows: i32
@@ -43,7 +45,6 @@ impl Matrix:
 		let mut data: Vec<f64> = Vec::new()
 		for i in 0..len:
 			data.push(0.0)
-	
 		return Matrix{ rows: rows, cols: cols, data: data }
 
 	fn ones(rows: i32, cols: i32) -> Matrix:
@@ -51,9 +52,14 @@ impl Matrix:
 		let mut data: Vec<f64> = Vec::new()
 		for i in 0..len:
 			data.push(1.0)
-	
 		return Matrix{ rows: rows, cols: cols, data: data }
-	
+
+	fn from_vec(rows: i32, cols: i32, data: Vec<f64>) -> Result<Matrix, MatrixError>:
+		if rows * cols != data.len():
+			return Err(MatrixError::DataLengthMismatch(rows * cols, data.len()))
+		let m = Matrix{ rows: rows, cols: cols, data: data }
+		return Ok(m)
+
 	// accesors 
 	fn get(&self, r: i32, c: i32) -> f64:
 		return self.data[r * self.cols + c]
@@ -86,17 +92,14 @@ impl Matrix:
 		
 	fn matmul(&self, o: &Matrix) -> Result<Matrix, MatrixError>:
 		if self.cols != o.rows:
-			return Err(MatrixError::MatMulMisalignment(self.shape(), self.shape()))
-		let r: Vec<f64> = Vec::new()
-		for x in 0..self.len():
-			for y in 0..o.len():
-				r.push(self.data[x] * o.data[y])
-		
-		let sum = 0
-		for i in 0..r.len():
-			sum += r[i]
-
-		let mut m = Matrix::zeros(1, 1)
-		m.set(0,0, sum)
+			return Err(MatrixError::MatMulMisalignment(self.shape(), o.shape()))
+		let mut rm = Matrix::zeros(self.rows, o.cols)
+		for r in 0..self.rows:
+			for c in 0..o.cols:
+				let mut sum: f64 = 0.0
+				for k in 0..self.cols:
+					sum += self.get(r, k) * o.get(k, c) 
+				rm.set(r, c, sum)
+		return Ok(rm)
 
 

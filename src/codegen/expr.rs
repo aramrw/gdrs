@@ -248,7 +248,7 @@ pub fn compile_expr<M: Module>(
         TypedExpr::While(cond, body, _) => compile_while(builder, cond, body, cg, module),
 
         TypedExpr::MacroCall(name, args, m_ty, span) => {
-            let val = crate::codegen::intrinsics::compile_macro_call(builder, name, args, span, cg, module);
+            let val = crate::codegen::intrinsics::compile_macro_call(builder, name, args, m_ty, span, cg, module);
             cg.register_temp(val, m_ty);
             val
         }

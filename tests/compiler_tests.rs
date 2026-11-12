@@ -1863,4 +1863,66 @@ fn main():
         "obj NoFmt:\n\tx: i64\nfn main():\n\tlet t = (1, NoFmt{ x: 2 })\n\tlog!(\"{}\", t)\n",
         "E0277",
     );
+
+    // 8. vec! macro: inferred elements, expected element type (i32/f64), empty vec![], and heterogeneous rejection
+    assert_ok_output(
+        "round15_vec_macro",
+        r#"
+use std::vec::Vec
+fn main():
+	let a = vec![1, 2, 3]
+	let b: Vec<i32> = vec![10, 20]
+	let mut c: Vec<f64> = vec![]
+	c.push(3.5)
+	log!("a={} b={} c={}", a.len(), b[1], c[0])
+"#,
+        &["a=3 b=20 c=3.5"],
+    );
+    assert_err_code(
+        "round15_vec_macro_heterogeneous",
+        "use std::vec::Vec\nfn main():\n\tlet v = vec![1, \"bad\"]\n",
+        "E0308",
+    );
+}
+
+#[test]
+fn round16_if_let() {
+    assert_ok_output(
+        "round16_if_let_variants",
+        r#"
+use std::core::{Option, Result}
+
+enum Custom:
+	Pair(i64, i64)
+	Empty
+
+fn check_res(ok: bool) -> Result<i64, str>:
+	if ok:
+		return Ok(42)
+	return Err("boom")
+
+fn main():
+	if let Err(e) = check_res(false):
+		log!("err={}", e)
+
+	if let Err(e) = check_res(true):
+		log!("should_not_print={}", e)
+
+	if let Ok(v) = check_res(true):
+		log!("ok={}", v)
+	else:
+		log!("bad")
+
+	let c = Custom::Pair(10, 20)
+	if let Custom::Pair(a, b) = c:
+		log!("pair={}+{}", a, b)
+
+	let opt: Option<i64> = Option::Some(7)
+	if let None = &opt:
+		log!("none")
+	else if let Some(x) = &opt:
+		log!("some={}", x)
+"#,
+        &["err=boom", "ok=42", "pair=10+20", "some=7"],
+    );
 }

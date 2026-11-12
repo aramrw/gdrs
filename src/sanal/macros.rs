@@ -397,6 +397,29 @@ pub fn validate_and_finalize_macro(
 
     match def.kind {
         MacroKind::Vec => {
+            if let Some(first) = typed_args.first() {
+                let elem_ty = first.ty();
+                for (i, arg) in typed_args.iter().enumerate().skip(1) {
+                    let unify_res = type_ctx.infer.borrow_mut().unify(elem_ty, arg.ty());
+                    if unify_res.is_err() && !is_type_compatible(&elem_ty, &arg.ty()) {
+                        let resolved_expected = type_ctx.infer.borrow_mut().resolve(elem_ty);
+                        let resolved_found = type_ctx.infer.borrow_mut().resolve(arg.ty());
+                        errors.push(SemanticError {
+                            code: "E0308",
+                            message: format!(
+                                "`vec!` elements must all have the same type. Expected `{:?}`, element {} has type `{:?}`",
+                                resolved_expected,
+                                i + 1,
+                                resolved_found
+                            ),
+                            label: format!("Expected `{:?}`", resolved_expected),
+                            secondary_label: None,
+                            help: Some("Vectors are homogeneous and cannot hold mixed types".into()),
+                            span: arg.span(),
+                        });
+                    }
+                }
+            }
             for arg in &typed_args {
                 mark_expr_moved_if_ident(scopes, errors, arg);
             }
@@ -474,7 +497,32 @@ pub fn validate_and_finalize_macro(
 
     let ret_ty = match def.kind {
         MacroKind::Vec => {
-            let elem_ty = typed_args.first().map(|a| a.ty()).unwrap_or(Type::Int);
+            let expected_elem = type_ctx.current_expected_type.and_then(|exp| {
+                let resolved = type_ctx.infer.borrow_mut().probe(exp);
+                match resolved {
+                    Type::Vec(elem) | Type::Slice(elem) | Type::Array(elem, _) => Some(*elem),
+                    _ => None,
+                }
+            });
+            let elem_ty = if let Some(first) = typed_args.first() {
+                let resolved_first = type_ctx.infer.borrow_mut().resolve(first.ty());
+                if let Some(exp_elem) = expected_elem {
+                    if is_type_compatible(&exp_elem, &resolved_first) {
+                        exp_elem
+                    } else {
+                        resolved_first
+                    }
+                } else {
+                    resolved_first
+                }
+            } else if let Some(exp_elem) = expected_elem {
+                exp_elem
+            } else {
+                type_ctx
+                    .infer
+                    .borrow_mut()
+                    .fresh(span.clone(), "element type of `vec!`")
+            };
             Type::Vec(crate::ast::intern_type(elem_ty))
         }
         _ => def.returns,

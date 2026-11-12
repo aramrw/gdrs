@@ -607,6 +607,7 @@ pub fn compile_macro_call<M: Module>(
     builder: &mut FunctionBuilder,
     name: &str,
     args: &[TypedExpr],
+    ret_ty: &Type,
     span: &Span,
     cg: &mut CodegenCtx,
     module: &mut M,
@@ -795,8 +796,12 @@ pub fn compile_macro_call<M: Module>(
             compile_string_constant(builder, &snippet, module)
         }
         "vec" => {
-            let elem_ty = args.first().map(|a| a.ty()).unwrap_or(Type::Int);
-            let vec_ty = Type::Vec(crate::ast::intern_type(elem_ty));
+            let vec_ty = if matches!(ret_ty, Type::Vec(_)) {
+                *ret_ty
+            } else {
+                let elem_ty = args.first().map(|a| a.ty()).unwrap_or(Type::Int);
+                Type::Vec(crate::ast::intern_type(elem_ty))
+            };
             crate::codegen::arrays::compile_array_init(builder, args, &vec_ty, cg, module)
         }
         _ => panic!("Unknown intrinsic macro: '{name}!'"),

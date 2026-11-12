@@ -166,9 +166,22 @@ pub fn type_check_macro_call<'a>(
         ));
     }
 
+    let mut arg_ctx = type_ctx.clone();
+    if name.trim_end_matches('!') == "vec" {
+        arg_ctx.current_expected_type = type_ctx.current_expected_type.and_then(|exp| {
+            let resolved = type_ctx.infer.borrow_mut().probe(exp);
+            match resolved {
+                Type::Vec(elem) | Type::Slice(elem) | Type::Array(elem, _) => Some(*elem),
+                _ => None,
+            }
+        });
+    } else {
+        arg_ctx.current_expected_type = None;
+    }
+
     let mut typed_args = Vec::new();
     for arg in args {
-        if let Some(t_arg) = type_check_expr(scopes, errors, type_ctx, arg) {
+        if let Some(t_arg) = type_check_expr(scopes, errors, &arg_ctx, arg) {
             typed_args.push(t_arg);
         }
     }
@@ -1109,7 +1122,12 @@ pub fn type_check_call<'a>(
         });
     }
 
-    let ret_ty = if let Some(target_func) = deferred_target_func.or_else(|| type_ctx.get_fn(&resolved_name)) {
+    let target_func_opt = if is_method_syntax && resolved_name == name {
+        None
+    } else {
+        deferred_target_func.or_else(|| type_ctx.get_fn(&resolved_name))
+    };
+    let ret_ty = if let Some(target_func) = target_func_opt {
         if target_func.params.len() != typed_args.len() && !typed_args.is_empty() {
             if (target_func.params.is_empty() || target_func.params[0].name != "self")
                 && target_func.params.len() == typed_args.len() - 1
@@ -1603,6 +1621,20 @@ pub fn type_check_call<'a>(
         *ext_ret_ty
     } else if scopes.lookup(&resolved_name).is_some() {
         Type::Int
+    } else if is_method_syntax && !typed_args.is_empty() {
+        errors.push(SemanticError {
+            code: "E0599",
+            message: format!(
+                "No method named `{}` found for type `{}`",
+                raw_name,
+                crate::sanal::compat::format_type(&typed_args[0].ty())
+            ),
+            label: format!("Method `{}` not found on this type", raw_name),
+            secondary_label: None,
+            help: None,
+            span: span.clone(),
+        });
+        Type::Unit
     } else {
         errors.push(SemanticError {
             code: "E0425",

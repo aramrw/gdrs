@@ -230,6 +230,17 @@ pub fn stmt_parser<'a>(
             })
             .boxed();
 
+        let arm_pattern = select! { Token::Ident(s) if s == "_" => s }
+            .then(empty().to(Vec::new()))
+            .or(path.clone().then(
+                select! { Token::Ident(s) => s }
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .delimited_by(just(Token::LParen), just(Token::RParen))
+                    .or_not()
+                    .map(|opt| opt.unwrap_or_default()),
+            ));
+
         let if_stmt = recursive(|if_s| {
             let else_if_branch = just(Token::Else).ignore_then(if_s);
             let else_block_branch = just(Token::Else)
@@ -237,7 +248,46 @@ pub fn stmt_parser<'a>(
                 .ignore_then(just(Token::Newline).or_not())
                 .ignore_then(block.clone());
 
-            just(Token::If)
+            let if_let_branch = just(Token::If)
+                .ignore_then(just(Token::Let))
+                .ignore_then(arm_pattern.clone())
+                .then_ignore(just(Token::Assign))
+                .then(math.clone())
+                .then_ignore(just(Token::Colon))
+                .then_ignore(just(Token::Newline).or_not())
+                .then(block.clone())
+                .then(else_if_branch.clone().or(else_block_branch.clone()).or_not())
+                .map_with_span(|((((variant_name, bindings), target), then_b), else_b), span| {
+                    let then_stmts = match then_b {
+                        Expr::Block(stmts, _) => stmts,
+                        other => vec![other],
+                    };
+                    let else_stmts = match else_b {
+                        Some(Expr::Block(stmts, _)) => stmts,
+                        Some(other) => vec![other],
+                        None => vec![Expr::TupleInit(Vec::new(), span.clone())],
+                    };
+                    Expr::Match(
+                        Box::new(target),
+                        vec![
+                            crate::ast::MatchArm {
+                                variant_name,
+                                bindings,
+                                body: then_stmts,
+                                span: span.clone(),
+                            },
+                            crate::ast::MatchArm {
+                                variant_name: "_".to_string(),
+                                bindings: Vec::new(),
+                                body: else_stmts,
+                                span: span.clone(),
+                            },
+                        ],
+                        span,
+                    )
+                });
+
+            let if_cond_branch = just(Token::If)
                 .ignore_then(math.clone())
                 .then_ignore(just(Token::Colon))
                 .then_ignore(just(Token::Newline).or_not())
@@ -248,7 +298,9 @@ pub fn stmt_parser<'a>(
                         Expr::IfElse(Box::new(cond), Box::new(then_b), Box::new(else_body), span)
                     }
                     None => Expr::If(Box::new(cond), Box::new(then_b), span),
-                })
+                });
+
+            if_let_branch.or(if_cond_branch)
         })
         .boxed();
 
@@ -283,17 +335,6 @@ pub fn stmt_parser<'a>(
                 Expr::Block(stmts, _) => Expr::Unsafe(stmts, span),
                 other => Expr::Unsafe(vec![other], span),
             });
-
-        let arm_pattern = select! { Token::Ident(s) if s == "_" => s }
-            .then(empty().to(Vec::new()))
-            .or(path.clone().then(
-                select! { Token::Ident(s) => s }
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .delimited_by(just(Token::LParen), just(Token::RParen))
-                    .or_not()
-                    .map(|opt| opt.unwrap_or_default()),
-            ));
 
         let match_arm = arm_pattern
             .then_ignore(just(Token::FatArrow))
