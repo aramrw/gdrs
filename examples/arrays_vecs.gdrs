@@ -8,6 +8,6 @@ fn main():
 	
 	i = 0
 	while i < 50:
-		log!(vec[i])
+		log!("{}", vec[i])
 		i += 1
 

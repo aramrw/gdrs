@@ -7,15 +7,101 @@ pub mod files;
 use crate::ast::*;
 use crate::loader::derives::expand_derives;
 use crate::loader::files::load_file_recursive;
-use crate::parser::parser;
-use chumsky::Parser;
-use logos::Logos;
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 
-pub fn load_program(entry_file: &Path) -> Result<Program, String> {
+pub struct SourceFile {
+    pub path: PathBuf,
+    pub source: String,
+    pub start: usize,
+    pub end: usize,
+}
+
+pub struct SourceMap {
+    pub files: Vec<SourceFile>,
+    pub entry_index: usize,
+    next_offset: usize,
+}
+
+impl SourceMap {
+    pub fn new() -> Self {
+        Self {
+            files: Vec::new(),
+            entry_index: 0,
+            // Reserve 0..16 so synthetic 0..1 spans resolve to the entry file
+            next_offset: 16,
+        }
+    }
+
+    pub fn add_file(&mut self, path: PathBuf, source: String) -> usize {
+        let start = self.next_offset;
+        let end = start + source.len();
+        self.next_offset = end + 1;
+        self.files.push(SourceFile {
+            path,
+            source,
+            start,
+            end,
+        });
+        start
+    }
+
+    pub fn resolve(&self, span: &Span) -> (String, Span) {
+        if span.start >= 16 {
+            for f in &self.files {
+                if span.start >= f.start && span.start <= f.end {
+                    let local_start = span.start - f.start;
+                    let local_end = span.end.min(f.end).saturating_sub(f.start).max(local_start);
+                    return (
+                        f.path.to_string_lossy().to_string(),
+                        local_start..local_end,
+                    );
+                }
+            }
+        }
+        if let Some(entry) = self.files.get(self.entry_index) {
+            let local_end = span.end.min(entry.source.len()).max(span.start.min(entry.source.len()));
+            let local_start = span.start.min(entry.source.len());
+            return (entry.path.to_string_lossy().to_string(), local_start..local_end);
+        }
+        ("<unknown>".to_string(), 0..1)
+    }
+
+    /// Returns `(file_path, line, column)` with 1-based line and column numbers.
+    pub fn get_location(&self, span: &Span) -> (String, usize, usize) {
+        let (file, local_span) = self.resolve(span);
+        for f in &self.files {
+            if f.path.to_string_lossy() == file {
+                let clamped_start = local_span.start.min(f.source.len());
+                let prefix = &f.source[..clamped_start];
+                let line = prefix.matches('\n').count() + 1;
+                let col = prefix
+                    .rfind('\n')
+                    .map(|p| clamped_start - p)
+                    .unwrap_or(clamped_start + 1);
+                return (file, line, col);
+            }
+        }
+        (file, 1, 1)
+    }
+
+    /// Extracts the original source text for `span`.
+    pub fn get_snippet(&self, span: &Span) -> String {
+        let (file, local_span) = self.resolve(span);
+        for f in &self.files {
+            if f.path.to_string_lossy() == file {
+                let start = local_span.start.min(f.source.len());
+                let end = local_span.end.min(f.source.len()).max(start);
+                return f.source[start..end].trim().to_string();
+            }
+        }
+        "<unknown>".to_string()
+    }
+}
+
+pub fn load_program(entry_file: &Path) -> Result<(Program, SourceMap), String> {
     let mut loaded_files = HashSet::new();
+    let mut source_map = SourceMap::new();
     let mut merged_program = Program {
         mods: Vec::new(),
         uses: Vec::new(),
@@ -56,6 +142,7 @@ pub fn load_program(entry_file: &Path) -> Result<Program, String> {
     let std_files = [
         ("libc.gdrs", vec!["std".to_string(), "libc".to_string()]),
         ("core.gdrs", vec!["std".to_string(), "core".to_string()]),
+        ("mem.gdrs", vec!["std".to_string(), "mem".to_string()]),
         ("iter.gdrs", vec!["std".to_string(), "iter".to_string()]),
         ("convert.gdrs", vec!["std".to_string(), "convert".to_string()]),
         ("vec.gdrs", vec!["std".to_string(), "vec".to_string()]),
@@ -68,21 +155,30 @@ pub fn load_program(entry_file: &Path) -> Result<Program, String> {
     for (file_name, prefix) in std_files {
         let path = std_dir.join(file_name);
         if path.exists() {
-            let _ = load_file_recursive(
+            load_file_recursive(
                 &path,
                 &std_dir,
                 &prefix,
                 &mut loaded_files,
                 &mut merged_program,
-            );
+                &mut source_map,
+            )?;
         }
     }
 
-    load_file_recursive(entry_file, &base_dir, &[], &mut loaded_files, &mut merged_program)?;
+    source_map.entry_index = source_map.files.len();
+    load_file_recursive(
+        entry_file,
+        &base_dir,
+        &[],
+        &mut loaded_files,
+        &mut merged_program,
+        &mut source_map,
+    )?;
 
     expand_derives(&mut merged_program);
 
-    Ok(merged_program)
+    Ok((merged_program, source_map))
 }
 
 pub fn inject_indentation(tokens: Vec<(Token, Span)>) -> Vec<(Token, Span)> {
@@ -159,13 +255,35 @@ fn rewrite_type(
     prefix: &str,
 ) {
     match ty {
+        Type::Obj("std_core_Option_bare") if local_types.contains("Option") => {
+            *ty = Type::Enum(intern_str(&format!("{prefix}Option")));
+        }
+        Type::Obj("std_core_Result_bare") if local_types.contains("Result") => {
+            *ty = Type::Enum(intern_str(&format!("{prefix}Result")));
+        }
         Type::Obj(name) => {
-            if let Some(r) = resolve_name_alias(&**name, aliases, local_types, prefix) {
+            if let Some((base, mut t_args)) = crate::sanal::mono::lookup_mangled(&**name) {
+                for arg in &mut t_args {
+                    rewrite_type(arg, local_types, aliases, prefix);
+                }
+                let new_base =
+                    resolve_name_alias(&base, aliases, local_types, prefix).unwrap_or(base);
+                let remangled = crate::sanal::mono::mangle_name(&new_base, &t_args);
+                *ty = Type::Obj(intern_str(&remangled));
+            } else if let Some(r) = resolve_name_alias(&**name, aliases, local_types, prefix) {
                 *ty = Type::Obj(intern_str(&r));
             }
         }
         Type::Enum(name) => {
-            if let Some(r) = resolve_name_alias(&**name, aliases, local_types, prefix) {
+            if let Some((base, mut t_args)) = crate::sanal::mono::lookup_mangled(&**name) {
+                for arg in &mut t_args {
+                    rewrite_type(arg, local_types, aliases, prefix);
+                }
+                let new_base =
+                    resolve_name_alias(&base, aliases, local_types, prefix).unwrap_or(base);
+                let remangled = crate::sanal::mono::mangle_name(&new_base, &t_args);
+                *ty = Type::Enum(intern_str(&remangled));
+            } else if let Some(r) = resolve_name_alias(&**name, aliases, local_types, prefix) {
                 *ty = Type::Enum(intern_str(&r));
             }
         }
@@ -173,6 +291,17 @@ fn rewrite_type(
             let mut inner = **elem_ty;
             rewrite_type(&mut inner, local_types, aliases, prefix);
             *ty = Type::Array(intern_type(inner), *size);
+        }
+        Type::Tuple(elem_tys) => {
+            let rewritten: Vec<Type> = elem_tys
+                .iter()
+                .map(|t| {
+                    let mut copy = *t;
+                    rewrite_type(&mut copy, local_types, aliases, prefix);
+                    copy
+                })
+                .collect();
+            *ty = Type::Tuple(intern_tuple(&rewritten));
         }
         Type::Slice(elem_ty) => {
             let mut inner = **elem_ty;
@@ -184,7 +313,43 @@ fn rewrite_type(
             rewrite_type(&mut inner, local_types, aliases, prefix);
             *ty = Type::Vec(intern_type(inner));
         }
-        _ => {}
+        Type::Ptr(elem_ty) => {
+            let mut inner = **elem_ty;
+            rewrite_type(&mut inner, local_types, aliases, prefix);
+            *ty = Type::Ptr(intern_type(inner));
+        }
+        Type::Ref(elem_ty) => {
+            let mut inner = **elem_ty;
+            rewrite_type(&mut inner, local_types, aliases, prefix);
+            *ty = Type::Ref(intern_type(inner));
+        }
+        Type::MutRef(elem_ty) => {
+            let mut inner = **elem_ty;
+            rewrite_type(&mut inner, local_types, aliases, prefix);
+            *ty = Type::MutRef(intern_type(inner));
+        }
+        Type::Rc(elem_ty) => {
+            let mut inner = **elem_ty;
+            rewrite_type(&mut inner, local_types, aliases, prefix);
+            *ty = Type::Rc(intern_type(inner));
+        }
+        Type::Arc(elem_ty) => {
+            let mut inner = **elem_ty;
+            rewrite_type(&mut inner, local_types, aliases, prefix);
+            *ty = Type::Arc(intern_type(inner));
+        }
+        Type::Int
+        | Type::I32
+        | Type::Float
+        | Type::F32
+        | Type::Bool
+        | Type::Str
+        | Type::String
+        | Type::Unit
+        | Type::Void
+        | Type::Generic(_)
+        | Type::DynTrait(_)
+        | Type::Infer(_) => {}
     }
 }
 
@@ -195,6 +360,8 @@ fn rewrite_expr(
     prefix: &str,
 ) {
     match expr {
+        Expr::Int(_, _) | Expr::Float(_, _) | Expr::Bool(_, _) | Expr::String(_, _)
+        | Expr::Break(_) | Expr::Continue(_) => {}
         Expr::Ident(name, _) => {
             if let Some(r) = resolve_name_alias(name, aliases, local_types, prefix) {
                 *name = r;
@@ -208,11 +375,19 @@ fn rewrite_expr(
                 rewrite_expr(f_expr, local_types, aliases, prefix);
             }
         }
+        Expr::EnumConstruct(enum_name, _, args, _) => {
+            if let Some(r) = resolve_name_alias(enum_name, aliases, local_types, prefix) {
+                *enum_name = r;
+            }
+            for arg in args {
+                rewrite_expr(arg, local_types, aliases, prefix);
+            }
+        }
         Expr::Call(name, args, _) => {
-            if let Some(r) = resolve_name_alias(name, aliases, local_types, prefix) {
-                *name = r;
-            } else if name.contains('.') {
-                if let Some((target, method)) = name.split_once('.') {
+            if !name.starts_with('.') {
+                if let Some(r) = resolve_name_alias(name, aliases, local_types, prefix) {
+                    *name = r;
+                } else if let Some((target, method)) = name.split_once('.') {
                     if let Some(r) = resolve_name_alias(target, aliases, local_types, prefix) {
                         *name = format!("{}.{}", r, method);
                     }
@@ -222,7 +397,7 @@ fn rewrite_expr(
                 rewrite_expr(arg, local_types, aliases, prefix);
             }
         }
-        Expr::Block(stmts, _) => {
+        Expr::Block(stmts, _) | Expr::Unsafe(stmts, _) => {
             for s in stmts {
                 rewrite_expr(s, local_types, aliases, prefix);
             }
@@ -240,12 +415,44 @@ fn rewrite_expr(
             rewrite_expr(cond, local_types, aliases, prefix);
             rewrite_expr(body, local_types, aliases, prefix);
         }
-        Expr::Let(_, _, _, val, _) => rewrite_expr(val, local_types, aliases, prefix),
+        Expr::Match(target, arms, _) => {
+            rewrite_expr(target, local_types, aliases, prefix);
+            for arm in arms {
+                if let Some((enum_part, variant_part)) = arm.variant_name.split_once("::") {
+                    if let Some(r) = resolve_name_alias(enum_part, aliases, local_types, prefix) {
+                        arm.variant_name = format!("{r}::{variant_part}");
+                    }
+                }
+                for stmt in &mut arm.body {
+                    rewrite_expr(stmt, local_types, aliases, prefix);
+                }
+            }
+        }
+        Expr::Let(_, opt_ty, _, val, _) | Expr::LetTuple(_, opt_ty, val, _) => {
+            if let Some(ty) = opt_ty {
+                rewrite_type(ty, local_types, aliases, prefix);
+            }
+            rewrite_expr(val, local_types, aliases, prefix);
+        }
         Expr::Assign(_, val, _) => rewrite_expr(val, local_types, aliases, prefix),
         Expr::Return(opt_expr, _) => {
             if let Some(e) = opt_expr {
                 rewrite_expr(e, local_types, aliases, prefix);
             }
+        }
+        Expr::Neg(inner, _)
+        | Expr::Not(inner, _)
+        | Expr::Try(inner, _)
+        | Expr::Ref(inner, _, _)
+        | Expr::Deref(inner, _) => {
+            rewrite_expr(inner, local_types, aliases, prefix);
+        }
+        Expr::Cast(inner, ty, _) => {
+            rewrite_expr(inner, local_types, aliases, prefix);
+            rewrite_type(ty, local_types, aliases, prefix);
+        }
+        Expr::Closure(_, body, _) => {
+            rewrite_expr(body, local_types, aliases, prefix);
         }
         Expr::Add(lhs, rhs, _)
         | Expr::Sub(lhs, rhs, _)
@@ -264,9 +471,22 @@ fn rewrite_expr(
         | Expr::LessEqual(lhs, rhs, _)
         | Expr::GreaterEqual(lhs, rhs, _)
         | Expr::And(lhs, rhs, _)
-        | Expr::Or(lhs, rhs, _) => {
+        | Expr::Or(lhs, rhs, _)
+        | Expr::IndexAccess(lhs, rhs, _)
+        | Expr::DerefAssign(lhs, rhs, _)
+        | Expr::Range(lhs, rhs, _) => {
             rewrite_expr(lhs, local_types, aliases, prefix);
             rewrite_expr(rhs, local_types, aliases, prefix);
+        }
+        Expr::IndexAssign(target, idx, val, _) => {
+            rewrite_expr(target, local_types, aliases, prefix);
+            rewrite_expr(idx, local_types, aliases, prefix);
+            rewrite_expr(val, local_types, aliases, prefix);
+        }
+        Expr::ArrayInit(elems, _) | Expr::TupleInit(elems, _) | Expr::MacroCall(_, elems, _) => {
+            for elem in elems {
+                rewrite_expr(elem, local_types, aliases, prefix);
+            }
         }
         Expr::FieldAccess(target, _, _) => {
             rewrite_expr(target, local_types, aliases, prefix);
@@ -275,12 +495,6 @@ fn rewrite_expr(
             rewrite_expr(target, local_types, aliases, prefix);
             rewrite_expr(val, local_types, aliases, prefix);
         }
-        Expr::MacroCall(_, args, _) => {
-            for arg in args {
-                rewrite_expr(arg, local_types, aliases, prefix);
-            }
-        }
-        _ => {}
     }
 }
 

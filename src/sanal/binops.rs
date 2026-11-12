@@ -24,11 +24,29 @@ pub fn check_binary_op(
     t_lhs: &TypedExpr,
     t_rhs: &TypedExpr,
     allow_float: bool,
+    type_ctx: &TypeCtx<'_>,
     span: &Span,
     errors: &mut Vec<SemanticError>,
 ) -> Type {
-    let l_ty = t_lhs.ty();
-    let r_ty = t_rhs.ty();
+    let mut infer = type_ctx.infer.borrow_mut();
+    let mut l_ty = infer.probe(t_lhs.ty());
+    let mut r_ty = infer.probe(t_rhs.ty());
+    if matches!(l_ty, Type::Infer(_)) && !matches!(r_ty, Type::Infer(_)) {
+        if allow_float || is_int(r_ty) {
+            let _ = infer.unify(l_ty, r_ty);
+            l_ty = infer.probe(l_ty);
+        }
+    } else if matches!(r_ty, Type::Infer(_)) && !matches!(l_ty, Type::Infer(_)) {
+        if allow_float || is_int(l_ty) {
+            let _ = infer.unify(r_ty, l_ty);
+            r_ty = infer.probe(r_ty);
+        }
+    } else if matches!(l_ty, Type::Infer(_)) && matches!(r_ty, Type::Infer(_)) {
+        let _ = infer.unify(l_ty, r_ty);
+        l_ty = infer.probe(l_ty);
+        r_ty = infer.probe(r_ty);
+    }
+    drop(infer);
 
     match (l_ty, r_ty) {
         (Type::I32, Type::I32) => Type::I32,
@@ -40,6 +58,11 @@ pub fn check_binary_op(
         _ if allow_float && is_int(l_ty) && is_float(r_ty) => r_ty,
         _ if allow_float && is_float(l_ty) && is_int(r_ty) => l_ty,
         (Type::Generic(g), _) | (_, Type::Generic(g)) => Type::Generic(g),
+        (Type::Infer(id), Type::Infer(_)) => Type::Infer(id),
+        (Type::Infer(_), other) if allow_float && (is_int(other) || is_float(other)) => other,
+        (other, Type::Infer(_)) if allow_float && (is_int(other) || is_float(other)) => other,
+        (Type::Infer(_), other) if !allow_float && is_int(other) => other,
+        (other, Type::Infer(_)) if !allow_float && is_int(other) => other,
         _ => {
             errors.push(SemanticError {
                 code: "E0308",
@@ -55,6 +78,89 @@ pub fn check_binary_op(
             });
             Type::I32
         }
+    }
+}
+
+fn check_ord_comparison(
+    op_name: &str,
+    l_ty: Type,
+    r_ty: Type,
+    type_ctx: &TypeCtx<'_>,
+    span: &Span,
+    errors: &mut Vec<SemanticError>,
+) {
+    let mut infer = type_ctx.infer.borrow_mut();
+    let mut l = infer.probe(l_ty);
+    let mut r = infer.probe(r_ty);
+    if matches!(l, Type::Infer(_)) || matches!(r, Type::Infer(_)) {
+        let _ = infer.unify(l, r);
+        l = infer.probe(l);
+        r = infer.probe(r);
+    }
+    drop(infer);
+
+    if !matches!(
+        l,
+        Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_) | Type::Infer(_)
+    ) || !matches!(
+        r,
+        Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_) | Type::Infer(_)
+    ) {
+        errors.push(SemanticError {
+            code: "E0308",
+            message: format!("Cannot compare types `{l:?}` and `{r:?}` with '{op_name}'"),
+            label: "Invalid comparison operator".into(),
+            secondary_label: None,
+            help: Some("Ordering comparisons can only be used on numbers (`Int` or `Float`)".into()),
+            span: span.clone(),
+        });
+    }
+}
+
+fn check_equality_operands(
+    l_ty: Type,
+    r_ty: Type,
+    type_ctx: &TypeCtx<'_>,
+    span: &Span,
+    errors: &mut Vec<SemanticError>,
+) {
+    let mut infer = type_ctx.infer.borrow_mut();
+    let mut l = infer.resolve(l_ty);
+    let mut r = infer.resolve(r_ty);
+    if crate::sanal::compat::type_contains_infer(&l) || crate::sanal::compat::type_contains_infer(&r) {
+        let _ = infer.unify_branches(l, r);
+        l = infer.resolve(l);
+        r = infer.resolve(r);
+    }
+    drop(infer);
+
+    let is_str_eq = matches!(
+        l,
+        Type::Str | Type::String | Type::Obj("String") | Type::Obj("std_string_String")
+    ) && matches!(
+        r,
+        Type::Str | Type::String | Type::Obj("String") | Type::Obj("std_string_String")
+    );
+    let numeric_compatible = matches!(
+        (l, r),
+        (Type::I32 | Type::Int, Type::I32 | Type::Int)
+            | (Type::F32 | Type::Float, Type::F32 | Type::Float)
+    );
+    if l != r
+        && !numeric_compatible
+        && !is_str_eq
+        && !crate::sanal::compat::is_type_compatible(&l, &r)
+        && !matches!(l, Type::Infer(_))
+        && !matches!(r, Type::Infer(_))
+    {
+        errors.push(SemanticError {
+            code: "E0308",
+            message: format!("Cannot compare distinct types `{l:?}` and `{r:?}` for equality"),
+            label: format!("Type mismatch: `{l:?}` vs `{r:?}`"),
+            secondary_label: None,
+            help: Some("Both operands must be the same type to check for equality".into()),
+            span: span.clone(),
+        });
     }
 }
 
@@ -83,7 +189,11 @@ pub fn type_check_add<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
     if let Type::Ptr(_) = t_lhs.ty() {
         let ty = t_lhs.ty();
         return Some(TypedExpr::Add(Box::new(t_lhs), Box::new(t_rhs), ty, span.clone()));
@@ -102,7 +212,7 @@ pub fn type_check_add<'a>(
             ));
         }
     }
-    let ty = check_binary_op("+", &t_lhs, &t_rhs, true, span, errors);
+    let ty = check_binary_op("+", &t_lhs, &t_rhs, true, type_ctx, span, errors);
     Some(TypedExpr::Add(
         Box::new(t_lhs),
         Box::new(t_rhs),
@@ -120,7 +230,11 @@ pub fn type_check_sub<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
     if let Type::Ptr(_) = t_lhs.ty() {
         let ty = t_lhs.ty();
         return Some(TypedExpr::Sub(Box::new(t_lhs), Box::new(t_rhs), ty, span.clone()));
@@ -135,7 +249,7 @@ pub fn type_check_sub<'a>(
             ));
         }
     }
-    let ty = check_binary_op("-", &t_lhs, &t_rhs, true, span, errors);
+    let ty = check_binary_op("-", &t_lhs, &t_rhs, true, type_ctx, span, errors);
     Some(TypedExpr::Sub(
         Box::new(t_lhs),
         Box::new(t_rhs),
@@ -153,7 +267,11 @@ pub fn type_check_mul<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
     if let Type::Obj(struct_name) = t_lhs.ty() {
         if let Some(fn_info) = lookup_struct_method_fn(type_ctx, struct_name, "mul") {
             return Some(TypedExpr::Call(
@@ -164,7 +282,7 @@ pub fn type_check_mul<'a>(
             ));
         }
     }
-    let ty = check_binary_op("*", &t_lhs, &t_rhs, true, span, errors);
+    let ty = check_binary_op("*", &t_lhs, &t_rhs, true, type_ctx, span, errors);
     Some(TypedExpr::Mul(
         Box::new(t_lhs),
         Box::new(t_rhs),
@@ -182,7 +300,11 @@ pub fn type_check_div<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
     if let Type::Obj(struct_name) = t_lhs.ty() {
         if let Some(fn_info) = lookup_struct_method_fn(type_ctx, struct_name, "div") {
             return Some(TypedExpr::Call(
@@ -193,7 +315,7 @@ pub fn type_check_div<'a>(
             ));
         }
     }
-    let ty = check_binary_op("/", &t_lhs, &t_rhs, true, span, errors);
+    let ty = check_binary_op("/", &t_lhs, &t_rhs, true, type_ctx, span, errors);
     Some(TypedExpr::Div(
         Box::new(t_lhs),
         Box::new(t_rhs),
@@ -211,8 +333,12 @@ pub fn type_check_pipe<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
-    let ty = check_binary_op("|", &t_lhs, &t_rhs, true, span, errors);
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
+    let ty = check_binary_op("|", &t_lhs, &t_rhs, false, type_ctx, span, errors);
     Some(TypedExpr::Pipe(
         Box::new(t_lhs),
         Box::new(t_rhs),
@@ -230,8 +356,12 @@ pub fn type_check_ampersand<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
-    let ty = check_binary_op("&", &t_lhs, &t_rhs, true, span, errors);
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
+    let ty = check_binary_op("&", &t_lhs, &t_rhs, false, type_ctx, span, errors);
     Some(TypedExpr::Ampersand(
         Box::new(t_lhs),
         Box::new(t_rhs),
@@ -249,8 +379,12 @@ pub fn type_check_caret<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
-    let ty = check_binary_op("^", &t_lhs, &t_rhs, true, span, errors);
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
+    let ty = check_binary_op("^", &t_lhs, &t_rhs, false, type_ctx, span, errors);
     Some(TypedExpr::Caret(
         Box::new(t_lhs),
         Box::new(t_rhs),
@@ -268,8 +402,12 @@ pub fn type_check_shl<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
-    let ty = check_binary_op("<<", &t_lhs, &t_rhs, true, span, errors);
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
+    let ty = check_binary_op("<<", &t_lhs, &t_rhs, false, type_ctx, span, errors);
     Some(TypedExpr::Shl(
         Box::new(t_lhs),
         Box::new(t_rhs),
@@ -287,8 +425,12 @@ pub fn type_check_shr<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
-    let ty = check_binary_op(">>", &t_lhs, &t_rhs, true, span, errors);
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
+    let ty = check_binary_op(">>", &t_lhs, &t_rhs, false, type_ctx, span, errors);
     Some(TypedExpr::Shr(
         Box::new(t_lhs),
         Box::new(t_rhs),
@@ -306,8 +448,12 @@ pub fn type_check_mod<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
-    let ty = check_binary_op("%", &t_lhs, &t_rhs, true, span, errors);
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
+    let ty = check_binary_op("%", &t_lhs, &t_rhs, true, type_ctx, span, errors);
     Some(TypedExpr::Mod(
         Box::new(t_lhs),
         Box::new(t_rhs),
@@ -324,9 +470,9 @@ pub fn type_check_neg<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
-    let ty = t_val.ty();
+    let ty = type_ctx.infer.borrow_mut().probe(t_val.ty());
 
-    if !matches!(ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_)) {
+    if !matches!(ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_) | Type::Infer(_)) {
         errors.push(SemanticError {
             code: "E0308",
             message: format!("Cannot negate non-numeric type `{:?}`", ty),
@@ -372,23 +518,15 @@ pub fn type_check_greater_than<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
 
     let l_ty = t_lhs.ty();
     let r_ty = t_rhs.ty();
-
-    if !matches!(l_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
-        || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
-    {
-        errors.push(SemanticError {
-            code: "E0308",
-            message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '>'"),
-            label: "Invalid comparison operator".into(),
-            secondary_label: None,
-            help: Some("Ordering comparisons can only be used on numbers (`Int` or `Float`)".into()),
-            span: span.clone(),
-        });
-    }
+    check_ord_comparison(">", l_ty, r_ty, type_ctx, span, errors);
 
     Some(TypedExpr::GreaterThan(
         Box::new(t_lhs),
@@ -406,23 +544,15 @@ pub fn type_check_less_than<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
 
     let l_ty = t_lhs.ty();
     let r_ty = t_rhs.ty();
-
-    if !matches!(l_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
-        || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
-    {
-        errors.push(SemanticError {
-            code: "E0308",
-            message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '<'"),
-            label: "Invalid comparison operator".into(),
-            secondary_label: None,
-            help: Some("Ordering comparisons can only be used on numbers (`Int` or `Float`)".into()),
-            span: span.clone(),
-        });
-    }
+    check_ord_comparison("<", l_ty, r_ty, type_ctx, span, errors);
 
     Some(TypedExpr::LessThan(
         Box::new(t_lhs),
@@ -440,23 +570,15 @@ pub fn type_check_greater_equal<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
 
     let l_ty = t_lhs.ty();
     let r_ty = t_rhs.ty();
-
-    if !matches!(l_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
-        || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
-    {
-        errors.push(SemanticError {
-            code: "E0308",
-            message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '>='"),
-            label: "Invalid comparison operator".into(),
-            secondary_label: None,
-            help: Some("Ordering comparisons can only be used on numbers (`Int` or `Float`)".into()),
-            span: span.clone(),
-        });
-    }
+    check_ord_comparison(">=", l_ty, r_ty, type_ctx, span, errors);
 
     Some(TypedExpr::GreaterEqual(
         Box::new(t_lhs),
@@ -474,23 +596,15 @@ pub fn type_check_less_equal<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
 
     let l_ty = t_lhs.ty();
     let r_ty = t_rhs.ty();
-
-    if !matches!(l_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
-        || !matches!(r_ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_))
-    {
-        errors.push(SemanticError {
-            code: "E0308",
-            message: format!("Cannot compare types `{l_ty:?}` and `{r_ty:?}` with '<='"),
-            label: "Invalid comparison operator".into(),
-            secondary_label: None,
-            help: Some("Ordering comparisons can only be used on numbers (`Int` or `Float`)".into()),
-            span: span.clone(),
-        });
-    }
+    check_ord_comparison("<=", l_ty, r_ty, type_ctx, span, errors);
 
     Some(TypedExpr::LessEqual(
         Box::new(t_lhs),
@@ -508,26 +622,13 @@ pub fn type_check_equal<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
-
-    let l_ty = t_lhs.ty();
-    let r_ty = t_rhs.ty();
-
-    let numeric_compatible = matches!(
-        (l_ty, r_ty),
-        (Type::I32 | Type::Int, Type::I32 | Type::Int)
-            | (Type::F32 | Type::Float, Type::F32 | Type::Float)
-    );
-    if l_ty != r_ty && !numeric_compatible {
-        errors.push(SemanticError {
-            code: "E0308",
-            message: format!("Cannot compare distinct types `{l_ty:?}` and `{r_ty:?}` for equality"),
-            label: format!("Type mismatch: `{l_ty:?}` vs `{r_ty:?}`"),
-            secondary_label: None,
-            help: Some("Both operands must be the same type to check for equality".into()),
-            span: span.clone(),
-        });
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
     }
+
+    check_equality_operands(t_lhs.ty(), t_rhs.ty(), type_ctx, span, errors);
 
     Some(TypedExpr::Equal(
         Box::new(t_lhs),
@@ -545,26 +646,13 @@ pub fn type_check_not_equal<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
-
-    let l_ty = t_lhs.ty();
-    let r_ty = t_rhs.ty();
-
-    let numeric_compatible = matches!(
-        (l_ty, r_ty),
-        (Type::I32 | Type::Int, Type::I32 | Type::Int)
-            | (Type::F32 | Type::Float, Type::F32 | Type::Float)
-    );
-    if l_ty != r_ty && !numeric_compatible {
-        errors.push(SemanticError {
-            code: "E0308",
-            message: format!("Cannot compare distinct types `{l_ty:?}` and `{r_ty:?}` for equality"),
-            label: format!("Type mismatch: `{l_ty:?}` vs `{r_ty:?}`"),
-            secondary_label: None,
-            help: Some("Both operands must be the same type to check for equality".into()),
-            span: span.clone(),
-        });
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
     }
+
+    check_equality_operands(t_lhs.ty(), t_rhs.ty(), type_ctx, span, errors);
 
     Some(TypedExpr::NotEqual(
         Box::new(t_lhs),
@@ -582,7 +670,11 @@ pub fn type_check_and<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
 
     if t_lhs.ty() != Type::Bool {
         errors.push(SemanticError {
@@ -622,7 +714,11 @@ pub fn type_check_or<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
 
     if t_lhs.ty() != Type::Bool {
         errors.push(SemanticError {

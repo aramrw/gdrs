@@ -35,42 +35,41 @@ impl Vec:
 
 	fn push(&mut self, elem: $T):
 		unsafe:
+			let elem_size = ((0 as *$T) + 1) as i64
 			if self.cap == 0:
 				self.cap = 4
-				let p = malloc(self.cap * 8)
+				let p = malloc(self.cap * elem_size)
 				if (p as i64) == 0:
 					return
 				self.ptr = p as *i64
 			if self.len >= self.cap:
 				self.cap = self.cap * 2
-				let p = realloc(self.ptr as *void, self.cap * 8)
+				let p = realloc(self.ptr as *void, self.cap * elem_size)
 				if (p as i64) == 0:
 					return
 				self.ptr = p as *i64
-			let slot = self.ptr + self.len
+			let slot = (self.ptr as *$T) + self.len
 			*slot = elem
 		self.len = self.len + 1
 
-	fn pop(mut self) -> Option<$T>:
+	fn pop(&mut self) -> Option<$T>:
 		if self.len == 0:
 			return Option::None
 		self.len = self.len - 1
-		let slot = self.ptr + self.len
-		let mut val = 0
 		unsafe:
-			val = *slot
-		return Option::Some(val)
+			let slot = (self.ptr as *$T) + self.len
+			return Option::Some(*slot)
 
-	fn len(self) -> i64:
+	fn len(&self) -> i64:
 		return self.len
 
-	fn is_empty(self) -> bool:
+	fn is_empty(&self) -> bool:
 		return self.len == 0
 
-	fn into_iter(self) -> VecIter:
+	fn into_iter(&self) -> VecIter:
 		return VecIter{ vec_ptr: self.ptr, idx: 0, len: self.len }
 
-	fn iter(self) -> VecIter:
+	fn iter(&self) -> VecIter:
 		return VecIter{ vec_ptr: self.ptr, idx: 0, len: self.len }
 
 impl VecIter:
@@ -80,13 +79,12 @@ impl VecIter:
 	fn iter(self) -> VecIter:
 		return self
 
-	fn next(mut self) -> Option<i64>:
+	fn next(&mut self) -> Option<$T>:
 		if self.idx < self.len:
-			let slot = self.vec_ptr + self.idx
-			let mut val = 0
+			let idx = self.idx
+			self.idx = idx + 1
 			unsafe:
-				val = *slot
-			self.idx = self.idx + 1
-			return Option::Some(val)
+				let slot = (self.vec_ptr as *$T) + idx
+				return Option::Some(*slot)
 		return Option::None
 

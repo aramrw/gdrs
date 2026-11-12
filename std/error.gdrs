@@ -4,4 +4,4 @@ use std::fmt::Display
 use std::core::Option
 
 trait Error:
-	fn source(self) -> Option
+	fn source(self) -> Option<String>

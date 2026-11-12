@@ -4,30 +4,15 @@ use std::math::Vec3
 fn main():
 	let v1 = Vec2.new(5.0, 5.0)
 	let v2 = Vec2.new(5.0, 5.0)
+	let v2_copy = Vec2.new(5.0, 5.0)
 
-	let res1 = v1.add(v2)
-	log!("v1.add(v2):", res1)
+	let res1 = v1.add(v2_copy)
+	log!("v1.add(v2): {} {}", res1.x, res1.y)
 
 	let res2 = v1 + v2
-	log!("v1 + v2:", res2)
+	log!("v1 + v2: {} {}", res2.x, res2.y)
 
 	let v3 = Vec3.new(1.0, 2.0, 3.0)
 	let v4 = Vec3.new(4.0, 5.0, 6.0)
 	let res3 = v3 + v4
-	log!("v3 + v4:", res3)
-
-// [E0061] Error: Function 'std_math_Vec2_new' expects 2 arguments, found 4
-//     ╭─[ examples/math.gdrs:14:11 ]
-//     │
-//  14 │     let v3 = Vec3.new(1.0, 2.0, 3.0)
-//     │              ───────────┬───────────  
-//     │                         ╰───────────── Expected 2 args
-// ────╯
-// [E0061] Error: Function 'std_math_Vec2_new' expects 2 arguments, found 4
-//     ╭─[ examples/math.gdrs:15:11 ]
-//     │
-//  15 │     let v4 = Vec3.new(4.0, 5.0, 6.0)
-//     │              ───────────┬───────────  
-//     │                         ╰───────────── Expected 2 args
-// ────╯
-//
+	log!("v3 + v4: {} {} {}", res3.x, res3.y, res3.z)

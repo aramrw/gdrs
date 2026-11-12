@@ -1,5 +1,3 @@
-#![feature(type_alias_impl_trait)]
-
 pub mod math;
 pub mod stmt;
 
@@ -41,6 +39,34 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             .then_ignore(just(Token::RBracket))
             .map(|t| Type::Arc(intern_type(t)));
 
+        let tuple_or_unit_type = just(Token::LParen)
+            .ignore_then(
+                type_parser
+                    .clone()
+                    .then(
+                        just(Token::Comma)
+                            .ignore_then(
+                                type_parser
+                                    .clone()
+                                    .separated_by(just(Token::Comma))
+                                    .allow_trailing(),
+                            )
+                            .or_not(),
+                    )
+                    .or_not(),
+            )
+            .then_ignore(just(Token::RParen))
+            .map(|opt| match opt {
+                None => Type::Unit,
+                Some((first, None)) => first,
+                Some((first, Some(rest))) => {
+                    let mut elems = Vec::with_capacity(1 + rest.len());
+                    elems.push(first);
+                    elems.extend(rest);
+                    Type::Tuple(intern_tuple(&elems))
+                }
+            });
+
         let path_obj_type = select! { Token::Ident(s) => s }
             .separated_by(just(Token::ColonColon))
             .at_least(1)
@@ -60,6 +86,9 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
                     _ => base_name.replace("::", "_"),
                 };
                 if let Some(generics) = opt_generics {
+                    if (normalized_base == "Vec" || normalized_base == "std_vec_Vec") && generics.len() == 1 {
+                        return Type::Vec(intern_type(generics[0]));
+                    }
                     let mangled = crate::sanal::mono::mangle_name(&normalized_base, &generics);
                     Type::Obj(intern_str(&mangled))
                 } else if normalized_base == "std_core_Result" || normalized_base == "std_core_Option" {
@@ -103,6 +132,7 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
         .or(array_type)
         .or(rc_type)
         .or(arc_type)
+        .or(tuple_or_unit_type)
     }).boxed();
 
     // 3. Math Expression parser with operator precedence hierarchy
@@ -178,7 +208,8 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
                 where_clause,
                 body,
             },
-        );
+        )
+        .boxed();
 
     let func_sig = just(Token::Fn)
         .ignore_then(select! { Token::Ident(s) => s })
@@ -213,7 +244,8 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             name,
             methods,
             span,
-        });
+        })
+        .boxed();
 
     let trait_alias_decl = just(Token::TypeKw)
         .ignore_then(select! { Token::Ident(s) => s })
@@ -273,7 +305,8 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             attributes,
             where_clause,
             span,
-        });
+        })
+        .boxed();
 
     let enum_variant = opt_attributes
         .clone()
@@ -313,7 +346,8 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             attributes,
             where_clause,
             span,
-        });
+        })
+        .boxed();
 
     let impl_header = select! { Token::Ident(s) => s }
         .then(
@@ -348,7 +382,8 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
                 where_clause,
                 span,
             },
-        );
+        )
+        .boxed();
 
     let any_ident = select! {
         Token::Ident(s) => s,
@@ -366,7 +401,9 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
         .then_ignore(just(Token::Newline).or_not())
         .map_with_span(|path, span| ModDecl { path, span });
 
-    let as_keyword = select! { Token::Ident(s) if s == "as" => s };
+    let as_keyword = just(Token::As)
+        .to("as".to_string())
+        .or(select! { Token::Ident(s) if s == "as" => s });
 
     let item_with_alias = any_ident
         .clone()
@@ -412,7 +449,8 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
                     })
                     .collect(),
             )
-        });
+        })
+        .boxed();
 
     let extern_fn_sig = just(Token::Fn)
         .ignore_then(select! { Token::Ident(s) => s })
@@ -422,6 +460,7 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
         .then(just(Token::Arrow).ignore_then(type_parser.clone()).or_not())
         .then_ignore(just(Token::Newline).or_not())
         .map_with_span(|((name, params), opt_ret), span| ExternFnDecl {
+            c_name: name.clone(),
             name,
             params,
             return_type: opt_ret.unwrap_or(Type::Unit),
@@ -458,7 +497,8 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
                 .or(enum_decl.map(Item::Enum))
                 .or(impl_decl.map(Item::Impl)),
         )
-        .then_ignore(just(Token::Newline).repeated());
+        .then_ignore(just(Token::Newline).repeated())
+        .boxed();
 
     item.repeated().then_ignore(end()).map(|items| {
         let mut mods = Vec::new();

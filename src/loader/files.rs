@@ -1,7 +1,4 @@
 use crate::ast::*;
-
-use crate::ast::*;
-use crate::loader::derives::expand_derives;
 use crate::loader::{inject_indentation, rewrite_expr, rewrite_type};
 use crate::parser::parser;
 use chumsky::Parser;
@@ -17,6 +14,7 @@ pub fn load_file_recursive(
     mod_prefix: &[String],
     loaded_files: &mut HashSet<PathBuf>,
     merged_program: &mut Program,
+    source_map: &mut crate::loader::SourceMap,
 ) -> Result<(), String> {
     let canonical = fs::canonicalize(file_path)
         .map_err(|e| format!("Failed to find module file '{}': {}", file_path.display(), e))?;
@@ -29,23 +27,25 @@ pub fn load_file_recursive(
     let source = fs::read_to_string(&canonical)
         .map_err(|e| format!("Failed to read file '{}': {}", canonical.display(), e))?;
 
+    let base_offset = source_map.add_file(canonical.clone(), source.clone());
+
     let raw_tokens: Vec<(Token, Span)> = Token::lexer(&source)
         .spanned()
         .filter_map(|(res, span)| match res {
-            Ok(token) => Some((token, span)),
+            Ok(token) => Some((token, (span.start + base_offset)..(span.end + base_offset))),
             Err(_) => None,
         })
         .collect();
 
     let processed_tokens = inject_indentation(raw_tokens);
 
-    let eof_span = source.len()..source.len();
+    let eof_span = (base_offset + source.len())..(base_offset + source.len());
     let stream = chumsky::Stream::from_iter(eof_span, processed_tokens.into_iter());
 
     let program = match parser().parse(stream) {
         Ok(prog) => prog,
         Err(errs) => {
-            crate::diagnostics::print_syntax_errors(&canonical, &source, errs);
+            crate::diagnostics::print_syntax_errors(&canonical, &source, base_offset, errs);
             return Err(format!("Parse error in '{}'", canonical.display()));
         }
     };
@@ -100,7 +100,7 @@ pub fn load_file_recursive(
 
         if let Some((sub_file, sub_prefix, matched_len)) = found_file {
             let sub_base = sub_file.parent().unwrap_or_else(|| Path::new("."));
-            load_file_recursive(&sub_file, sub_base, &sub_prefix, loaded_files, merged_program)?;
+            load_file_recursive(&sub_file, sub_base, &sub_prefix, loaded_files, merged_program, source_map)?;
 
             let sub_prefix_str = format!("{}_", sub_prefix.join("_"));
             if matched_len < u.path.len() {
@@ -135,6 +135,7 @@ pub fn load_file_recursive(
             for ef in &ext.functions {
                 mangled_funcs.push(crate::ast::ExternFnDecl {
                     name: format!("{}{}", prefix_str, ef.name),
+                    c_name: ef.c_name.clone(),
                     params: ef.params.clone(),
                     return_type: ef.return_type.clone(),
                     span: ef.span.clone(),
@@ -218,7 +219,7 @@ pub fn load_file_recursive(
         let rel_path = format!("{}.gdrs", m.path.join("/"));
         let sub_file = base_dir.join(rel_path);
 
-        load_file_recursive(&sub_file, base_dir, &sub_prefix, loaded_files, merged_program)?;
+        load_file_recursive(&sub_file, base_dir, &sub_prefix, loaded_files, merged_program, source_map)?;
     }
 
     Ok(())

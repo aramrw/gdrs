@@ -21,7 +21,8 @@ pub fn expand_derives(program: &mut Program) {
                 };
 
                 let mut bindings = Vec::new();
-                let mut expr_parts = Vec::new();
+                let mut fmt_str = String::new();
+                let mut fmt_args = Vec::new();
 
                 let mut curr_tmpl = tmpl;
                 for i in 0..v.payload_types.len() {
@@ -30,23 +31,22 @@ pub fn expand_derives(program: &mut Program) {
                     let placeholder = format!("{{{i}}}");
                     if curr_tmpl.contains(&placeholder) {
                         let parts: Vec<&str> = curr_tmpl.splitn(2, &placeholder).collect();
-                        if !parts[0].is_empty() {
-                            expr_parts.push(Expr::String(parts[0].to_string(), dummy_span.clone()));
-                        }
-                        expr_parts.push(Expr::Ident(binding, dummy_span.clone()));
+                        fmt_str.push_str(parts[0]);
+                        fmt_str.push_str("{}");
+                        fmt_args.push(Expr::Ident(binding, dummy_span.clone()));
                         curr_tmpl = parts.get(1).unwrap_or(&"").to_string();
                     }
                 }
-                if !curr_tmpl.is_empty() {
-                    expr_parts.push(Expr::String(curr_tmpl, dummy_span.clone()));
-                }
+                fmt_str.push_str(&curr_tmpl);
 
-                let arm_body_expr = if expr_parts.is_empty() {
-                    Expr::String(v.name.clone(), dummy_span.clone())
-                } else if expr_parts.len() == 1 {
-                    expr_parts.remove(0)
+                let arm_body_expr = if fmt_args.is_empty() {
+                    let s = if fmt_str.is_empty() { v.name.clone() } else { fmt_str };
+                    Expr::String(s, dummy_span.clone())
                 } else {
-                    Expr::MacroCall("format".to_string(), expr_parts, dummy_span.clone())
+                    let mut all_args = Vec::with_capacity(1 + fmt_args.len());
+                    all_args.push(Expr::String(format!("\"{fmt_str}\""), dummy_span.clone()));
+                    all_args.extend(fmt_args);
+                    Expr::MacroCall("format".to_string(), all_args, dummy_span.clone())
                 };
 
                 match_arms.push(MatchArm {
@@ -86,7 +86,7 @@ pub fn expand_derives(program: &mut Program) {
                 }],
                 return_type: Type::Str,
                 where_clause: None,
-                body: vec![Expr::Call("to_string".to_string(), vec![Expr::Ident("self".to_string(), dummy_span.clone())], dummy_span.clone())],
+                body: vec![Expr::Call(".to_string".to_string(), vec![Expr::Ident("self".to_string(), dummy_span.clone())], dummy_span.clone())],
             };
 
             synthesized_impls.push(ImplDecl {
@@ -107,11 +107,11 @@ pub fn expand_derives(program: &mut Program) {
 
         if has_derive_error {
             let top_err_attr = s.attributes.iter().find(|a| a.name == "error" || a.name == "err");
-            let mut expr_parts = Vec::new();
+            let mut fmt_str = String::new();
+            let mut fmt_args = Vec::new();
 
             if let Some(attr) = top_err_attr {
-                let tmpl = attr.args.first().cloned().unwrap_or_else(|| s.name.clone());
-                let mut curr_tmpl = tmpl;
+                let mut curr_tmpl = attr.args.first().cloned().unwrap_or_else(|| s.name.clone());
 
                 for field in &s.fields {
                     let placeholder = format!("{{{}}}", field.name);
@@ -119,42 +119,45 @@ pub fn expand_derives(program: &mut Program) {
 
                     if curr_tmpl.contains(&placeholder) {
                         let parts: Vec<&str> = curr_tmpl.splitn(2, &placeholder).collect();
-                        if !parts[0].is_empty() {
-                            expr_parts.push(Expr::String(parts[0].to_string(), dummy_span.clone()));
-                        }
+                        fmt_str.push_str(parts[0]);
                         if let Some(f_attr) = field_attr {
                             if let Some(f_tmpl) = f_attr.args.first() {
-                                expr_parts.push(Expr::String(f_tmpl.clone(), dummy_span.clone()));
+                                fmt_str.push_str(f_tmpl);
                             }
                         }
-                        let field_access = Expr::FieldAccess(Box::new(Expr::Ident("self".to_string(), dummy_span.clone())), field.name.clone(), dummy_span.clone());
-                        expr_parts.push(field_access);
+                        fmt_str.push_str("{}");
+                        let field_access = Expr::FieldAccess(
+                            Box::new(Expr::Ident("self".to_string(), dummy_span.clone())),
+                            field.name.clone(),
+                            dummy_span.clone(),
+                        );
+                        fmt_args.push(field_access);
                         curr_tmpl = parts.get(1).unwrap_or(&"").to_string();
                     }
                 }
-                if !curr_tmpl.is_empty() {
-                    expr_parts.push(Expr::String(curr_tmpl, dummy_span.clone()));
-                }
+                fmt_str.push_str(&curr_tmpl);
             } else {
                 for (idx, field) in s.fields.iter().enumerate() {
                     let field_attr = field.attributes.iter().find(|a| a.name == "error" || a.name == "err");
                     if let Some(f_attr) = field_attr {
                         if let Some(f_tmpl) = f_attr.args.first() {
                             if idx > 0 {
-                                expr_parts.push(Expr::String(": ".to_string(), dummy_span.clone()));
+                                fmt_str.push_str(": ");
                             }
-                            expr_parts.push(Expr::String(f_tmpl.clone(), dummy_span.clone()));
+                            fmt_str.push_str(f_tmpl);
                         }
                     }
                 }
             }
 
-            let to_string_body = if expr_parts.is_empty() {
-                Expr::String(s.name.clone(), dummy_span.clone())
-            } else if expr_parts.len() == 1 {
-                expr_parts.remove(0)
+            let to_string_body = if fmt_args.is_empty() {
+                let st = if fmt_str.is_empty() { s.name.clone() } else { fmt_str };
+                Expr::String(st, dummy_span.clone())
             } else {
-                Expr::MacroCall("format".to_string(), expr_parts, dummy_span.clone())
+                let mut all_args = Vec::with_capacity(1 + fmt_args.len());
+                all_args.push(Expr::String(format!("\"{fmt_str}\""), dummy_span.clone()));
+                all_args.extend(fmt_args);
+                Expr::MacroCall("format".to_string(), all_args, dummy_span.clone())
             };
 
             let to_string_fn = FuncDecl {
@@ -180,7 +183,7 @@ pub fn expand_derives(program: &mut Program) {
                 }],
                 return_type: Type::Str,
                 where_clause: None,
-                body: vec![Expr::Call("to_string".to_string(), vec![Expr::Ident("self".to_string(), dummy_span.clone())], dummy_span.clone())],
+                body: vec![Expr::Call(".to_string".to_string(), vec![Expr::Ident("self".to_string(), dummy_span.clone())], dummy_span.clone())],
             };
 
             synthesized_impls.push(ImplDecl {

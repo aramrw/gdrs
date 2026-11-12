@@ -75,13 +75,17 @@ pub enum Token {
     Arrow,
     #[token("return")]
     Return,
+    #[token("break")]
+    Break,
+    #[token("continue")]
+    Continue,
     #[token("else")]
     Else,
 
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Ident(String),
-    #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().parse::<f64>().unwrap().to_bits())]
-    Float(u64),
+    #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().to_string())]
+    Float(String),
     #[regex(r"0[xX][0-9a-fA-F]+", |lex| i64::from_str_radix(&lex.slice()[2..], 16).unwrap_or_else(|_| u64::from_str_radix(&lex.slice()[2..], 16).map(|u| u as i64).unwrap_or(0)))]
     #[regex("[0-9]+", |lex| lex.slice().parse::<i64>().unwrap())]
     Int(i64),
@@ -214,6 +218,7 @@ pub enum Type {
     Generic(&'static str),
     DynTrait(&'static str),
     Array(&'static Type, usize),
+    Tuple(&'static [Type]),
     Slice(&'static Type),
     Vec(&'static Type),
     Rc(&'static Type),
@@ -222,6 +227,8 @@ pub enum Type {
     Ptr(&'static Type),
     Ref(&'static Type),
     MutRef(&'static Type),
+    /// Internal compiler inference variable used only during semantic analysis.
+    Infer(u32),
 }
 
 impl Type {
@@ -238,6 +245,7 @@ impl Type {
             | Type::Ptr(_)
             | Type::Ref(_)
             | Type::MutRef(_) => true,
+            Type::Tuple(tys) => tys.iter().all(|t| t.is_copy()),
             _ => false,
         }
     }
@@ -255,6 +263,10 @@ impl Type {
 
 pub fn intern_type(ty: Type) -> &'static Type {
     Box::leak(Box::new(ty))
+}
+
+pub fn intern_tuple(tys: &[Type]) -> &'static [Type] {
+    Box::leak(tys.to_vec().into_boxed_slice())
 }
 
 pub fn intern_str(s: &str) -> &'static str {
@@ -340,6 +352,27 @@ pub struct Param {
 }
 
 #[derive(Debug, Clone)]
+pub enum TuplePattern {
+    Ident {
+        name: String,
+        is_mutable: bool,
+        span: Span,
+    },
+    Tuple(Vec<TuplePattern>, Span),
+}
+
+#[derive(Debug, Clone)]
+pub enum TypedTuplePattern {
+    Ident {
+        name: String,
+        is_mutable: bool,
+        ty: Type,
+        span: Span,
+    },
+    Tuple(Vec<TypedTuplePattern>, Type, Span),
+}
+
+#[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64, Span),
     Float(f64, Span),
@@ -366,6 +399,7 @@ pub enum Expr {
     String(String, Span),
 
     Let(String, Option<Type>, bool, Box<Expr>, Span),
+    LetTuple(TuplePattern, Option<Type>, Box<Expr>, Span),
     Block(Vec<Expr>, Span),
     Unsafe(Vec<Expr>, Span),
     Assign(String, Box<Expr>, Span),
@@ -373,6 +407,8 @@ pub enum Expr {
     If(Box<Expr>, Box<Expr>, Span),
     IfElse(Box<Expr>, Box<Expr>, Box<Expr>, Span),
     Return(Option<Box<Expr>>, Span),
+    Break(Span),
+    Continue(Span),
     MacroCall(String, Vec<Expr>, Span),
     Call(String, Vec<Expr>, Span),
     Try(Box<Expr>, Span),
@@ -382,6 +418,7 @@ pub enum Expr {
     FieldAssign(Box<Expr>, String, Box<Expr>, Span),
 
     ArrayInit(Vec<Expr>, Span),
+    TupleInit(Vec<Expr>, Span),
     IndexAccess(Box<Expr>, Box<Expr>, Span),
     IndexAssign(Box<Expr>, Box<Expr>, Box<Expr>, Span),
 
@@ -446,6 +483,7 @@ impl Expr {
             Expr::Shr(_, _, s) => s.clone(),
             Expr::Neg(_, s) | Expr::Not(_, s) => s.clone(),
             Expr::Let(_, _, _, _, s) => s.clone(),
+            Expr::LetTuple(_, _, _, s) => s.clone(),
             Expr::Block(_, s) => s.clone(),
             Expr::Unsafe(_, s) => s.clone(),
             Expr::Assign(_, _, s) => s.clone(),
@@ -453,12 +491,14 @@ impl Expr {
             Expr::If(_, _, s) => s.clone(),
             Expr::IfElse(_, _, _, s) => s.clone(),
             Expr::Return(_, s) => s.clone(),
+            Expr::Break(s) | Expr::Continue(s) => s.clone(),
             Expr::MacroCall(_, _, s) => s.clone(),
             Expr::Call(_, _, s) => s.clone(),
             Expr::ObjInit(_, _, s) => s.clone(),
             Expr::FieldAccess(_, _, s) => s.clone(),
             Expr::FieldAssign(_, _, _, s) => s.clone(),
             Expr::ArrayInit(_, s) => s.clone(),
+            Expr::TupleInit(_, s) => s.clone(),
             Expr::IndexAccess(_, _, s) => s.clone(),
             Expr::IndexAssign(_, _, _, s) => s.clone(),
             Expr::EnumConstruct(_, _, _, s) => s.clone(),
@@ -512,6 +552,7 @@ pub enum TypedExpr {
     Shr(Box<TypedExpr>, Box<TypedExpr>, Type, Span),
 
     Let(String, bool, Box<TypedExpr>, Type, Span),
+    LetTuple(TypedTuplePattern, Type, Box<TypedExpr>, Span),
     Block(Vec<TypedExpr>, Type, Span),
     Unsafe(Vec<TypedExpr>, Type, Span),
     Assign(String, Box<TypedExpr>, Span),
@@ -519,6 +560,8 @@ pub enum TypedExpr {
     If(Box<TypedExpr>, Box<TypedExpr>, Span),
     IfElse(Box<TypedExpr>, Box<TypedExpr>, Box<TypedExpr>, Type, Span),
     Return(Option<Box<TypedExpr>>, Span),
+    Break(Span),
+    Continue(Span),
     MacroCall(String, Vec<TypedExpr>, Type, Span),
     Call(String, Vec<TypedExpr>, Type, Span),
 
@@ -527,6 +570,7 @@ pub enum TypedExpr {
     FieldAssign(Box<TypedExpr>, String, Box<TypedExpr>, Span),
 
     ArrayInit(Vec<TypedExpr>, Type, Span),
+    TupleInit(Vec<TypedExpr>, Type, Span),
     IndexAccess(Box<TypedExpr>, Box<TypedExpr>, Type, Span),
     IndexAssign(Box<TypedExpr>, Box<TypedExpr>, Box<TypedExpr>, Span),
 
@@ -575,6 +619,7 @@ impl TypedExpr {
             TypedExpr::String(..) => Type::Str,
             TypedExpr::Ident(_, ty, _)
             | TypedExpr::Let(_, _, _, ty, _)
+            | TypedExpr::LetTuple(_, ty, _, _)
             | TypedExpr::Block(_, ty, _)
             | TypedExpr::Unsafe(_, ty, _)
             | TypedExpr::IfElse(_, _, _, ty, _)
@@ -583,6 +628,7 @@ impl TypedExpr {
             | TypedExpr::ObjInit(_, _, ty, _)
             | TypedExpr::FieldAccess(_, _, ty, _)
             | TypedExpr::ArrayInit(_, ty, _)
+            | TypedExpr::TupleInit(_, ty, _)
             | TypedExpr::IndexAccess(_, _, ty, _)
             | TypedExpr::EnumConstruct(_, _, _, _, ty, _)
             | TypedExpr::Match(_, _, ty, _)
@@ -599,6 +645,8 @@ impl TypedExpr {
             | TypedExpr::While(..)
             | TypedExpr::If(..)
             | TypedExpr::Return(..)
+            | TypedExpr::Break(..)
+            | TypedExpr::Continue(..)
             | TypedExpr::FieldAssign(..)
             | TypedExpr::IndexAssign(..)
             | TypedExpr::DerefAssign(..) => Type::Unit,
@@ -632,13 +680,14 @@ impl TypedExpr {
             | TypedExpr::Or(_, _, s) => s.clone(),
             TypedExpr::Neg(_, _, s) | TypedExpr::Not(_, s) => s.clone(),
             TypedExpr::Let(_, _, _, _, s) => s.clone(),
+            TypedExpr::LetTuple(_, _, _, s) => s.clone(),
             TypedExpr::Block(_, _, s) => s.clone(),
             TypedExpr::Unsafe(_, _, s) => s.clone(),
             TypedExpr::Assign(_, _, s) => s.clone(),
             TypedExpr::While(_, _, s) => s.clone(),
             TypedExpr::If(_, _, s) => s.clone(),
             TypedExpr::IfElse(_, _, _, _, s) => s.clone(),
-            TypedExpr::Return(_, s) => s.clone(),
+            TypedExpr::Return(_, s) | TypedExpr::Break(s) | TypedExpr::Continue(s) => s.clone(),
             TypedExpr::MacroCall(_, _, _, s) => s.clone(),
             TypedExpr::Call(_, _, _, s) => s.clone(),
             TypedExpr::ObjInit(_, _, _, s) => s.clone(),
@@ -647,6 +696,7 @@ impl TypedExpr {
             TypedExpr::FieldAccess(_, _, _, s) => s.clone(),
             TypedExpr::FieldAssign(_, _, _, s) => s.clone(),
             TypedExpr::ArrayInit(_, _, s) => s.clone(),
+            TypedExpr::TupleInit(_, _, s) => s.clone(),
             TypedExpr::IndexAccess(_, _, _, s) => s.clone(),
             TypedExpr::IndexAssign(_, _, _, s) => s.clone(),
             TypedExpr::EnumConstruct(_, _, _, _, _, s) => s.clone(),
@@ -699,6 +749,7 @@ pub struct WhereClause {
 #[derive(Debug, Clone)]
 pub struct ExternFnDecl {
     pub name: String,
+    pub c_name: String,
     pub params: Vec<Param>,
     pub return_type: Type,
     pub span: Span,
@@ -742,6 +793,7 @@ pub struct TypedProgram {
     pub enums: Vec<EnumDecl>,
     pub impls: Vec<ImplDecl>,
     pub functions: Vec<TypedFuncDecl>,
+    pub enum_layouts: std::collections::HashMap<String, Vec<(String, i64, Vec<Type>)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -751,4 +803,45 @@ pub struct TypedFuncDecl {
     pub return_type: Type,
     pub where_clause: Option<WhereClause>,
     pub body: Vec<TypedExpr>,
+}
+
+/// Unescapes standard C/Rust escape sequences inside a source string literal.
+pub fn unescape_string_literal(raw: &str) -> String {
+    let trimmed = raw
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(raw);
+    let mut out = String::with_capacity(trimmed.len());
+    let mut chars = trimmed.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('\'') => out.push('\''),
+                Some('0') => out.push('\0'),
+                Some('x') => {
+                    let h1 = chars.next();
+                    let h2 = chars.next();
+                    if let (Some(a), Some(b)) = (h1, h2) {
+                        let hex = format!("{a}{b}");
+                        if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                            out.push(byte as char);
+                        }
+                    }
+                }
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }

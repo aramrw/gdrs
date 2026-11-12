@@ -1,0 +1,24 @@
+use std::math::matrix::Matrix
+use std::vec::Vec
+
+fn main():
+	// manual init
+	let mut m1 = Matrix::zeros(2, 2)
+	m1.set(1, 0, 20.0)
+
+	let mut m2 = Matrix::zeros(2, 2)
+	m2.set(1, 0, 20.0)
+	let r2_c1 = m2.get(1, 0)
+	assert!(r2_c1 == 20.0)
+
+	let m3 = m1.add(&m2)
+	log!("{}", &m3)
+
+	let shape = m1.shape()
+	log!("{} {}", shape.0, shape.1)
+
+	let m4 = m3.sub(&m2)
+	log!("{}", &m4)
+	
+	log!("{}", 20.0)
+	log!("{}", 20.1)

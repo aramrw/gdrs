@@ -2,10 +2,10 @@
 //! Main entry point for expression type-checking. Delegating match arms to domain modules.
 
 use crate::{
-    ast::{Expr, FuncDecl, Span, Type, TypedExpr},
+    ast::{Expr, FuncDecl, Type, TypedExpr},
     sanal::{
-        binops, calls, control_flow, mono::Monomorphizer, objects, refs, vars, ScopeStack,
-        SemanticError, StructLayout,
+        binops, calls, control_flow, infer::InferCtx, mono::Monomorphizer, objects, refs, vars,
+        ScopeStack, SemanticError, StructLayout,
     },
 };
 use std::cell::RefCell;
@@ -18,7 +18,8 @@ fn parse_suffix_to_type(s: &str) -> Option<Type> {
         "f64" | "float" => Some(Type::Float),
         "f32" => Some(Type::F32),
         "bool" => Some(Type::Bool),
-        "str" | "string" => Some(Type::Str),
+        "str" => Some(Type::Str),
+        "string" => Some(Type::Obj(crate::ast::intern_str("std_string_String"))),
         "unit" => Some(Type::Unit),
         _ => None,
     }
@@ -32,12 +33,172 @@ pub struct TypeCtx<'a> {
     pub extern_fn_names: &'a std::collections::HashSet<String>,
     pub extern_map: &'a HashMap<String, Type>,
     pub extern_signatures: &'a HashMap<String, (Vec<Type>, Type)>,
+    pub extern_c_names: &'a HashMap<String, String>,
+    pub trait_methods: &'a HashMap<String, Vec<(String, Vec<Type>, Type)>>,
+    pub trait_impls: &'a std::collections::HashSet<(String, String)>,
     pub is_unsafe: bool,
+    pub loop_depth: usize,
+    pub current_return_type: Option<Type>,
+    pub current_expected_type: Option<Type>,
     pub mono: &'a RefCell<Monomorphizer>,
     pub worklist: &'a RefCell<Vec<FuncDecl>>,
+    pub infer: &'a RefCell<InferCtx>,
 }
 
 impl<'a> TypeCtx<'a> {
+    pub fn resolve_type_annotation(&self, ty: Type) -> Type {
+        match ty {
+            Type::Obj(name)
+                if name.starts_with("std_core_Option")
+                    || name.starts_with("std_core_Result")
+                    || name == "Option"
+                    || name == "Result"
+                    || self.contains_enum(name) =>
+            {
+                let norm = match name {
+                    "Option" | "Opt" => "std_core_Option",
+                    "Result" | "Res" => "std_core_Result",
+                    other => other,
+                };
+                Type::Enum(crate::ast::intern_str(norm))
+            }
+            Type::Array(elem, len) => Type::Array(crate::ast::intern_type(self.resolve_type_annotation(*elem)), len),
+            Type::Tuple(elems) => {
+                let resolved: Vec<Type> = elems
+                    .iter()
+                    .map(|e| self.resolve_type_annotation(*e))
+                    .collect();
+                Type::Tuple(crate::ast::intern_tuple(&resolved))
+            }
+            Type::Slice(elem) => Type::Slice(crate::ast::intern_type(self.resolve_type_annotation(*elem))),
+            Type::Vec(elem) => Type::Vec(crate::ast::intern_type(self.resolve_type_annotation(*elem))),
+            Type::Ptr(elem) => Type::Ptr(crate::ast::intern_type(self.resolve_type_annotation(*elem))),
+            Type::Ref(elem) => Type::Ref(crate::ast::intern_type(self.resolve_type_annotation(*elem))),
+            Type::MutRef(elem) => Type::MutRef(crate::ast::intern_type(self.resolve_type_annotation(*elem))),
+            Type::Rc(elem) => Type::Rc(crate::ast::intern_type(self.resolve_type_annotation(*elem))),
+            Type::Arc(elem) => Type::Arc(crate::ast::intern_type(self.resolve_type_annotation(*elem))),
+            other => other,
+        }
+    }
+    pub fn has_drop_ownership(&self, ty: &Type) -> bool {
+        fn inner(ctx: &TypeCtx<'_>, ty: &Type, visited: &mut std::collections::HashSet<String>) -> bool {
+            match ty {
+                Type::String
+                | Type::Vec(_)
+                | Type::Array(..)
+                | Type::DynTrait(_)
+                | Type::Rc(_)
+                | Type::Arc(_) => true,
+                Type::Tuple(elems) => elems.iter().any(|e| inner(ctx, e, visited)),
+                Type::Enum(name) => {
+                    !(name.starts_with("std_core_Option_ptr")
+                        || name.starts_with("std_core_Option_void")
+                        || name.contains("_ptr_")
+                        || name.contains("_void"))
+                }
+                Type::Obj(name) => {
+                    if !visited.insert((*name).to_string()) {
+                        return false;
+                    }
+                    if *name == "String"
+                        || *name == "std_string_String"
+                        || *name == "Vec"
+                        || name.starts_with("std_vec_Vec")
+                        || ctx.contains_fn(&format!("{name}_drop"))
+                    {
+                        return true;
+                    }
+                    if let Some(layout) = ctx.get_struct(name) {
+                        return layout
+                            .field_offsets
+                            .values()
+                            .any(|(_, f_ty)| inner(ctx, f_ty, visited));
+                    }
+                    false
+                }
+                _ => false,
+            }
+        }
+        let mut visited = std::collections::HashSet::new();
+        inner(self, ty, &mut visited)
+    }
+
+    pub fn check_not_moved_from_projection(
+        &self,
+        expr: &TypedExpr,
+        errors: &mut Vec<SemanticError>,
+    ) {
+        match expr {
+            TypedExpr::IndexAccess(_, _, elem_ty, span) if self.has_drop_ownership(elem_ty) => {
+                errors.push(SemanticError {
+                    code: "E0507",
+                    message: format!(
+                        "Cannot move out of indexed content of type `{elem_ty:?}`"
+                    ),
+                    label: "Cannot move out of container element".to_string(),
+                    secondary_label: None,
+                    help: Some(
+                        "Borrow the element instead (e.g. `&vec[i]`), `.clone()` it, or use `.pop()`"
+                            .to_string(),
+                    ),
+                    span: span.clone(),
+                });
+            }
+            TypedExpr::FieldAccess(_, field_name, field_ty, span)
+                if self.has_drop_ownership(field_ty) =>
+            {
+                errors.push(SemanticError {
+                    code: "E0507",
+                    message: format!(
+                        "Cannot move out of field `{field_name}` of type `{field_ty:?}`"
+                    ),
+                    label: "Cannot move droppable field out of struct".to_string(),
+                    secondary_label: None,
+                    help: Some(format!(
+                        "Borrow the field (`&s.{field_name}`) or clone it (`s.{field_name}.clone()`)"
+                    )),
+                    span: span.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    pub fn validate_dyn_coercion(
+        &self,
+        found_ty: &Type,
+        trait_name: &str,
+        span: &crate::ast::Span,
+        errors: &mut Vec<SemanticError>,
+    ) {
+        if let Type::DynTrait(found_tr) = found_ty {
+            if *found_tr == trait_name || found_tr.ends_with(&format!("_{trait_name}")) || trait_name.ends_with(&format!("_{found_tr}")) {
+                return;
+            }
+        }
+        if matches!(found_ty, Type::Void | Type::Generic(_) | Type::Infer(_)) {
+            return;
+        }
+        let fn_map = self.fn_map.borrow();
+        if !crate::sanal::mono::type_satisfies_bound(
+            *found_ty,
+            trait_name,
+            self.trait_methods,
+            self.trait_impls,
+            &fn_map,
+        ) {
+            errors.push(SemanticError {
+                code: "E0277",
+                message: format!(
+                    "The trait `{trait_name}` is not implemented for `{found_ty:?}`"
+                ),
+                label: format!("`{found_ty:?}` does not implement `{trait_name}`"),
+                secondary_label: None,
+                help: Some(format!("Add `impl {trait_name} for ...` with all required methods")),
+                span: span.clone(),
+            });
+        }
+    }
     pub fn get_struct(&self, name: &str) -> Option<StructLayout> {
         let res = self.struct_map.borrow().get(name).cloned().or_else(|| {
             self.struct_map
@@ -48,6 +209,54 @@ impl<'a> TypeCtx<'a> {
         });
         if let Some(s) = res {
             return Some(s);
+        }
+
+        if let Some((base_name, type_args)) = crate::sanal::mono::lookup_mangled(name) {
+            if let Some(mangled) = crate::sanal::mono::monomorphize_struct(
+                self.mono,
+                &base_name,
+                &type_args,
+                self.struct_map,
+                self.enum_map,
+                self.fn_map,
+                self.worklist,
+            ) {
+                return self.struct_map.borrow().get(&mangled).cloned();
+            }
+            if type_args
+                .iter()
+                .any(crate::sanal::compat::type_contains_infer)
+            {
+                let decl = {
+                    let mono = self.mono.borrow();
+                    crate::sanal::mono::find_struct_template(&mono, &base_name)
+                };
+                if let Some(decl) = decl {
+                    let params = crate::sanal::mono::extract_generic_params_struct(&decl, self.mono);
+                    let mut env = HashMap::new();
+                    for (i, p) in params.iter().enumerate() {
+                        if let Some(&arg) = type_args.get(i) {
+                            env.insert(p.clone(), arg);
+                            env.insert(format!("${p}"), arg);
+                        }
+                    }
+                    let mut field_offsets = HashMap::new();
+                    let mut offset = 0u32;
+                    for field in &decl.fields {
+                        let resolved_ty = self
+                            .infer
+                            .borrow_mut()
+                            .resolve(crate::sanal::mono::substitute_type(field.ty, &env));
+                        field_offsets.insert(field.name.clone(), (offset, resolved_ty));
+                        offset += 8;
+                    }
+                    return Some(StructLayout {
+                        name: name.to_string(),
+                        total_size: offset,
+                        field_offsets,
+                    });
+                }
+            }
         }
 
         if let Some((base_name, suffix)) = name.rsplit_once('_') {
@@ -84,27 +293,67 @@ impl<'a> TypeCtx<'a> {
             return Some(res);
         }
 
-        if name.starts_with("std_core_Option") || name.starts_with("std_core_Result") {
-            let base_name = if name.starts_with("std_core_Option") {
+        if let Some((base_name, type_args)) = crate::sanal::mono::lookup_mangled(name) {
+            if let Some(mangled) = crate::sanal::mono::monomorphize_enum(
+                self.mono,
+                &base_name,
+                &type_args,
+                self.enum_map,
+                self.fn_map,
+                self.worklist,
+            ) {
+                return self.enum_map.borrow().get(&mangled).cloned();
+            }
+            if type_args
+                .iter()
+                .any(crate::sanal::compat::type_contains_infer)
+            {
+                let decl = {
+                    let mono = self.mono.borrow();
+                    crate::sanal::mono::find_enum_template(&mono, &base_name)
+                };
+                if let Some(decl) = decl {
+                    let params = crate::sanal::mono::extract_generic_params_enum(&decl);
+                    let mut env = HashMap::new();
+                    for (i, p) in params.iter().enumerate() {
+                        if let Some(&arg) = type_args.get(i) {
+                            env.insert(p.clone(), arg);
+                            env.insert(format!("${p}"), arg);
+                        }
+                    }
+                    let mut variant_map = HashMap::new();
+                    for (i, variant) in decl.variants.iter().enumerate() {
+                        let payload_types = variant
+                            .payload_types
+                            .iter()
+                            .map(|t| {
+                                self.infer
+                                    .borrow_mut()
+                                    .resolve(crate::sanal::mono::substitute_type(*t, &env))
+                            })
+                            .collect();
+                        variant_map.insert(variant.name.clone(), (i as i64, payload_types));
+                    }
+                    return Some((crate::ast::intern_str(name), variant_map));
+                }
+            }
+        }
+
+        if name.starts_with("std_core_Option_") || name.starts_with("std_core_Result_") {
+            let base_name = if name.starts_with("std_core_Option_") {
                 "std_core_Option"
             } else {
                 "std_core_Result"
             };
-            let rest = if name.len() > base_name.len() {
-                &name[base_name.len() + 1..]
-            } else {
-                "i64"
-            };
+            let rest = &name[base_name.len() + 1..];
             let type_args: Vec<Type> = rest.split('_').filter_map(parse_suffix_to_type).collect();
-            let final_args = if type_args.is_empty() {
-                vec![Type::Int]
-            } else {
-                type_args
-            };
+            if type_args.is_empty() {
+                return None;
+            }
             if let Some(mangled) = crate::sanal::mono::monomorphize_enum(
                 self.mono,
                 base_name,
-                &final_args,
+                &type_args,
                 self.enum_map,
                 self.fn_map,
                 self.worklist,
@@ -129,11 +378,6 @@ impl<'a> TypeCtx<'a> {
             .find(|(k, _)| {
                 if **k == name {
                     return true;
-                }
-                if let Some((_, method)) = k.rsplit_once('_') {
-                    if method == name && (k.starts_with("std_vec_Vec") || k.starts_with("std_string_String") || k.starts_with("std_iter_Range") || k.starts_with("std_env_Args")) {
-                        return true;
-                    }
                 }
                 let clean = if let Some(stripped) = k.strip_prefix("std_") {
                     stripped.split_once('_').map(|(_, rest)| rest).unwrap_or(stripped)
@@ -178,6 +422,9 @@ pub fn type_check_expr<'a>(
         Expr::Let(name, explicit_ty, is_mutable, value, span) => {
             vars::type_check_let(scopes, errors, type_ctx, name, explicit_ty.as_ref(), *is_mutable, value, span)
         }
+        Expr::LetTuple(pat, explicit_ty, value, span) => {
+            vars::type_check_let_tuple(scopes, errors, type_ctx, pat, explicit_ty.as_ref(), value, span)
+        }
         Expr::Assign(name, value, span) => {
             vars::type_check_assign(scopes, errors, type_ctx, name, value, span)
         }
@@ -215,14 +462,17 @@ pub fn type_check_expr<'a>(
         Expr::If(cond, body, span) => control_flow::type_check_if(scopes, errors, type_ctx, cond, body, span),
         Expr::IfElse(cond, then_b, else_b, span) => control_flow::type_check_if_else(scopes, errors, type_ctx, cond, then_b, else_b, span),
         Expr::Return(opt_expr, span) => control_flow::type_check_return(scopes, errors, type_ctx, opt_expr.as_deref(), span),
+        Expr::Break(span) => control_flow::type_check_break(errors, type_ctx, span),
+        Expr::Continue(span) => control_flow::type_check_continue(errors, type_ctx, span),
 
         // Functions & Invocation
         Expr::Call(raw_name, args, span) => calls::type_check_call(scopes, errors, type_ctx, raw_name, args, span),
         Expr::MacroCall(name, args, span) => calls::type_check_macro_call(scopes, errors, type_ctx, name, args, span),
         Expr::Closure(params, body, span) => calls::type_check_closure(scopes, errors, type_ctx, params, body, span),
 
-        // Structs, Enums, Arrays, Indexing
+        // Structs, Enums, Arrays, Tuples, Indexing
         Expr::ArrayInit(elems, span) => objects::type_check_array_init(scopes, errors, type_ctx, elems, span),
+        Expr::TupleInit(elems, span) => objects::type_check_tuple_init(scopes, errors, type_ctx, elems, span),
         Expr::IndexAccess(target, idx, span) => objects::type_check_index_access(scopes, errors, type_ctx, target, idx, span),
         Expr::IndexAssign(target, idx, val, span) => objects::type_check_index_assign(scopes, errors, type_ctx, target, idx, val, span),
         Expr::ObjInit(raw_name, fields, span) => objects::type_check_obj_init(scopes, errors, type_ctx, raw_name, fields, span),
@@ -241,6 +491,4 @@ pub fn type_check_expr<'a>(
     }
 }
 
-// Forward re-exports for helper functions
-pub use binops::{check_binary_op, is_float, is_int};
-pub use objects::is_obj_field_type_compatible;
+

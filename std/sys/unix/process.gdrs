@@ -4,5 +4,5 @@ obj Command:
 	inner: imp::ImpCommand
 
 impl Command:
-	fn spawn(program: String) -> i32:
+	fn spawn(program: str) -> i32:
 		imp::ImpCommand.spawn(program)

@@ -8,19 +8,29 @@ mod sanal;
 
 use crate::cli::{Cli, Commands};
 use clap::Parser as ClapParser;
-use cranelift_module::Module;
 use std::path::Path;
+use std::process::Command;
 
 fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Build { src, output }) => {
-            compile_to_binary(&src, &output);
+        Some(Commands::Build {
+            src,
+            output,
+            lib_dirs,
+            libs,
+        }) => {
+            compile_to_binary(&src, &output, &lib_dirs, &libs);
+            println!("Successfully built standalone binary: {}", output);
         }
-        Some(Commands::Run { src, args }) => {
-            crate::codegen::intrinsics::set_jit_args(args);
-            jit_run(&src);
+        Some(Commands::Run {
+            src,
+            lib_dirs,
+            libs,
+            args,
+        }) => {
+            build_and_run(&src, &lib_dirs, &libs, &args);
         }
         None => {
             if cli.srcs.is_empty() {
@@ -28,15 +38,15 @@ fn main() {
                 std::process::exit(1);
             }
             for src in &cli.srcs {
-                jit_run(src);
+                build_and_run(src, &cli.lib_dirs, &cli.libs, &[]);
             }
         }
     }
 }
 
-fn jit_run(entry_path: &Path) {
-    let ast = match crate::loader::load_program(entry_path) {
-        Ok(program) => program,
+fn compile_to_binary(entry_path: &Path, output_path: &str, lib_dirs: &[String], libs: &[String]) {
+    let (ast, source_map) = match crate::loader::load_program(entry_path) {
+        Ok(res) => res,
         Err(e) => {
             eprintln!("[LOAD ERROR] {}", e);
             std::process::exit(1);
@@ -45,92 +55,44 @@ fn jit_run(entry_path: &Path) {
 
     match crate::sanal::check_semantics(&ast) {
         Ok((typed_tree, struct_layouts)) => {
-            let mut jit = crate::codegen::jit::create_jit_module();
-            let mut ctx = jit.make_context();
-            let mut builder_context = cranelift_frontend::FunctionBuilderContext::new();
-
-            use crate::codegen::expr::cranelift_type_of;
-            use cranelift_codegen::ir::AbiParam;
-            use cranelift_module::Linkage;
-
-            for func in &typed_tree.functions {
-                let export_name = if func.name == "main" {
-                    "gdrs_main"
-                } else {
-                    &func.name
-                };
-                if jit.get_name(export_name).is_none() {
-                    let mut sig = jit.make_signature();
-                    for param in &func.params {
-                        sig.params.push(AbiParam::new(cranelift_type_of(&param.ty)));
-                    }
-                    if func.return_type != crate::ast::Type::Unit {
-                        sig.returns
-                            .push(AbiParam::new(cranelift_type_of(&func.return_type)));
-                    }
-                    let _ = jit.declare_function(export_name, Linkage::Export, &sig);
-                }
-            }
-
-            for func in &typed_tree.functions {
-                crate::codegen::func::compile_func(
-                    func,
-                    &struct_layouts,
-                    &mut jit,
-                    &mut ctx,
-                    &mut builder_context,
-                );
-            }
-
-            jit.finalize_definitions().unwrap();
-            let main_id = match jit.get_name("gdrs_main") {
-                Some(cranelift_module::FuncOrDataId::Func(id)) => id,
-                _ => panic!("main function not found"),
-            };
-            let main_ptr = jit.get_finalized_function(main_id);
-            let main_fn: extern "C" fn() = unsafe { std::mem::transmute(main_ptr) };
-            main_fn();
-        }
-        Err(errors) => {
-            let path_buf = entry_path.to_path_buf();
-            let fstring = std::fs::read_to_string(entry_path).unwrap_or_default();
-            crate::diagnostics::print_semantic_errors(&path_buf, &fstring, errors);
-            std::process::exit(1);
-        }
-    }
-}
-
-fn compile_to_binary(entry_path: &Path, output_path: &str) {
-    let ast = match crate::loader::load_program(entry_path) {
-        Ok(program) => program,
-        Err(e) => {
-            eprintln!("[LOAD ERROR] {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    match crate::sanal::check_semantics(&ast) {
-        Ok((typed_tree, struct_layouts)) => {
-            match crate::codegen::object::compile_program_to_binary(
+            if let Err(e) = crate::codegen::object::compile_program_to_binary(
                 &typed_tree,
                 &struct_layouts,
                 output_path,
+                lib_dirs,
+                libs,
+                &source_map,
             ) {
-                Ok(_) => {
-                    println!("Successfully built standalone binary: {}", output_path);
-                }
-                Err(e) => {
-                    eprintln!("[BUILD ERROR] {}", e);
-                    std::process::exit(1);
-                }
+                eprintln!("[BUILD ERROR] {}", e);
+                std::process::exit(1);
             }
         }
         Err(errors) => {
-            let path_buf = entry_path.to_path_buf();
-            let fstring = std::fs::read_to_string(entry_path).unwrap_or_default();
-            crate::diagnostics::print_semantic_errors(&path_buf, &fstring, errors);
+            crate::diagnostics::print_semantic_errors(&source_map, errors);
             std::process::exit(1);
         }
     }
 }
 
+fn build_and_run(entry_path: &Path, lib_dirs: &[String], libs: &[String], args: &[String]) {
+    let tmp_bin = std::env::temp_dir().join(format!("gdrs_run_{}", std::process::id()));
+    let tmp_bin_str = tmp_bin.to_string_lossy().to_string();
+
+    compile_to_binary(entry_path, &tmp_bin_str, lib_dirs, libs);
+
+    let status = Command::new(&tmp_bin).args(args).status();
+
+    let _ = std::fs::remove_file(&tmp_bin);
+
+    match status {
+        Ok(s) => {
+            if !s.success() {
+                std::process::exit(s.code().unwrap_or(1));
+            }
+        }
+        Err(e) => {
+            eprintln!("[RUN ERROR] Failed to execute built binary: {}", e);
+            std::process::exit(1);
+        }
+    }
+}

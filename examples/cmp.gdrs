@@ -6,34 +6,34 @@ fn main():
 	let radius = 50
 	let limit = screen_w - radius
 
-	log!("1. Subtraction check (expect 750):", limit)
+	log!("1. Subtraction check (expect 750): {}", limit)
 
 	let mut x = 740
 	let mut speed_x = 5
 
 	// Frame 1: Move to 745
 	x += speed_x
-	log!("2. Pos at 745 (expect 745):", x)
+	log!("2. Pos at 745 (expect 745): {}", x)
 
 	if x >= limit:
 			log!("FAIL: Triggered >= limit early at 745!")
 
 	// Frame 2: Move to 750 (exact bound)
 	x += speed_x
-	log!("3. Pos at 750 (expect 750):", x)
+	log!("3. Pos at 750 (expect 750): {}", x)
 
 	if x >= limit:
 			log!("4. SUCCESS: Hit right bound at 750")
 			x = limit
 			speed_x = -speed_x
 
-	log!("5. Negated speed_x (expect -5):", speed_x)
+	log!("5. Negated speed_x (expect -5): {}", speed_x)
 
 	// Frame 3: Step backward
 	x += speed_x
-	log!("6. Pos after bounce (expect 745):", x)
+	log!("6. Pos after bounce (expect 745): {}", x)
 
 	if x >= limit:
 			log!("FAIL: Still triggering >= limit after bouncing!")
 	
-	log!("elapsed ms:", now.ms())
+	log!("elapsed ms: {}", now.ms())

@@ -1,0 +1,70 @@
+use std::vec::Vec
+use std::fmt::Display
+
+obj Matrix:
+	rows: i32
+	cols: i32
+	data: Vec<f64>
+
+impl Display for Matrix:
+	fn fmt(self) -> String:
+		let mut res = String::from("Matrix[\n")
+		for r in 0..self.rows:
+			res = res.push_str("  [ ")
+			for c in 0..self.cols:
+				let idx = r * self.cols + c
+				let val = self.data[idx]
+				res = res.push_str(format!("{}", val))
+				res = res.push_str(" ")
+			res = res.push_str("]\n")
+		res = res.push_str("]")
+		return res
+
+impl Matrix:
+	fn len(&self) -> i32:
+		return self.rows * self.cols
+
+	// constructors 
+	fn zeros(rows: i32, cols: i32) -> Matrix:
+		let len = rows * cols
+		let mut data: Vec<f64> = Vec::new()
+		for i in 0..len:
+			data.push(0.0)
+	
+		return Matrix{ rows: rows, cols: cols, data: data }
+
+	fn ones(rows: i32, cols: i32) -> Matrix:
+		let len = rows * cols
+		let mut data: Vec<f64> = Vec::new()
+		for i in 0..len:
+			data.push(1.0)
+	
+		return Matrix{ rows: rows, cols: cols, data: data }
+	
+	// accesors 
+	fn get(&self, r: i32, c: i32) -> f64:
+		return self.data[r * self.cols + c]
+
+	fn set(&mut self, r: i32, c: i32, val: f64):
+		let i = r * self.cols + c
+		self.data[i] = val
+	
+	fn shape(&self) -> (i32, i32):
+		return (self.rows, self.cols)
+		
+	// algebra
+	fn add(&self, o: &Matrix) -> Matrix:
+		let len = self.len()
+		let mut r: Vec<f64> = Vec::new()
+		for i in 0..len:
+			r.push(self.data[i] + o.data[i])
+		return Matrix{ rows: self.rows, cols: self.cols, data: r }
+
+	fn sub(&self, o: &Matrix) -> Matrix:
+		let len = self.len()
+		let mut r: Vec<f64> = Vec::new()
+		for i in 0..len:
+			r.push(self.data[i] - o.data[i])
+		return Matrix{ rows: self.rows, cols: self.cols, data: r}
+		
+

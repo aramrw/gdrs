@@ -5,4 +5,4 @@ fn main():
 	log!("10,000,000 closure iterations...")
 	(0..10000000).for_each(|x|: x + x)
 
-	log!("Elapsed ms:", now.ms())
+	log!("Elapsed ms: {}", now.ms())

@@ -1,15 +1,18 @@
 // std/fs.gdrs
-use std::core::{Result, Option}
+use std::core::{Result, Option, Drop}
 use std::error::Error
 use std::fmt::Display
 use std::libc::{malloc, free, memset}
+use std::vec::Vec
 
-fn buffer_to_string(ptr: *void, size: i64) -> str:
-	return ptr as str
+use std::string::String
+
+fn buffer_to_string(ptr: *void, size: i64) -> String:
+	return String{ ptr: ptr as *i64, len: size, cap: size + 1 }
 
 #[derive(Error)]
 enum IoError:
-	#[err("Failed to open file at path: '{0}'")]
+	#[err("Failed to open file or directory at path: '{0}'")]
 	OpenFailed(String)
 	#[err("Failed to allocate memory for file read")]
 	AllocationFailed
@@ -22,20 +25,60 @@ extern "C":
 	fn ftell(stream: i64) -> i64
 	fn fread(ptr: *void, size: i64, nmemb: i64, stream: i64) -> i64
 	fn fclose(stream: i64) -> i32
+	fn gdrs_fs_read_dir(path: str, out_vec: *void) -> i64
+
+obj DirEntry:
+	path_str: String
+	name_str: String
+	is_directory: bool
+	is_regular_file: bool
+
+impl DirEntry:
+	fn path(&self) -> String:
+		return String::from(self.path_str.as_str())
+
+	fn file_name(&self) -> String:
+		return String::from(self.name_str.as_str())
+
+	fn is_dir(&self) -> bool:
+		return self.is_directory
+
+	fn is_file(&self) -> bool:
+		return self.is_regular_file
+
+fn read_dir(path: str) -> Result<Vec<DirEntry>, IoError>:
+	unsafe:
+		let mut vec_val: Vec<DirEntry> = Vec::new()
+		if gdrs_fs_read_dir(path, (&mut vec_val) as *void) != 0:
+			return Err(IoError::OpenFailed(String::from(path)))
+		return Ok(vec_val)
+
+fn read_to_string(path: str) -> Result<String, IoError>:
+	let file_res = File::open(path)
+	match file_res:
+		Result::Ok(f) => f.read_to_string()
+		Result::Err(e) => Err(e)
 
 obj File:
 	handle: i64
+
+impl Drop for File:
+	fn drop(mut self):
+		unsafe:
+			if self.handle != 0:
+				fclose(self.handle)
+				self.handle = 0
 
 impl File:
 	fn open(path: str) -> Result<File, IoError>:
 		unsafe:
 			let ptr = fopen(path, "r")
 			if ptr == 0:
-				return Err(IoError::OpenFailed(path))
+				return Err(IoError::OpenFailed(String::from(path)))
 			
 			return Ok(File{handle: ptr})
 
-	fn read_to_string(self) -> Result<String, IoError>:
+	fn read_to_string(mut self) -> Result<String, IoError>:
 		unsafe:
 			let stream = self.handle
 			if stream == 0:
@@ -44,6 +87,10 @@ impl File:
 			// 1. Seek to end of file to find size
 			fseek(stream, 0, 2)
 			let size = ftell(stream)
+			if size < 0:
+				fclose(stream)
+				self.handle = 0
+				return Err(IoError::ReadFailed)
 
 			// 2. Seek back to the beginning to read
 			fseek(stream, 0, 0)
@@ -52,18 +99,27 @@ impl File:
 			let mut buffer = malloc(size + 1)
 			if (buffer as i64) == 0:
 				fclose(stream)
+				self.handle = 0
 				return Err(IoError::AllocationFailed)
 
 			// 4. Read data into the buffer pointer
-			fread(buffer, 1, size, stream)
-			let end_ptr = (buffer as i64) + size
+			let read_bytes = fread(buffer, 1, size, stream)
+			let mut actual_size = 0
+			if read_bytes > 0:
+				actual_size = read_bytes
+			let end_ptr = (buffer as i64) + actual_size
 			memset(end_ptr as *void, 0, 1)
 
 			// Clean up file handle
 			fclose(stream)
+			self.handle = 0
 
-			return Ok(buffer_to_string(buffer, size))
+			return Ok(buffer_to_string(buffer, actual_size))
 
-	fn close(self) -> i32:
+	fn close(mut self) -> i32:
 		unsafe:
-			return fclose(self.handle)
+			if self.handle == 0:
+				return 0
+			let res = fclose(self.handle)
+			self.handle = 0
+			return res

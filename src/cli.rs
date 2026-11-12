@@ -7,18 +7,34 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
-    /// Direct input source files for JIT execution (e.g. `gdrs main.gdrs`)
+    /// Native C library search paths
+    #[arg(short = 'L', value_name = "DIR")]
+    pub lib_dirs: Vec<String>,
+
+    /// Link native C libraries
+    #[arg(short = 'l', value_name = "LIB")]
+    pub libs: Vec<String>,
+
+    /// Direct input source files to build and execute (e.g. `gdrs main.gdrs`)
     #[arg(value_parser = validate_gdrs_extension)]
     pub srcs: Vec<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// JIT compile and run directly in memory (0.06s fast dev loop)
+    /// Build and run a program natively
     Run {
         /// Source file to run
         #[arg(value_parser = validate_gdrs_extension)]
         src: PathBuf,
+
+        /// Native C library search paths
+        #[arg(short = 'L', value_name = "DIR")]
+        lib_dirs: Vec<String>,
+
+        /// Link native C libraries
+        #[arg(short = 'l', value_name = "LIB")]
+        libs: Vec<String>,
 
         /// Additional arguments passed to the gdrs script
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -33,6 +49,14 @@ pub enum Commands {
         /// Output binary executable path
         #[arg(short, long, default_value = "main")]
         output: String,
+
+        /// Native C library search paths
+        #[arg(short = 'L', value_name = "DIR")]
+        lib_dirs: Vec<String>,
+
+        /// Link native C libraries
+        #[arg(short = 'l', value_name = "LIB")]
+        libs: Vec<String>,
     },
 }
 

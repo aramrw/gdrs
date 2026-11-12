@@ -14,9 +14,9 @@ fn main():
 
 	if res.is_ok():
 		log!("sucess")
-		log!("(microseconds):", us)
-		log!("(milliseconds):", us)
+		log!("(microseconds): {}", us)
+		log!("(milliseconds): {}", ms)
 
-		log!(res.unwrap())
+		log!("{}", res.unwrap())
 	else:
 		log!("Failed to read file.")

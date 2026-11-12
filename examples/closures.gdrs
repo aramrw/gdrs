@@ -2,7 +2,7 @@ use std::math::Vec2
 
 fn main():
 	(0..5).for_each(|x|:
-		log!("Item:", x)
+		log!("Item: {}", x)
 		// doin work
 		let mut sum = x + x
 		sum *= sum
@@ -11,4 +11,4 @@ fn main():
 
 	for x in (0..5):
 		let mapped = x * 10
-		log!("Mapped item (x * 10):", mapped)
+		log!("Mapped item (x * 10): {}", mapped)

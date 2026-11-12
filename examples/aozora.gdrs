@@ -26,7 +26,7 @@ fn main():
 		let bytes_read = fread(buf, 1, 4095, fp)
 		fclose(fp)
 
-		log!("2. Read bytes into memory:", bytes_read)
+		log!("2. Read bytes into memory: {}", bytes_read)
 
 		// 4. Print raw buffer via C puts
 		log!("3. Outputting fetched content:")

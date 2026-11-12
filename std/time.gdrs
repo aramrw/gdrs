@@ -13,15 +13,9 @@ obj Instant:
 impl Instant:
 	fn now() -> Instant:
 		unsafe:
-			let p = malloc(16)
-			if (p as i64) == 0:
-				return Instant{sec: 0, nsec: 0}
-			let ts = p as *i64
-			clock_gettime(0, ts as *void)
-			let sec = *ts
-			let nsec = *(ts + 1)
-			free(ts as *void)
-			return Instant{sec: sec, nsec: nsec}
+			let mut ts = Instant{sec: 0, nsec: 0}
+			clock_gettime(0, (&mut ts) as *void)
+			return ts
 
 	fn ms(self) -> i64:
 		let end = Instant::now()

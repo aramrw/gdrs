@@ -14,8 +14,8 @@ fn main():
 			let ptr_next = ptr + 1
 			*ptr_next = 200
 
-			log!("Value at ptr[0]:", *ptr)
-			log!("Value at ptr[1]:", *ptr_next)
+			log!("Value at ptr[0]: {}", *ptr)
+			log!("Value at ptr[1]: {}", *ptr_next)
 
 			free(p)
 			log!("sucess!")
@@ -23,6 +23,6 @@ fn main():
 	let test_str = "Hello raw pointers!"
 	unsafe:
 		let len = strlen(test_str)
-		log!("strlen returned:", len)
+		log!("strlen returned: {}", len)
 		let cmp = strcmp(test_str, "Hello raw pointers!")
-		log!("strcmp returned:", cmp)
+		log!("strcmp returned: {}", cmp)

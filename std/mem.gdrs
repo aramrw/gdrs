@@ -1,0 +1,4 @@
+// std/mem.gdrs - Memory management helpers
+
+fn drop(val: $T):
+	return

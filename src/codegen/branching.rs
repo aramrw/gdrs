@@ -1,19 +1,22 @@
-use std::collections::HashMap;
-
-use cranelift_codegen::ir::{MemFlags, types};
-use cranelift_codegen::ir::{InstBuilder, Value};
-use cranelift_frontend::{FunctionBuilder, Variable};
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
+use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
 use crate::ast::{Type, TypedExpr, TypedMatchArm};
+use crate::codegen::ctx::CodegenCtx;
+use crate::codegen::drops::{emit_drop_for_value, find_enum_layout, has_drop_glue, is_npo_enum};
 use crate::codegen::expr::{coerce_val, compile_expr, cranelift_type_of};
-use crate::sanal::StructLayout;
+use crate::codegen::layout::{
+    alloc_stack_slot, emit_memcpy_bytes, enum_variant_offsets, is_aggregate_type, repr_kind,
+    size_and_align, ReprKind,
+};
 
-pub fn expr_has_return(expr: &TypedExpr) -> bool {
+pub fn expr_is_terminator(expr: &TypedExpr) -> bool {
     match expr {
-        TypedExpr::Return(..) => true,
+        TypedExpr::Return(..) | TypedExpr::Break(..) | TypedExpr::Continue(..) => true,
         TypedExpr::Block(stmts, _, _) | TypedExpr::Unsafe(stmts, _, _) => {
-            stmts.last().map(expr_has_return).unwrap_or(false)
+            stmts.last().map(expr_is_terminator).unwrap_or(false)
         }
         _ => false,
     }
@@ -21,17 +24,17 @@ pub fn expr_has_return(expr: &TypedExpr) -> bool {
 
 pub fn compile_if<M: Module>(
     builder: &mut FunctionBuilder,
-    vars: &mut HashMap<String, Variable>,
-    var_counter: &mut usize,
+    cg: &mut CodegenCtx,
     module: &mut M,
-    struct_layouts: &HashMap<String, StructLayout>,
-    cond: &Box<TypedExpr>,
-    body: &Box<TypedExpr>,
+    cond: &TypedExpr,
+    body: &TypedExpr,
 ) -> Value {
     let then_block = builder.create_block();
     let exit_block = builder.create_block();
 
-    let cond_val = compile_expr(builder, cond, vars, var_counter, module, struct_layouts);
+    cg.push_temp_scope();
+    let cond_val = compile_expr(builder, cond, cg, module);
+    cg.pop_temp_scope_and_drop(builder, module);
     builder
         .ins()
         .brif(cond_val, then_block, &[], exit_block, &[]);
@@ -39,9 +42,16 @@ pub fn compile_if<M: Module>(
     // THEN BLOCK
     builder.switch_to_block(then_block);
     builder.seal_block(then_block);
-    compile_expr(builder, body, vars, var_counter, module, struct_layouts);
-    if !builder.is_unreachable() && !expr_has_return(body) {
+    cg.push_scope();
+    cg.push_temp_scope();
+    let _body_val = compile_expr(builder, body, cg, module);
+    if !builder.is_unreachable() && !expr_is_terminator(body) {
+        cg.pop_temp_scope_and_drop(builder, module);
+        cg.pop_scope_and_drop(builder, module);
         builder.ins().jump(exit_block, &[]);
+    } else {
+        cg.pop_temp_scope_without_drop();
+        cg.pop_scope_without_drop();
     }
 
     // EXIT BLOCK
@@ -53,118 +63,201 @@ pub fn compile_if<M: Module>(
 
 pub fn compile_if_else<M: Module>(
     builder: &mut FunctionBuilder,
-    vars: &mut HashMap<String, Variable>,
-    var_counter: &mut usize,
+    cg: &mut CodegenCtx,
     ty: &Type,
     module: &mut M,
-    struct_layouts: &HashMap<String, StructLayout>,
-    cond: &Box<TypedExpr>,
-    then_b: &Box<TypedExpr>,
-    else_b: &Box<TypedExpr>,
+    cond: &TypedExpr,
+    then_b: &TypedExpr,
+    else_b: &TypedExpr,
 ) -> Value {
     let then_block = builder.create_block();
     let else_block = builder.create_block();
     let exit_block = builder.create_block();
 
-    let is_unit = *ty == Type::Unit;
-    let cranelift_ty = cranelift_type_of(ty);
+    let res_repr = repr_kind(ty, &cg.meta.struct_layouts, cg.meta.enum_layouts);
+    let out_addr_opt = match res_repr {
+        ReprKind::Aggregate { size, align } => Some(alloc_stack_slot(builder, size, align).1),
+        ReprKind::Scalar(cl_ty) => {
+            builder.append_block_param(exit_block, cl_ty);
+            None
+        }
+        ReprKind::Zst => None,
+    };
 
-    // Only expect a block parameter if this expression yields a non-unit value
-    if !is_unit {
-        builder.append_block_param(exit_block, cranelift_ty);
-    }
-
-    let cond_val = compile_expr(builder, cond, vars, var_counter, module, struct_layouts);
+    cg.push_temp_scope();
+    let cond_val = compile_expr(builder, cond, cg, module);
+    cg.pop_temp_scope_and_drop(builder, module);
     builder
         .ins()
         .brif(cond_val, then_block, &[], else_block, &[]);
 
-    // THEN
-    builder.switch_to_block(then_block);
-    builder.seal_block(then_block);
-    let then_val = compile_expr(builder, then_b, vars, var_counter, module, struct_layouts);
-    let then_term = builder.is_unreachable() || expr_has_return(then_b);
-    if !then_term {
-        if is_unit {
-            builder.ins().jump(exit_block, &[]);
+    let mut compile_branch = |branch_blk, branch_expr: &TypedExpr| -> bool {
+        builder.switch_to_block(branch_blk);
+        builder.seal_block(branch_blk);
+        cg.push_scope();
+        cg.push_temp_scope();
+        let val = compile_expr(builder, branch_expr, cg, module);
+        let term = builder.is_unreachable() || expr_is_terminator(branch_expr);
+        if !term {
+            let mut jump_args = Vec::new();
+            match res_repr {
+                ReprKind::Zst => {}
+                ReprKind::Scalar(cl_ty) => {
+                    cg.cancel_temp(val);
+                    if let TypedExpr::Ident(v, _, _) = branch_expr {
+                        cg.mark_moved(builder, v);
+                    }
+                    jump_args.push(coerce_val(builder, val, cl_ty));
+                }
+                ReprKind::Aggregate { size, .. } => {
+                    cg.cancel_temp(val);
+                    if let TypedExpr::Ident(v, v_ty, _) = branch_expr {
+                        if !v_ty.is_copy() {
+                            cg.mark_moved(builder, v);
+                        }
+                    }
+                    let out_addr = out_addr_opt.unwrap();
+                    emit_memcpy_bytes(builder, module, out_addr, val, size);
+                }
+            }
+            cg.pop_temp_scope_and_drop(builder, module);
+            cg.pop_scope_and_drop(builder, module);
+            builder.ins().jump(exit_block, &jump_args);
         } else {
-            let coerced = coerce_val(builder, then_val, cranelift_ty);
-            builder.ins().jump(exit_block, &[coerced]);
+            cg.pop_temp_scope_without_drop();
+            cg.pop_scope_without_drop();
         }
-    }
+        term
+    };
 
-    // ELSE
-    builder.switch_to_block(else_block);
-    builder.seal_block(else_block);
-    let else_val = compile_expr(builder, else_b, vars, var_counter, module, struct_layouts);
-    let else_term = builder.is_unreachable() || expr_has_return(else_b);
-    if !else_term {
-        if is_unit {
-            builder.ins().jump(exit_block, &[]);
-        } else {
-            let coerced = coerce_val(builder, else_val, cranelift_ty);
-            builder.ins().jump(exit_block, &[coerced]);
-        }
-    }
+    let then_term = compile_branch(then_block, then_b);
+    let else_term = compile_branch(else_block, else_b);
 
     // EXIT
     builder.switch_to_block(exit_block);
     builder.seal_block(exit_block);
 
     if then_term && else_term {
-        let dummy = match cranelift_ty {
-            types::F32 => builder.ins().f32const(0.0),
-            types::F64 => builder.ins().f64const(0.0),
-            _ => builder.ins().iconst(cranelift_ty, 0),
+        let dummy = match res_repr {
+            ReprKind::Scalar(types::F32) => builder.ins().f32const(0.0),
+            ReprKind::Scalar(types::F64) => builder.ins().f64const(0.0),
+            ReprKind::Scalar(cl_ty) => builder.ins().iconst(cl_ty, 0),
+            ReprKind::Aggregate { .. } | ReprKind::Zst => builder.ins().iconst(types::I64, 0),
         };
         builder
             .ins()
             .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
         dummy
-    } else if is_unit {
+    } else if let Some(out_addr) = out_addr_opt {
+        out_addr
+    } else if matches!(res_repr, ReprKind::Zst) {
         builder.ins().iconst(types::I64, 0)
     } else {
         builder.block_params(exit_block)[0]
     }
 }
 
+fn compile_arm_body<M: Module>(
+    builder: &mut FunctionBuilder,
+    arm: &TypedMatchArm,
+    res_repr: ReprKind,
+    out_addr_opt: Option<Value>,
+    exit_block: cranelift_codegen::ir::Block,
+    cg: &mut CodegenCtx,
+    module: &mut M,
+) {
+    let is_unit = matches!(res_repr, ReprKind::Zst);
+    let mut arm_val = builder.ins().iconst(types::I64, 0);
+    let mut arm_terminated = false;
+    let body_len = arm.body.len();
+    for (idx, stmt) in arm.body.iter().enumerate() {
+        if builder.is_unreachable() || arm_terminated {
+            break;
+        }
+        cg.push_temp_scope();
+        arm_val = compile_expr(builder, stmt, cg, module);
+        if builder.is_unreachable() || expr_is_terminator(stmt) {
+            cg.pop_temp_scope_without_drop();
+            arm_terminated = true;
+        } else {
+            if idx + 1 == body_len && !is_unit {
+                cg.cancel_temp(arm_val);
+                if let TypedExpr::Ident(v, v_ty, _) = stmt {
+                    if !v_ty.is_copy() {
+                        cg.mark_moved(builder, v);
+                    }
+                }
+                if let (ReprKind::Aggregate { size, .. }, Some(out_addr)) = (res_repr, out_addr_opt) {
+                    emit_memcpy_bytes(builder, module, out_addr, arm_val, size);
+                }
+            }
+            cg.pop_temp_scope_and_drop(builder, module);
+        }
+    }
+
+    if !builder.is_unreachable() && !arm_terminated {
+        cg.pop_scope_and_drop(builder, module);
+        match res_repr {
+            ReprKind::Zst | ReprKind::Aggregate { .. } => {
+                builder.ins().jump(exit_block, &[]);
+            }
+            ReprKind::Scalar(cl_ty) => {
+                let coerced = coerce_val(builder, arm_val, cl_ty);
+                builder.ins().jump(exit_block, &[coerced]);
+            }
+        }
+    } else {
+        cg.pop_scope_without_drop();
+    }
+}
+
 pub fn compile_match<M: Module>(
     builder: &mut FunctionBuilder,
-    target: &Box<TypedExpr>,
-    arms: &Vec<TypedMatchArm>,
-    vars: &mut HashMap<String, Variable>,
-    var_counter: &mut usize,
+    target: &TypedExpr,
+    arms: &[TypedMatchArm],
+    cg: &mut CodegenCtx,
     ty: &Type,
     module: &mut M,
-    struct_layouts: &HashMap<String, StructLayout>,
 ) -> Value {
-    use cranelift_codegen::ir::condcodes::IntCC;
+    let res_repr = repr_kind(ty, &cg.meta.struct_layouts, cg.meta.enum_layouts);
 
-    let is_unit = *ty == Type::Unit;
-    let cranelift_ty = cranelift_type_of(ty);
+    let is_ref_target = matches!(target.ty(), Type::Ref(_) | Type::MutRef(_));
+    let unwrapped_target_ty = match target.ty() {
+        Type::Ref(inner) | Type::MutRef(inner) => *inner,
+        other => other,
+    };
 
-    let is_npo = match target.ty() {
-        Type::Enum(n) => n.starts_with("std_core_Option_ptr") || n.starts_with("std_core_Option_void") || n.contains("_ptr_") || n.contains("_void"),
+    let is_npo = match unwrapped_target_ty {
+        Type::Enum(n) => is_npo_enum(n),
         _ => false,
     };
 
-    if is_npo {
-        let raw_ptr_val = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
-        let exit_block = builder.create_block();
-        if !is_unit {
-            builder.append_block_param(exit_block, cranelift_ty);
+    let exit_block = builder.create_block();
+    let out_addr_opt = match res_repr {
+        ReprKind::Aggregate { size, align } => Some(alloc_stack_slot(builder, size, align).1),
+        ReprKind::Scalar(cl_ty) => {
+            builder.append_block_param(exit_block, cl_ty);
+            None
         }
+        ReprKind::Zst => None,
+    };
 
+    if is_npo {
+        let raw_ptr_val = compile_expr(builder, target, cg, module);
         for arm in arms {
             let arm_block = builder.create_block();
             let next_check_block = builder.create_block();
 
             if arm.variant_name.ends_with("None") || arm.tag == 1 {
                 let is_match = builder.ins().icmp_imm(IntCC::Equal, raw_ptr_val, 0);
-                builder.ins().brif(is_match, arm_block, &[], next_check_block, &[]);
+                builder
+                    .ins()
+                    .brif(is_match, arm_block, &[], next_check_block, &[]);
             } else if arm.variant_name.ends_with("Some") || arm.tag == 0 {
                 let is_match = builder.ins().icmp_imm(IntCC::NotEqual, raw_ptr_val, 0);
-                builder.ins().brif(is_match, arm_block, &[], next_check_block, &[]);
+                builder
+                    .ins()
+                    .brif(is_match, arm_block, &[], next_check_block, &[]);
             } else {
                 builder.ins().jump(arm_block, &[]);
             }
@@ -172,30 +265,18 @@ pub fn compile_match<M: Module>(
             builder.switch_to_block(arm_block);
             builder.seal_block(arm_block);
 
-            for (b_name, _b_ty) in &arm.bindings {
+            cg.push_scope();
+            for (b_name, b_ty) in &arm.bindings {
                 if b_name != "_" {
-                    let var = cranelift_frontend::Variable::from_u32(*var_counter as u32);
-                    *var_counter += 1;
+                    let var = cranelift_frontend::Variable::from_u32(cg.var_counter as u32);
+                    cg.var_counter += 1;
                     builder.declare_var(var, types::I64);
                     builder.def_var(var, raw_ptr_val);
-                    vars.insert(b_name.clone(), var);
+                    cg.bind_var(b_name, var, *b_ty);
                 }
             }
 
-            let mut arm_val = builder.ins().iconst(types::I64, 0);
-            for stmt in &arm.body {
-                arm_val = compile_expr(builder, stmt, vars, var_counter, module, struct_layouts);
-            }
-
-            let arm_ended_with_return = arm.body.last().map(|e| matches!(e, crate::ast::TypedExpr::Return(..))).unwrap_or(false);
-            if !builder.is_unreachable() && !arm_ended_with_return {
-                if is_unit {
-                    builder.ins().jump(exit_block, &[]);
-                } else {
-                    let coerced = coerce_val(builder, arm_val, cranelift_ty);
-                    builder.ins().jump(exit_block, &[coerced]);
-                }
-            }
+            compile_arm_body(builder, arm, res_repr, out_addr_opt, exit_block, cg, module);
 
             builder.switch_to_block(next_check_block);
             builder.seal_block(next_check_block);
@@ -206,27 +287,47 @@ pub fn compile_match<M: Module>(
         }
 
         let dummy_zero = builder.ins().iconst(types::I64, 0);
-        builder.ins().trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+        builder
+            .ins()
+            .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
 
         builder.switch_to_block(exit_block);
         builder.seal_block(exit_block);
 
-        if is_unit {
-            return dummy_zero;
+        return if let Some(out_addr) = out_addr_opt {
+            out_addr
+        } else if matches!(res_repr, ReprKind::Zst) {
+            dummy_zero
         } else {
-            return builder.block_params(exit_block)[0];
-        }
+            builder.block_params(exit_block)[0]
+        };
     }
 
-    let target_ptr = compile_expr(builder, target, vars, var_counter, module, struct_layouts);
+    let target_ptr = compile_expr(builder, target, cg, module);
+    let is_self_ident = matches!(target, TypedExpr::Ident(n, _, _) if n == "self");
+    let is_unwrap_fn = cg.func_name.ends_with("_unwrap");
+    let is_owned_target = !is_ref_target
+        && (!is_self_ident || is_unwrap_fn)
+        && !matches!(
+            target,
+            TypedExpr::FieldAccess(..) | TypedExpr::IndexAccess(..) | TypedExpr::Deref(..)
+        );
+    if is_owned_target {
+        cg.cancel_temp(target_ptr);
+        if let TypedExpr::Ident(v_name, v_ty, _) = target {
+            if !v_ty.is_copy() {
+                cg.mark_moved(builder, v_name);
+            }
+        }
+    }
+    let enum_variants = match unwrapped_target_ty {
+        Type::Enum(n) | Type::Obj(n) => find_enum_layout(n, cg.meta.enum_layouts).cloned(),
+        _ => None,
+    };
+
     let tag_val = builder
         .ins()
         .load(types::I64, MemFlags::new(), target_ptr, 0);
-
-    let exit_block = builder.create_block();
-    if !is_unit {
-        builder.append_block_param(exit_block, cranelift_ty);
-    }
 
     for arm in arms {
         let arm_block = builder.create_block();
@@ -242,40 +343,143 @@ pub fn compile_match<M: Module>(
                 .brif(is_match, arm_block, &[], next_check_block, &[]);
         }
 
-        // Compile Arm Block
         builder.switch_to_block(arm_block);
         builder.seal_block(arm_block);
 
-        for (idx, (b_name, _b_ty)) in arm.bindings.iter().enumerate() {
-            if b_name != "_" {
-                let offset = ((idx + 1) * 8) as i32;
-                let payload_val =
-                    builder
-                        .ins()
-                        .load(types::I64, MemFlags::new(), target_ptr, offset);
-                let var = cranelift_frontend::Variable::from_u32(*var_counter as u32);
-                *var_counter += 1;
-                builder.declare_var(var, types::I64);
-                builder.def_var(var, payload_val);
-                vars.insert(b_name.clone(), var);
+        cg.push_scope();
+        if arm.tag == -1 {
+            if is_owned_target {
+                emit_drop_for_value(
+                    builder,
+                    target_ptr,
+                    &target.ty(),
+                    &cg.meta.known_drop_fns,
+                    &cg.meta.struct_layouts,
+                    cg.meta.enum_layouts,
+                    module,
+                );
+            }
+        } else {
+            let variant_payload_tys = enum_variants
+                .as_ref()
+                .and_then(|vs| vs.iter().find(|(_, tag, _)| *tag == arm.tag))
+                .map(|(_, _, pts)| pts.as_slice());
+            let payload_tys_for_layout: Vec<Type> = variant_payload_tys
+                .map(|s| s.to_vec())
+                .unwrap_or_else(|| arm.bindings.iter().map(|(_, t)| *t).collect());
+            let (_, _, offsets) = enum_variant_offsets(
+                &payload_tys_for_layout,
+                &cg.meta.struct_layouts,
+                cg.meta.enum_layouts,
+            );
+
+            for (idx, (b_name, b_ty)) in arm.bindings.iter().enumerate() {
+                let off = offsets.get(idx).copied().unwrap_or(((idx + 1) * 8) as u32);
+                let field_addr = builder.ins().iadd_imm(target_ptr, off as i64);
+
+                if b_name != "_" {
+                    let var = cranelift_frontend::Variable::from_u32(cg.var_counter as u32);
+                    cg.var_counter += 1;
+                    if is_aggregate_type(b_ty, &cg.meta.struct_layouts, cg.meta.enum_layouts) {
+                        let (b_size, b_align) =
+                            size_and_align(b_ty, &cg.meta.struct_layouts, cg.meta.enum_layouts);
+                        let (_, b_slot_addr) = alloc_stack_slot(builder, b_size, b_align);
+                        emit_memcpy_bytes(builder, module, b_slot_addr, field_addr, b_size);
+                        builder.declare_var(var, types::I64);
+                        builder.def_var(var, b_slot_addr);
+                        cg.bind_var(b_name, var, *b_ty);
+                    } else {
+                        let target_c_ty = cranelift_type_of(b_ty);
+                        let payload_val =
+                            builder
+                                .ins()
+                                .load(target_c_ty, MemFlags::new(), target_ptr, off as i32);
+                        builder.declare_var(var, target_c_ty);
+                        builder.def_var(var, payload_val);
+                        cg.bind_var(b_name, var, *b_ty);
+                        cg.track_addr_taken_slot(builder, b_name, b_ty, target_c_ty, payload_val);
+                    }
+                    if is_owned_target {
+                        cg.track_var_if_droppable(builder, b_name, b_ty, true);
+                    }
+                } else if is_owned_target {
+                    let p_ty = variant_payload_tys
+                        .and_then(|pts| pts.get(idx).copied())
+                        .unwrap_or(*b_ty);
+                    if has_drop_glue(
+                        &p_ty,
+                        &cg.meta.known_drop_fns,
+                        &cg.meta.struct_layouts,
+                        cg.meta.enum_layouts,
+                    ) {
+                        let drop_arg = if is_aggregate_type(
+                            &p_ty,
+                            &cg.meta.struct_layouts,
+                            cg.meta.enum_layouts,
+                        ) {
+                            field_addr
+                        } else {
+                            builder.ins().load(
+                                cranelift_type_of(&p_ty),
+                                MemFlags::new(),
+                                target_ptr,
+                                off as i32,
+                            )
+                        };
+                        emit_drop_for_value(
+                            builder,
+                            drop_arg,
+                            &p_ty,
+                            &cg.meta.known_drop_fns,
+                            &cg.meta.struct_layouts,
+                            cg.meta.enum_layouts,
+                            module,
+                        );
+                    }
+                }
+            }
+
+            if is_owned_target {
+                if let Some(pts) = variant_payload_tys {
+                    for (idx, p_ty) in pts.iter().enumerate().skip(arm.bindings.len()) {
+                        if has_drop_glue(
+                            p_ty,
+                            &cg.meta.known_drop_fns,
+                            &cg.meta.struct_layouts,
+                            cg.meta.enum_layouts,
+                        ) {
+                            let off = offsets.get(idx).copied().unwrap_or(((idx + 1) * 8) as u32);
+                            let drop_arg = if is_aggregate_type(
+                                p_ty,
+                                &cg.meta.struct_layouts,
+                                cg.meta.enum_layouts,
+                            ) {
+                                builder.ins().iadd_imm(target_ptr, off as i64)
+                            } else {
+                                builder.ins().load(
+                                    cranelift_type_of(p_ty),
+                                    MemFlags::new(),
+                                    target_ptr,
+                                    off as i32,
+                                )
+                            };
+                            emit_drop_for_value(
+                                builder,
+                                drop_arg,
+                                p_ty,
+                                &cg.meta.known_drop_fns,
+                                &cg.meta.struct_layouts,
+                                cg.meta.enum_layouts,
+                                module,
+                            );
+                        }
+                    }
+                }
             }
         }
 
-        let mut arm_val = builder.ins().iconst(types::I64, 0);
-        for stmt in &arm.body {
-            arm_val = compile_expr(builder, stmt, vars, var_counter, module, struct_layouts);
-        }
+        compile_arm_body(builder, arm, res_repr, out_addr_opt, exit_block, cg, module);
 
-        if !builder.is_unreachable() {
-            if is_unit {
-                builder.ins().jump(exit_block, &[]);
-            } else {
-                let coerced = coerce_val(builder, arm_val, cranelift_ty);
-                builder.ins().jump(exit_block, &[coerced]);
-            }
-        }
-
-        // Switch to Next Check Block
         builder.switch_to_block(next_check_block);
         builder.seal_block(next_check_block);
     }
@@ -289,7 +493,9 @@ pub fn compile_match<M: Module>(
     builder.switch_to_block(exit_block);
     builder.seal_block(exit_block);
 
-    if is_unit {
+    if let Some(out_addr) = out_addr_opt {
+        out_addr
+    } else if matches!(res_repr, ReprKind::Zst) {
         builder.ins().iconst(types::I64, 0)
     } else {
         builder.block_params(exit_block)[0]

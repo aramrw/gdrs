@@ -1,12 +1,130 @@
 use crate::ast::{Expr, Span, Token};
 use chumsky::prelude::*;
 
+/// Lowers a `for item in iter_expr:` / `iter_expr.for_each(|item|: ...)` loop cleanly.
+/// Static/inline `start..end` ranges lower to a native register counter `while` loop
+/// with zero heap allocation; all other iterables use `into_iter()` + `next()`.
+pub fn lower_for_loop(
+    item_name: String,
+    iter_expr: Expr,
+    body_stmts: Vec<Expr>,
+    span: Span,
+) -> Expr {
+    static LOOP_COUNTER: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    let loop_id = LOOP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    if let Expr::Range(start, end, range_span) = iter_expr {
+        let idx_var = format!("__range_idx_{loop_id}");
+        let end_var = format!("__range_end_{loop_id}");
+
+        let mut while_body = Vec::with_capacity(body_stmts.len() + 2);
+        if item_name != "_" {
+            while_body.push(Expr::Let(
+                item_name,
+                None,
+                false,
+                Box::new(Expr::Ident(idx_var.clone(), range_span.clone())),
+                range_span.clone(),
+            ));
+        }
+        while_body.push(Expr::Assign(
+            idx_var.clone(),
+            Box::new(Expr::Add(
+                Box::new(Expr::Ident(idx_var.clone(), range_span.clone())),
+                Box::new(Expr::Int(1, range_span.clone())),
+                range_span.clone(),
+            )),
+            range_span.clone(),
+        ));
+        while_body.extend(body_stmts);
+
+        return Expr::Block(
+            vec![
+                Expr::Let(idx_var.clone(), None, true, start, range_span.clone()),
+                Expr::Let(end_var.clone(), None, false, end, range_span.clone()),
+                Expr::While(
+                    Box::new(Expr::LessThan(
+                        Box::new(Expr::Ident(idx_var, range_span.clone())),
+                        Box::new(Expr::Ident(end_var, range_span.clone())),
+                        range_span.clone(),
+                    )),
+                    Box::new(Expr::Block(while_body, span.clone())),
+                    span.clone(),
+                ),
+            ],
+            span,
+        );
+    }
+
+    let iter_var = format!("__iter_{loop_id}");
+    let mut arm_body = body_stmts;
+    arm_body.push(Expr::Bool(true, span.clone()));
+
+    let match_cond = Expr::Match(
+        Box::new(Expr::Call(
+            ".next".to_string(),
+            vec![Expr::Ident(iter_var.clone(), span.clone())],
+            span.clone(),
+        )),
+        vec![
+            crate::ast::MatchArm {
+                variant_name: "Some".to_string(),
+                bindings: vec![item_name],
+                body: arm_body,
+                span: span.clone(),
+            },
+            crate::ast::MatchArm {
+                variant_name: "_".to_string(),
+                bindings: vec![],
+                body: vec![Expr::Bool(false, span.clone())],
+                span: span.clone(),
+            },
+        ],
+        span.clone(),
+    );
+
+    let init_iter = match &iter_expr {
+        Expr::Call(name, _, _)
+            if {
+                let s = name.strip_prefix('.').unwrap_or(name);
+                s == "into_iter" || s.ends_with("_iter")
+            } =>
+        {
+            iter_expr
+        }
+        _ => Expr::Call(".into_iter".to_string(), vec![iter_expr], span.clone()),
+    };
+
+    Expr::Block(
+        vec![
+            Expr::Let(iter_var, None, true, Box::new(init_iter), span.clone()),
+            Expr::While(
+                Box::new(match_cond),
+                Box::new(Expr::Block(vec![], span.clone())),
+                span.clone(),
+            ),
+        ],
+        span,
+    )
+}
+
+/// Parses `.ident`, `.0`, or `.0.1` (lexed as Float after `.`) into field name segments.
+pub(crate) fn dot_field_segments_parser<'a>(
+) -> impl Parser<Token, Vec<String>, Error = Simple<Token>> + Clone + 'a {
+    just(Token::Dot).ignore_then(select! {
+        Token::Ident(s) => vec![s],
+        Token::Int(n) if n >= 0 => vec![n.to_string()],
+        Token::Float(raw) => raw.split('.').map(|s| s.to_string()).collect(),
+    })
+}
+
 pub fn math_parser<'a>(
     type_parser: impl Parser<Token, crate::ast::Type, Error = Simple<Token>> + Clone + 'a,
-) -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone + 'a {
+) -> BoxedParser<'a, Token, Expr, Simple<Token>> {
     // 1. Individual base literal & identifier parsers
     let int = select! { Token::Int(n) => n }.map_with_span(|n, span| Expr::Int(n, span));
-    let float_lit = select! { Token::Float(bits) => f64::from_bits(bits) }
+    let float_lit = select! { Token::Float(raw) => raw.parse::<f64>().unwrap() }
         .map_with_span(|f, span| Expr::Float(f, span));
     let boolean = select! { Token::Bool(b) => b }.map_with_span(|b, span| Expr::Bool(b, span));
     let string = select! { Token::String(s) => s }.map_with_span(|s, span| Expr::String(s, span));
@@ -267,6 +385,32 @@ pub fn math_parser<'a>(
             .then(math.clone())
             .map_with_span(|(params, body), span| Expr::Closure(params, Box::new(body), span));
 
+        let paren_or_tuple = just(Token::LParen)
+            .ignore_then(
+                math.clone()
+                    .then(
+                        just(Token::Comma)
+                            .ignore_then(
+                                math.clone()
+                                    .separated_by(just(Token::Comma))
+                                    .allow_trailing(),
+                            )
+                            .or_not(),
+                    )
+                    .or_not(),
+            )
+            .then_ignore(just(Token::RParen))
+            .map_with_span(|opt, span| match opt {
+                None => Expr::TupleInit(Vec::new(), span),
+                Some((first, None)) => first,
+                Some((first, Some(rest))) => {
+                    let mut elems = Vec::with_capacity(1 + rest.len());
+                    elems.push(first);
+                    elems.extend(rest);
+                    Expr::TupleInit(elems, span)
+                }
+            });
+
         let atom = closure_block
             .or(closure_expr)
             .or(string)
@@ -278,14 +422,13 @@ pub fn math_parser<'a>(
             .or(call_expr)
             .or(array_init)
             .or(ident)
-            .or(math
-                .clone()
-                .delimited_by(just(Token::LParen), just(Token::RParen)));
+            .or(paren_or_tuple)
+            .boxed();
 
         #[derive(Clone)]
         enum Postfix {
             DotCall(String, Vec<Expr>, Span),
-            Dot(String, Span),
+            Dot(Vec<String>, Span),
             Index(Expr, Span),
             Try(Span),
         }
@@ -295,9 +438,8 @@ pub fn math_parser<'a>(
             .then(parenthesized_args.clone())
             .map_with_span(|(method, args), span: Span| Postfix::DotCall(method, args, span));
 
-        let dot_post = just(Token::Dot)
-            .ignore_then(select! { Token::Ident(s) => s })
-            .map_with_span(|field, span: Span| Postfix::Dot(field, span));
+        let dot_post = dot_field_segments_parser()
+            .map_with_span(|fields, span: Span| Postfix::Dot(fields, span));
 
         let index_post = math
             .clone()
@@ -314,87 +456,31 @@ pub fn math_parser<'a>(
                     let span = target.span().start..method_span.end;
                     if method == "for_each" && args.len() == 1 {
                         if let Expr::Closure(params, closure_body, _) = &args[0] {
-                            static FOR_EACH_COUNTER: std::sync::atomic::AtomicUsize =
-                                std::sync::atomic::AtomicUsize::new(0);
-                            let loop_id =
-                                FOR_EACH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            let iter_var = format!("__iter_{}", loop_id);
                             let item_name =
                                 params.first().cloned().unwrap_or_else(|| "_".to_string());
-
                             let body_stmts = match closure_body.as_ref() {
                                 Expr::Block(stmts, _) => stmts.clone(),
                                 single => vec![single.clone()],
                             };
-
-                            let mut arm_body = body_stmts;
-                            arm_body.push(Expr::Bool(true, span.clone()));
-
-                            let match_cond = Expr::Match(
-                                Box::new(Expr::Call(
-                                    "next".to_string(),
-                                    vec![Expr::Ident(iter_var.clone(), span.clone())],
-                                    span.clone(),
-                                )),
-                                vec![
-                                    crate::ast::MatchArm {
-                                        variant_name: "Some".to_string(),
-                                        bindings: vec![item_name],
-                                        body: arm_body,
-                                        span: span.clone(),
-                                    },
-                                    crate::ast::MatchArm {
-                                        variant_name: "_".to_string(),
-                                        bindings: vec![],
-                                        body: vec![Expr::Bool(false, span.clone())],
-                                        span: span.clone(),
-                                    },
-                                ],
-                                span.clone(),
-                            );
-
-                            let iter_expr = match &target {
-                                Expr::Call(name, _, _) if name == "into_iter" || name.ends_with("_iter") => {
-                                    target.clone()
-                                }
-                                _ => Expr::Call(
-                                    "into_iter".to_string(),
-                                    vec![target],
-                                    span.clone(),
-                                ),
-                            };
-
-                            Expr::Block(
-                                vec![
-                                    Expr::Let(
-                                        iter_var,
-                                        None,
-                                        true,
-                                        Box::new(iter_expr),
-                                        span.clone(),
-                                    ),
-                                    Expr::While(
-                                        Box::new(match_cond),
-                                        Box::new(Expr::Block(vec![], span.clone())),
-                                        span.clone(),
-                                    ),
-                                ],
-                                span,
-                            )
+                            lower_for_loop(item_name, target, body_stmts, span)
                         } else {
                             let mut call_args = vec![target];
                             call_args.extend(args);
-                            Expr::Call(method, call_args, span)
+                            Expr::Call(format!(".{method}"), call_args, span)
                         }
                     } else {
                         let mut call_args = vec![target];
                         call_args.extend(args);
-                        Expr::Call(method, call_args, span)
+                        Expr::Call(format!(".{method}"), call_args, span)
                     }
                 }
-                Postfix::Dot(field, field_span) => {
-                    let span = target.span().start..field_span.end;
-                    Expr::FieldAccess(Box::new(target), field, span)
+                Postfix::Dot(fields, field_span) => {
+                    let mut cur = target;
+                    for field in fields {
+                        let span = cur.span().start..field_span.end;
+                        cur = Expr::FieldAccess(Box::new(cur), field, span);
+                    }
+                    cur
                 }
                 Postfix::Index(idx, idx_span) => {
                     let span = target.span().start..idx_span.end;
@@ -404,7 +490,8 @@ pub fn math_parser<'a>(
                     let span = target.span().start..try_span.end;
                     Expr::Try(Box::new(target), span)
                 }
-            });
+            })
+            .boxed();
 
         let neg = just(Token::Minus)
             .ignore_then(postfix_atom.clone())
@@ -426,7 +513,7 @@ pub fn math_parser<'a>(
                 Expr::Ref(Box::new(expr), opt_mut.is_some(), span)
             });
 
-        let unary = neg.or(not).or(deref).or(reference).or(postfix_atom);
+        let unary = neg.or(not).or(deref).or(reference).or(postfix_atom).boxed();
 
         let cast = unary
             .then(
@@ -437,7 +524,8 @@ pub fn math_parser<'a>(
             .foldl(|expr, target_ty| {
                 let span = expr.span();
                 Expr::Cast(Box::new(expr), target_ty, span)
-            });
+            })
+            .boxed();
 
         let factor =
             cast.clone()
@@ -445,7 +533,8 @@ pub fn math_parser<'a>(
                 .foldl(|lhs, (make_expr, rhs)| {
                     let span = lhs.span().start..rhs.span().end;
                     make_expr(Box::new(lhs), Box::new(rhs), span)
-                });
+                })
+                .boxed();
 
         let term =
             factor
@@ -454,7 +543,8 @@ pub fn math_parser<'a>(
                 .foldl(|lhs, (make_expr, rhs)| {
                     let span = lhs.span().start..rhs.span().end;
                     make_expr(Box::new(lhs), Box::new(rhs), span)
-                });
+                })
+                .boxed();
 
         let range_term = term
             .clone()
@@ -465,7 +555,8 @@ pub fn math_parser<'a>(
                     Expr::Range(Box::new(lhs), Box::new(rhs), span)
                 }
                 None => lhs,
-            });
+            })
+            .boxed();
 
         // 1. Shift operations (<<, >>) - Binds looser than +, - but tighter than comparisons
         let shift_term =
@@ -492,7 +583,8 @@ pub fn math_parser<'a>(
             .foldl(|lhs, (make_expr, rhs)| {
                 let span = lhs.span().start..rhs.span().end;
                 make_expr(Box::new(lhs), Box::new(rhs), span)
-            });
+            })
+            .boxed();
 
         comp.clone()
             .then(logic_op.then(comp).repeated())

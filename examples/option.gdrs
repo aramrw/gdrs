@@ -16,16 +16,16 @@ fn main():
 	log!("--- Testing Multi Imports with aliases ---")
 
 	let d1 = double_even(15)
-	log!("double_even(15).is_none():", d1.is_none())
+	log!("double_even(15).is_none(): {}", d1.is_none())
 
-	let none = None
-	log!("let none = None: ", none.is_none())
+	let none: Opt<i64> = None
+	log!("let none = None:  {}", none.is_none())
 
 	let some = Some(1)
-	log!("some.is_some(): ", some.is_some())
-	log!(some.unwrap())
+	log!("some.is_some():  {}", some.is_some())
+	log!("{}", some.unwrap())
 
-	let res = Res::Ok(777)
-	log!("res.unwrap():", res.unwrap())
+	let res: Res<i64, i64> = Res::Ok(777)
+	log!("res.unwrap(): {}", res.unwrap())
 
-	log!(now.us())
+	log!("{}", now.us())

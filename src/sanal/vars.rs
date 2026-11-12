@@ -4,6 +4,7 @@
 use crate::{
     ast::{intern_str, Expr, Span, Type, TypedExpr},
     sanal::{
+        compat::{extract_root_var, is_type_compatible, mark_expr_moved_if_ident},
         types::{type_check_expr, TypeCtx},
         ScopeStack, SemanticError,
     },
@@ -27,7 +28,26 @@ pub fn type_check_ident<'a>(
                 span: span.clone(),
             });
         }
-        Some(TypedExpr::Ident(name.to_string(), info.ty, span.clone()))
+        if let Some((true, holder)) = scopes.active_borrow(name) {
+            errors.push(SemanticError {
+                code: "E0502",
+                message: format!(
+                    "Cannot use `{name}` because it is mutably borrowed by `{holder}`"
+                ),
+                label: format!("Use of `{name}` while mutably borrowed"),
+                secondary_label: None,
+                help: None,
+                span: span.clone(),
+            });
+        }
+        let info_ty = info.ty;
+        let resolved_ty = type_ctx.infer.borrow_mut().resolve(info_ty);
+        if resolved_ty != info_ty {
+            if let Some(m_info) = scopes.lookup_mut(name) {
+                m_info.ty = resolved_ty;
+            }
+        }
+        Some(TypedExpr::Ident(name.to_string(), resolved_ty, span.clone()))
     } else if let Some((enum_part, variant_part)) = name.split_once("::") {
         let normalized_enum = match enum_part {
             "Opt" | "Option" => "std_core_Option",
@@ -80,7 +100,7 @@ pub fn type_check_ident<'a>(
             None
         }
     } else {
-        if name == "None" || name == "Some" {
+        if name == "None" {
             if let Some(te) = super::objects::type_check_enum_construct(
                 scopes,
                 errors,
@@ -102,17 +122,36 @@ pub fn type_check_ident<'a>(
                 "Res" | "Result" => "std_core_Result",
                 other => other,
             };
-            if let Some(te) = super::objects::type_check_enum_construct(
-                scopes,
-                errors,
-                type_ctx,
-                norm_enum,
-                variant_part,
-                &[],
-                span,
-            ) {
-                if matches!(te, TypedExpr::EnumConstruct(..)) {
-                    return Some(te);
+            let is_zero_arg_variant = type_ctx
+                .get_enum(norm_enum)
+                .and_then(|(_, v)| v.get(variant_part).map(|(_, pts)| pts.is_empty()))
+                .unwrap_or_else(|| {
+                    let mono = type_ctx.mono.borrow();
+                    mono.enum_templates
+                        .get(norm_enum)
+                        .or_else(|| {
+                            mono.enum_templates
+                                .iter()
+                                .find(|(k, _)| k.as_str() == norm_enum || k.ends_with(&format!("_{norm_enum}")))
+                                .map(|(_, d)| d)
+                        })
+                        .and_then(|d| d.variants.iter().find(|v| v.name == variant_part))
+                        .map(|v| v.payload_types.is_empty())
+                        .unwrap_or(false)
+                });
+            if is_zero_arg_variant {
+                if let Some(te) = super::objects::type_check_enum_construct(
+                    scopes,
+                    errors,
+                    type_ctx,
+                    norm_enum,
+                    variant_part,
+                    &[],
+                    span,
+                ) {
+                    if matches!(te, TypedExpr::EnumConstruct(..)) {
+                        return Some(te);
+                    }
                 }
             }
         }
@@ -165,6 +204,48 @@ pub fn type_check_ident<'a>(
     }
 }
 
+/// Validates a reference assignment/binding (`name = expr`) and returns `(Option<(target_var, is_mut)>, from_caller)`.
+fn resolve_ref_borrow_info(
+    scopes: &ScopeStack,
+    errors: &mut Vec<SemanticError>,
+    holder_name: &str,
+    dest_ty: &Type,
+    typed_val: &TypedExpr,
+    span: &Span,
+    is_assign: bool,
+) -> (Option<(String, bool)>, bool) {
+    match typed_val {
+        TypedExpr::Ref(inner, ref_is_mut, _, _) => {
+            if let Some(target_var) = extract_root_var(inner) {
+                let target_owned = target_var.to_string();
+                let from_caller = scopes.lookup(&target_owned).is_some_and(|i| i.from_caller);
+                (Some((target_owned, *ref_is_mut)), from_caller)
+            } else {
+                let action = if is_assign { "assignment to" } else { "binding" };
+                errors.push(SemanticError {
+                    code: "E0716",
+                    message: format!(
+                        "Temporary value dropped while borrowed in {action} `{holder_name}`"
+                    ),
+                    label: "Creates a dangling reference to a temporary".to_string(),
+                    secondary_label: None,
+                    help: Some("Bind the value to a `let` variable before borrowing it".to_string()),
+                    span: span.clone(),
+                });
+                (None, false)
+            }
+        }
+        TypedExpr::Ident(src_name, _, _) if matches!(dest_ty, Type::Ref(_) | Type::MutRef(_)) => {
+            let from_caller = scopes.lookup(src_name).is_some_and(|i| i.from_caller);
+            let inherited = scopes
+                .borrow_target(src_name)
+                .map(|tgt| (tgt, matches!(dest_ty, Type::MutRef(_))));
+            (inherited, from_caller)
+        }
+        _ => (None, false),
+    }
+}
+
 pub fn type_check_let<'a>(
     scopes: &mut ScopeStack,
     errors: &mut Vec<SemanticError>,
@@ -175,27 +256,39 @@ pub fn type_check_let<'a>(
     value: &Expr,
     span: &Span,
 ) -> Option<TypedExpr> {
-    let typed_val = type_check_expr(scopes, errors, type_ctx, value)?;
-    let inferred_ty = typed_val.ty();
+    let resolved_explicit = explicit_ty.map(|t| type_ctx.resolve_type_annotation(*t));
+    let mut let_ctx = type_ctx.clone();
+    if resolved_explicit.is_some() {
+        let_ctx.current_expected_type = resolved_explicit;
+    }
+    let mut typed_val = type_check_expr(scopes, errors, &let_ctx, value)?;
+    if let Some(Type::Vec(expected_elem)) = resolved_explicit {
+        if let TypedExpr::ArrayInit(elems, Type::Array(elem_var, 0), arr_span) = typed_val {
+            let _ = type_ctx.infer.borrow_mut().unify(*expected_elem, *elem_var);
+            typed_val = TypedExpr::ArrayInit(elems, Type::Vec(expected_elem), arr_span);
+        }
+    } else if resolved_explicit.is_none() && is_mutable {
+        if let TypedExpr::ArrayInit(elems, Type::Array(elem_ty, 0), arr_span) = typed_val {
+            typed_val = TypedExpr::ArrayInit(elems, Type::Vec(elem_ty), arr_span);
+        }
+    }
+    let inferred_ty = type_ctx.infer.borrow_mut().resolve(typed_val.ty());
 
-    let mut final_ty = if let Some(annotated) = explicit_ty {
-        let compatible = match (annotated, &inferred_ty) {
-            (Type::I32 | Type::Int, Type::I32 | Type::Int) => true,
-            (Type::F32 | Type::Float, Type::F32 | Type::Float) => true,
-            (Type::F32 | Type::Float, Type::I32 | Type::Int) => true,
-            (Type::Vec(_), Type::Obj(s)) | (Type::Obj(s), Type::Vec(_)) => {
-                s.contains("Vec")
+    let final_ty = if let Some(ref annotated) = resolved_explicit {
+        let unify_res = type_ctx.infer.borrow_mut().unify(*annotated, inferred_ty);
+        let resolved_inferred = type_ctx.infer.borrow_mut().resolve(inferred_ty);
+        let resolved_annotated = type_ctx.infer.borrow_mut().resolve(*annotated);
+        if let Type::DynTrait(t_name) = resolved_annotated {
+            if !matches!(resolved_inferred, Type::DynTrait(_)) {
+                type_ctx.validate_dyn_coercion(&resolved_inferred, t_name, span, errors);
+                typed_val = TypedExpr::CoerceToDyn(Box::new(typed_val), t_name, span.clone());
             }
-            (Type::Obj(s1), Type::Obj(s2)) => {
-                s1 == s2 || (s1.contains("Vec") && s2.contains("Vec"))
-            }
-            (a, b) => a == b,
-        };
-        if !compatible {
+        }
+        if unify_res.is_err() && !is_type_compatible(&resolved_annotated, &resolved_inferred) {
             errors.push(SemanticError {
                 code: "E0308",
                 message: format!(
-                    "Cannot assign value of type `{inferred_ty:?}` to variable '{name}' declared as `{annotated:?}`"
+                    "Cannot assign value of type `{resolved_inferred:?}` to variable '{name}' declared as `{resolved_annotated:?}`"
                 ),
                 label: "Type mismatch in let binding".to_string(),
                 secondary_label: None,
@@ -203,34 +296,173 @@ pub fn type_check_let<'a>(
                 span: span.clone(),
             });
         }
-        annotated.clone()
+        resolved_annotated
     } else {
-        let mut ty = inferred_ty;
-        if is_mutable {
-            if ty == Type::Str {
-                ty = Type::String;
-            }
-        } else {
-            if ty == Type::String {
-                ty = Type::Str;
-            }
-        }
-        ty
+        inferred_ty
     };
 
-    if let TypedExpr::Ident(rhs_name, rhs_ty, _) = &typed_val {
-        if !rhs_ty.is_copy() {
-            scopes.mark_moved(rhs_name);
-        }
+    let (borrow_info, from_caller) = resolve_ref_borrow_info(
+        scopes,
+        errors,
+        name,
+        &final_ty,
+        &typed_val,
+        span,
+        false,
+    );
+    if let Some((target_owned, ref_is_mut)) = borrow_info {
+        scopes.add_borrow(name.to_string(), target_owned, ref_is_mut);
     }
 
-    scopes.declare(name.to_string(), is_mutable, final_ty.clone());
+    type_ctx.check_not_moved_from_projection(&typed_val, errors);
+    mark_expr_moved_if_ident(scopes, errors, &typed_val);
+
+    scopes.declare_with_caller(name.to_string(), is_mutable, final_ty.clone(), from_caller);
 
     Some(TypedExpr::Let(
         name.to_string(),
         is_mutable,
         Box::new(typed_val),
         final_ty,
+        span.clone(),
+    ))
+}
+
+fn bind_tuple_pattern(
+    scopes: &mut ScopeStack,
+    errors: &mut Vec<SemanticError>,
+    type_ctx: &TypeCtx<'_>,
+    pat: &crate::ast::TuplePattern,
+    ty: Type,
+) -> crate::ast::TypedTuplePattern {
+    let resolved_ty = type_ctx.infer.borrow_mut().resolve(ty);
+    match pat {
+        crate::ast::TuplePattern::Ident {
+            name,
+            is_mutable,
+            span,
+        } => {
+            if name != "_" {
+                scopes.declare(name.clone(), *is_mutable, resolved_ty);
+            }
+            crate::ast::TypedTuplePattern::Ident {
+                name: name.clone(),
+                is_mutable: *is_mutable,
+                ty: resolved_ty,
+                span: span.clone(),
+            }
+        }
+        crate::ast::TuplePattern::Tuple(subpats, span) => {
+            let elem_tys: Vec<Type> = match resolved_ty {
+                Type::Tuple(elems) => {
+                    if elems.len() != subpats.len() {
+                        errors.push(SemanticError {
+                            code: "E0308",
+                            message: format!(
+                                "Mismatched tuple destructuring arity: expected {} element(s), found {}",
+                                subpats.len(),
+                                elems.len()
+                            ),
+                            label: "Mismatched tuple length".to_string(),
+                            secondary_label: None,
+                            help: None,
+                            span: span.clone(),
+                        });
+                    }
+                    elems.to_vec()
+                }
+                Type::Unit if subpats.is_empty() => Vec::new(),
+                Type::Infer(_) => {
+                    let vars: Vec<Type> = subpats
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| {
+                            let sp = match p {
+                                crate::ast::TuplePattern::Ident { span, .. }
+                                | crate::ast::TuplePattern::Tuple(_, span) => span.clone(),
+                            };
+                            type_ctx
+                                .infer
+                                .borrow_mut()
+                                .fresh(sp, &format!("tuple pattern element {i}"))
+                        })
+                        .collect();
+                    let tup = Type::Tuple(crate::ast::intern_tuple(&vars));
+                    let _ = type_ctx.infer.borrow_mut().unify(resolved_ty, tup);
+                    vars
+                }
+                other => {
+                    errors.push(SemanticError {
+                        code: "E0308",
+                        message: format!(
+                            "Mismatched types in tuple destructuring: expected a tuple, found `{other:?}`"
+                        ),
+                        label: "Expected tuple type".to_string(),
+                        secondary_label: None,
+                        help: None,
+                        span: span.clone(),
+                    });
+                    vec![Type::Int; subpats.len()]
+                }
+            };
+
+            let mut typed_subs = Vec::with_capacity(subpats.len());
+            for (i, sub) in subpats.iter().enumerate() {
+                let ety = elem_tys.get(i).copied().unwrap_or(Type::Int);
+                typed_subs.push(bind_tuple_pattern(scopes, errors, type_ctx, sub, ety));
+            }
+            crate::ast::TypedTuplePattern::Tuple(typed_subs, resolved_ty, span.clone())
+        }
+    }
+}
+
+pub fn type_check_let_tuple<'a>(
+    scopes: &mut ScopeStack,
+    errors: &mut Vec<SemanticError>,
+    type_ctx: &TypeCtx<'a>,
+    pat: &crate::ast::TuplePattern,
+    explicit_ty: Option<&Type>,
+    value: &Expr,
+    span: &Span,
+) -> Option<TypedExpr> {
+    let resolved_explicit = explicit_ty.map(|t| type_ctx.resolve_type_annotation(*t));
+    let mut let_ctx = type_ctx.clone();
+    if resolved_explicit.is_some() {
+        let_ctx.current_expected_type = resolved_explicit;
+    }
+    let typed_val = type_check_expr(scopes, errors, &let_ctx, value)?;
+    let inferred_ty = type_ctx.infer.borrow_mut().resolve(typed_val.ty());
+
+    let final_ty = if let Some(annotated) = resolved_explicit {
+        let unify_res = type_ctx.infer.borrow_mut().unify(annotated, inferred_ty);
+        let resolved_inferred = type_ctx.infer.borrow_mut().resolve(inferred_ty);
+        let resolved_annotated = type_ctx.infer.borrow_mut().resolve(annotated);
+        if unify_res.is_err() && !is_type_compatible(&resolved_annotated, &resolved_inferred) {
+            errors.push(SemanticError {
+                code: "E0308",
+                message: format!(
+                    "Cannot destructure value of type `{resolved_inferred:?}` as `{resolved_annotated:?}`"
+                ),
+                label: "Type mismatch in tuple let binding".to_string(),
+                secondary_label: None,
+                help: None,
+                span: span.clone(),
+            });
+        }
+        resolved_annotated
+    } else {
+        inferred_ty
+    };
+
+    type_ctx.check_not_moved_from_projection(&typed_val, errors);
+    mark_expr_moved_if_ident(scopes, errors, &typed_val);
+
+    let typed_pat = bind_tuple_pattern(scopes, errors, type_ctx, pat, final_ty);
+
+    Some(TypedExpr::LetTuple(
+        typed_pat,
+        final_ty,
+        Box::new(typed_val),
         span.clone(),
     ))
 }
@@ -243,16 +475,25 @@ pub fn type_check_assign<'a>(
     value: &Expr,
     span: &Span,
 ) -> Option<TypedExpr> {
-    let typed_val = type_check_expr(scopes, errors, type_ctx, value)?;
+    let mut typed_val = type_check_expr(scopes, errors, type_ctx, value)?;
 
-    if let TypedExpr::Ident(rhs_name, rhs_ty, _) = &typed_val {
-        if !rhs_ty.is_copy() {
-            scopes.mark_moved(rhs_name);
-        }
-    }
+    type_ctx.check_not_moved_from_projection(&typed_val, errors);
+    mark_expr_moved_if_ident(scopes, errors, &typed_val);
 
     let info_opt = scopes.lookup(name).map(|i| (i.is_mutable, i.ty));
     if let Some((is_mutable, mut var_ty)) = info_opt {
+        if let Some((_, holder)) = scopes.active_borrow(name) {
+            errors.push(SemanticError {
+                code: "E0506",
+                message: format!(
+                    "Cannot assign to `{name}` because it is borrowed by `{holder}`"
+                ),
+                label: format!("Assignment to `{name}` occurs here while borrowed"),
+                secondary_label: None,
+                help: None,
+                span: span.clone(),
+            });
+        }
         scopes.mark_active(name);
         if !is_mutable {
             errors.push(SemanticError {
@@ -267,16 +508,19 @@ pub fn type_check_assign<'a>(
             });
         }
 
-        let val_ty = typed_val.ty();
+        let val_ty = type_ctx.infer.borrow_mut().resolve(typed_val.ty());
 
         if let Type::Vec(elem_ty) = &val_ty {
-            var_ty = Type::Vec(*elem_ty);
+            let _ = type_ctx.infer.borrow_mut().unify(var_ty, Type::Vec(*elem_ty));
+            var_ty = type_ctx.infer.borrow_mut().resolve(var_ty);
         } else if let TypedExpr::Call(c_name, c_args, _, _) = &typed_val {
             if c_name.ends_with("push") && c_args.len() >= 2 {
                 let pushed_ty = c_args[1].ty();
-                if pushed_ty != Type::Int && pushed_ty != Type::Unit {
-                    var_ty = Type::Vec(crate::ast::intern_type(pushed_ty));
-                }
+                let _ = type_ctx
+                    .infer
+                    .borrow_mut()
+                    .unify(var_ty, Type::Vec(crate::ast::intern_type(pushed_ty)));
+                var_ty = type_ctx.infer.borrow_mut().resolve(var_ty);
             }
         } else if let Type::Obj(s) = &val_ty {
             let clean = s.split('_').last().unwrap_or(s);
@@ -287,32 +531,38 @@ pub fn type_check_assign<'a>(
             }
         }
 
-        let is_compatible = match (&var_ty, &val_ty) {
-            (a, b) if a == b => true,
-            (Type::I32 | Type::Int, Type::I32 | Type::Int) => true,
-            (Type::F32 | Type::Float, Type::F32 | Type::Float) => true,
-            (Type::F32 | Type::Float, Type::I32 | Type::Int) => true,
-            (Type::Vec(_), Type::Obj(s)) | (Type::Obj(s), Type::Vec(_)) => {
-                s.contains("Vec")
+        if let Type::DynTrait(t_name) = var_ty {
+            if !matches!(val_ty, Type::DynTrait(_)) {
+                type_ctx.validate_dyn_coercion(&val_ty, t_name, &typed_val.span(), errors);
+                typed_val = TypedExpr::CoerceToDyn(Box::new(typed_val), t_name, span.clone());
             }
-            (Type::F32 | Type::Float | Type::I32 | Type::Int, Type::Generic(_)) => true,
-            (Type::Generic(_), Type::F32 | Type::Float | Type::I32 | Type::Int) => true,
-            (Type::Generic(_), Type::Generic(_)) => true,
-            _ => false,
-        };
+        }
+        let unify_res = type_ctx.infer.borrow_mut().unify(var_ty, val_ty);
+        let resolved_var = type_ctx.infer.borrow_mut().resolve(var_ty);
+        let resolved_val = type_ctx.infer.borrow_mut().resolve(val_ty);
 
-        if !is_compatible {
+        if unify_res.is_err() && !is_type_compatible(&resolved_var, &resolved_val) {
             errors.push(SemanticError {
                 code: "E0308",
                 message: format!(
                     "Cannot assign type `{:?}` to variable '{name}' of type `{:?}`",
-                    val_ty, var_ty
+                    resolved_val, resolved_var
                 ),
                 label: "Type mismatch".to_string(),
                 secondary_label: None,
                 help: None,
                 span: span.clone(),
             });
+        }
+
+        let (borrow_info, from_caller) =
+            resolve_ref_borrow_info(scopes, errors, name, &var_ty, &typed_val, span, true);
+        scopes.remove_borrow(name);
+        if let Some((target_owned, ref_is_mut)) = borrow_info {
+            scopes.add_borrow(name.to_string(), target_owned, ref_is_mut);
+        }
+        if let Some(info) = scopes.lookup_mut(name) {
+            info.from_caller = from_caller;
         }
     } else {
         errors.push(SemanticError {

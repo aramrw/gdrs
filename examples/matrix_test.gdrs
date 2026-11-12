@@ -14,7 +14,7 @@ impl Display for Matrix:
 			for c in 0..self.cols:
 				let idx = r * self.cols + c
 				let val = self.data[idx]
-				res = res.push_str(format!(val))
+				res = res.push_str(format!("{}", val))
 				res = res.push_str(" ")
 			res = res.push_str("]\n")
 		res = res.push_str("]")
@@ -124,26 +124,3 @@ impl Matrix:
 		return Matrix{ rows: self.rows, cols: self.cols, data: res_data }
 
 fn main():
-    // 2. An 8x8 Board Array (64 elements representing initial setup)
-    let board_data: Vec<f64> = Vec::from_slice([
-        // Row 0: Black Power Pieces
-        -4.0, -2.0, -3.0, -5.0, -6.0, -3.0, -2.0, -4.0,
-        // Row 1: Black Pawns
-        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,
-        // Rows 2-5: Empty Squares
-         0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-         0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-         0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-         0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
-        // Row 6: White Pawns
-         1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,
-        // Row 7: White Power Pieces
-         4.0,  2.0,  3.0,  5.0,  6.0,  3.0,  2.0,  4.0
-    ])
-
-    // 3. Instantiate your Matrix (1 row with 64 features, or an 8x8 matrix)
-    // For feeding into neural network layers, a 1x64 vector is standard:
-    let board_input = Matrix{ rows: 1, cols: 64, data: board_data }
-
-    log!("--- Chess Board Input Matrix ---")
-    log!(board_input)

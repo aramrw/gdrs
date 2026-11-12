@@ -1,0 +1,10 @@
+use std::fs::{read_dir, DirEntry}
+
+fn main():
+	log!("--- Reading Directory with unwrap() ---")
+	let entries = read_dir("examples").unwrap()
+	let mut i = 0
+	while i < entries.len:
+		let entry = &entries[i]
+		log!("Entry:  {}", entry.file_name())
+		i = i + 1
