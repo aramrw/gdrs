@@ -10,8 +10,13 @@ pub mod macros;
 pub mod mono;
 pub mod objects;
 pub mod refs;
+pub mod resolve;
+pub mod scope;
 pub mod types;
 pub mod vars;
+
+pub use scope::{ScopeStack, VarInfo};
+use resolve::{resolve_type, substitute_self_type};
 
 use crate::{
     ast::{intern_str, FuncDecl, Param, Program, Span, Type, TypedExpr, TypedFuncDecl, TypedProgram},
@@ -40,191 +45,6 @@ pub struct StructLayout {
     pub vis: crate::ast::Visibility,
     pub module_path: Vec<String>,
     pub field_vis: HashMap<String, crate::ast::Visibility>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct VarInfo {
-    pub is_mutable: bool,
-    pub ty: Type,
-    pub is_moved: bool,
-    pub from_caller: bool,
-}
-
-/// A scope stack (symbol table) to manage nested lexical scopes, variable types, and mutability flags.
-#[derive(Debug)]
-pub struct ScopeStack {
-    scopes: Vec<HashMap<String, VarInfo>>,
-    /// Active local borrows per lexical scope: `(holder_var, borrowed_target_var, is_mut)`.
-    borrows: Vec<Vec<(String, String, bool)>>,
-}
-
-impl Default for ScopeStack {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ScopeStack {
-    pub fn new() -> Self {
-        Self {
-            scopes: vec![HashMap::new()],
-            borrows: vec![Vec::new()],
-        }
-    }
-
-    /// Pushes a new child lexical scope.
-    pub fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
-        self.borrows.push(Vec::new());
-    }
-
-    /// Pops the innermost lexical scope upon exiting a block/function.
-    pub fn pop_scope(&mut self) {
-        self.scopes.pop();
-        self.borrows.pop();
-    }
-
-    /// Declares a variable in the innermost (current) scope.
-    pub fn declare(&mut self, name: String, is_mutable: bool, ty: Type) {
-        self.declare_with_caller(name, is_mutable, ty, false);
-    }
-
-    /// Declares a variable with an explicit flag indicating whether a reference originates from a caller parameter.
-    pub fn declare_with_caller(&mut self, name: String, is_mutable: bool, ty: Type, from_caller: bool) {
-        if let Some(current_scope) = self.scopes.last_mut() {
-            current_scope.insert(
-                name,
-                VarInfo {
-                    is_mutable,
-                    ty,
-                    is_moved: false,
-                    from_caller,
-                },
-            );
-        }
-    }
-
-    /// Returns true if `name` is declared in the innermost lexical scope.
-    pub fn current_scope_contains(&self, name: &str) -> bool {
-        self.scopes.last().is_some_and(|s| s.contains_key(name))
-    }
-
-    pub fn mark_moved(&mut self, name: &str) {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(info) = scope.get_mut(name) {
-                if !info.ty.is_copy() {
-                    info.is_moved = true;
-                }
-                return;
-            }
-        }
-    }
-
-    pub fn mark_active(&mut self, name: &str) {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(info) = scope.get_mut(name) {
-                info.is_moved = false;
-                return;
-            }
-        }
-    }
-
-    /// Looks up variable info from innermost scope up to parent scopes.
-    pub fn lookup(&self, name: &str) -> Option<&VarInfo> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(info) = scope.get(name) {
-                return Some(info);
-            }
-        }
-        None
-    }
-
-    /// Looks up mutable variable info from innermost scope up to parent scopes.
-    pub fn lookup_mut(&mut self, name: &str) -> Option<&mut VarInfo> {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(info) = scope.get_mut(name) {
-                return Some(info);
-            }
-        }
-        None
-    }
-
-    /// Records an active local borrow (`holder` borrowing `target`) in the current scope.
-    pub fn add_borrow(&mut self, holder: String, target: String, is_mut: bool) {
-        if let Some(current) = self.borrows.last_mut() {
-            current.push((holder, target, is_mut));
-        }
-    }
-
-    /// Removes any active local borrow entries owned by `holder` (e.g., on reference reassignment).
-    pub fn remove_borrow(&mut self, holder: &str) {
-        for scope_borrows in &mut self.borrows {
-            scope_borrows.retain(|(h, _, _)| h != holder);
-        }
-    }
-
-    /// Returns the most recent target variable borrowed by `holder`, if any.
-    pub fn borrow_target(&self, holder: &str) -> Option<String> {
-        for scope_borrows in self.borrows.iter().rev() {
-            for (h, target, _) in scope_borrows.iter().rev() {
-                if h == holder {
-                    return Some(target.clone());
-                }
-            }
-        }
-        None
-    }
-
-    /// Returns `Some((is_mut, holder_name))` if `target` currently has any active local borrow.
-    /// Prefers returning a mutable borrow if one exists.
-    pub fn active_borrow(&self, target: &str) -> Option<(bool, String)> {
-        let mut imm_holder: Option<String> = None;
-        for scope_borrows in &self.borrows {
-            for (holder, t, is_mut) in scope_borrows {
-                if t == target {
-                    if *is_mut {
-                        return Some((true, holder.clone()));
-                    }
-                    if imm_holder.is_none() {
-                        imm_holder = Some(holder.clone());
-                    }
-                }
-            }
-        }
-        imm_holder.map(|h| (false, h))
-    }
-
-    /// Snapshots move flags across all active scopes for flow-sensitive branching.
-    pub fn snapshot_moves(&self) -> Vec<HashMap<String, bool>> {
-        self.scopes
-            .iter()
-            .map(|s| s.iter().map(|(k, v)| (k.clone(), v.is_moved)).collect())
-            .collect()
-    }
-
-    /// Restores previously snapshotted move flags across scopes.
-    pub fn restore_moves(&mut self, snap: &[HashMap<String, bool>]) {
-        for (scope, saved) in self.scopes.iter_mut().zip(snap.iter()) {
-            for (k, &was_moved) in saved {
-                if let Some(info) = scope.get_mut(k) {
-                    info.is_moved = was_moved;
-                }
-            }
-        }
-    }
-
-    /// Applies any moves recorded in `branch` onto the current scopes.
-    pub fn merge_moves(&mut self, branch: &[HashMap<String, bool>]) {
-        for (scope, br) in self.scopes.iter_mut().zip(branch.iter()) {
-            for (k, &moved_in_branch) in br {
-                if moved_in_branch {
-                    if let Some(info) = scope.get_mut(k) {
-                        info.is_moved = true;
-                    }
-                }
-            }
-        }
-    }
 }
 
 pub fn check_semantics(
@@ -678,21 +498,6 @@ pub fn check_semantics(
                                 if rp.name == "self" {
                                     continue;
                                 }
-fn substitute_self_type(ty: Type, target_ty: Type) -> Type {
-    match ty {
-        Type::Obj("Self") => target_ty,
-        Type::Ref(inner) => Type::Ref(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),
-        Type::MutRef(inner) => Type::MutRef(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),
-        Type::Ptr(inner) => Type::Ptr(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),
-        Type::Tuple(tys) => Type::Tuple(Box::leak(
-            tys.iter()
-                .map(|t| substitute_self_type(*t, target_ty))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        )),
-        other => other,
-    }
-}
 
                                 let rp_ty = if rp.ty == Type::Unit {
                                     target_ty
@@ -935,75 +740,3 @@ fn substitute_self_type(ty: Type, target_ty: Type) -> Type {
     }
 }
 
-fn resolve_type(
-    ty: Type,
-    enum_names: &std::collections::HashSet<String>,
-    span: Span,
-    errors: &mut Vec<SemanticError>,
-) -> Type {
-    match ty {
-        Type::Obj("Result_bare") | Type::Obj("std_core_Result_bare") => {
-            errors.push(SemanticError {
-                code: "E0107",
-                message: "Type `Result` requires generic parameter(s), e.g. `Result<T>` or `Result<T, E>`".to_string(),
-                label: "Missing generic parameter for `Result`".to_string(),
-                secondary_label: None,
-                help: Some("Specify generic types: `Result<T>` or `Result<T, E>`".to_string()),
-                span,
-            });
-            Type::Enum(intern_str("std_core_Result"))
-        }
-        Type::Obj("Option_bare") | Type::Obj("std_core_Option_bare") => {
-            errors.push(SemanticError {
-                code: "E0107",
-                message: "Type `Option` requires a generic parameter, e.g. `Option<T>`".to_string(),
-                label: "Missing generic parameter for `Option`".to_string(),
-                secondary_label: None,
-                help: Some("Specify generic type: `Option<T>`".to_string()),
-                span,
-            });
-            Type::Enum(intern_str("std_core_Option"))
-        }
-        Type::Obj("Option") | Type::Obj("Opt") => Type::Enum(intern_str("std_core_Option")),
-        Type::Obj("Result") | Type::Obj("Res") => Type::Enum(intern_str("std_core_Result")),
-        Type::Obj(name) if name == "Vec" || name == "std_vec_Vec" => {
-            Type::Vec(crate::ast::intern_type(Type::Int))
-        }
-        Type::Obj(name) if name.contains("Option") || name.contains("Result") || enum_names.contains(name) => {
-            Type::Enum(intern_str(name))
-        }
-        Type::Array(elem_ty, len) => Type::Array(
-            crate::ast::intern_type(resolve_type(*elem_ty, enum_names, span, errors)),
-            len,
-        ),
-        Type::Tuple(elems) => {
-            let resolved: Vec<Type> = elems
-                .iter()
-                .map(|t| resolve_type(*t, enum_names, span.clone(), errors))
-                .collect();
-            Type::Tuple(crate::ast::intern_tuple(&resolved))
-        }
-        Type::Slice(elem_ty) => Type::Slice(
-            crate::ast::intern_type(resolve_type(*elem_ty, enum_names, span, errors)),
-        ),
-        Type::Vec(elem_ty) => Type::Vec(
-            crate::ast::intern_type(resolve_type(*elem_ty, enum_names, span, errors)),
-        ),
-        Type::Ptr(elem_ty) => Type::Ptr(
-            crate::ast::intern_type(resolve_type(*elem_ty, enum_names, span, errors)),
-        ),
-        Type::Ref(elem_ty) => Type::Ref(
-            crate::ast::intern_type(resolve_type(*elem_ty, enum_names, span, errors)),
-        ),
-        Type::MutRef(elem_ty) => Type::MutRef(
-            crate::ast::intern_type(resolve_type(*elem_ty, enum_names, span, errors)),
-        ),
-        Type::Rc(elem_ty) => Type::Rc(
-            crate::ast::intern_type(resolve_type(*elem_ty, enum_names, span, errors)),
-        ),
-        Type::Arc(elem_ty) => Type::Arc(
-            crate::ast::intern_type(resolve_type(*elem_ty, enum_names, span, errors)),
-        ),
-        other => other,
-    }
-}
