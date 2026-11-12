@@ -23,6 +23,7 @@ pub struct ProgramMeta<'a> {
     pub fn_return_types: HashMap<String, Type>,
     pub known_drop_fns: HashSet<String>,
     pub trait_methods: HashMap<String, Vec<String>>,
+    pub track_caller_fns: HashSet<String>,
     pub source_map: &'a crate::loader::SourceMap,
 }
 
@@ -39,10 +40,14 @@ impl<'a> ProgramMeta<'a> {
         let mut fn_param_types = HashMap::new();
         let mut fn_return_types = HashMap::new();
         let mut known_drop_fns = HashSet::new();
+        let mut track_caller_fns = HashSet::new();
 
         for func in &program.functions {
             if func.name.ends_with("_drop") {
                 known_drop_fns.insert(func.name.clone());
+            }
+            if func.is_track_caller {
+                track_caller_fns.insert(func.name.clone());
             }
         }
 
@@ -111,6 +116,7 @@ impl<'a> ProgramMeta<'a> {
             fn_return_types,
             known_drop_fns,
             trait_methods,
+            track_caller_fns,
             source_map,
         }
     }
@@ -148,6 +154,8 @@ pub struct CodegenCtx<'a, 'b> {
     pub var_slots: HashMap<String, (StackSlot, cranelift_codegen::ir::Type)>,
     /// Statement-scoped unconsumed rvalue temporaries dropped in LIFO order at statement exit.
     pub temp_scopes: Vec<Vec<(Value, Type)>>,
+    /// Implicit `(caller_file, caller_line, caller_col)` forwarded when compiling `#[track_caller]` functions.
+    pub current_caller_loc: Option<(Value, Value, Value)>,
 }
 
 impl<'a, 'b> CodegenCtx<'a, 'b> {
@@ -167,6 +175,7 @@ impl<'a, 'b> CodegenCtx<'a, 'b> {
             addr_taken: HashSet::new(),
             var_slots: HashMap::new(),
             temp_scopes: Vec::new(),
+            current_caller_loc: None,
         }
     }
 

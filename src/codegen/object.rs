@@ -101,7 +101,7 @@ pub fn compile_program_to_binary(
         };
         if module.get_name(export_name).is_none() {
             let param_tys: Vec<Type> = func.params.iter().map(|p| p.ty).collect();
-            let (sig, _) = abi_signature_for_fn(
+            let (mut sig, _) = abi_signature_for_fn(
                 call_conv,
                 &param_tys,
                 &func.return_type,
@@ -109,6 +109,12 @@ pub fn compile_program_to_binary(
                 &meta.struct_layouts,
                 meta.enum_layouts,
             );
+            if func.is_track_caller {
+                use cranelift_codegen::ir::{types, AbiParam};
+                sig.params.push(AbiParam::new(types::I64));
+                sig.params.push(AbiParam::new(types::I64));
+                sig.params.push(AbiParam::new(types::I64));
+            }
             module
                 .declare_function(export_name, Linkage::Export, &sig)
                 .map_err(|e| format!("Failed to declare '{}': {}", export_name, e))?;

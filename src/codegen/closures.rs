@@ -37,6 +37,7 @@ pub fn compile_closure<M: Module>(
                 return_type: *ret_ty,
                 where_clause: None,
                 body: vec![body.clone()],
+                is_track_caller: false,
             };
 
             let mut new_ctx = module.make_context();

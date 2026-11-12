@@ -75,15 +75,33 @@ fn emit_log_part<M: Module>(
 fn emit_panic_cstr_and_trap<M: Module>(
     builder: &mut FunctionBuilder,
     msg_ptr: Value,
+    span: &Span,
+    cg: &CodegenCtx,
     module: &mut M,
 ) {
+    let (file_ptr, line_val, col_val) = if let Some(loc) = cg.current_caller_loc {
+        loc
+    } else {
+        let (file, line, col) = cg.meta.source_map.get_location(span);
+        (
+            compile_string_constant(builder, &file, module),
+            builder.ins().iconst(types::I64, line as i64),
+            builder.ins().iconst(types::I64, col as i64),
+        )
+    };
+
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
     let callee = module
-        .declare_function("intrinsic_panic", Linkage::Import, &sig)
+        .declare_function("intrinsic_panic_loc", Linkage::Import, &sig)
         .unwrap();
     let local_callee = module.declare_func_in_func(callee, builder.func);
-    builder.ins().call(local_callee, &[msg_ptr]);
+    builder
+        .ins()
+        .call(local_callee, &[msg_ptr, file_ptr, line_val, col_val]);
     builder
         .ins()
         .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
@@ -636,7 +654,7 @@ pub fn compile_macro_call<M: Module>(
                 let (ptr, _) = emit_format_interpolated(builder, args, cg, module);
                 ptr
             };
-            emit_panic_cstr_and_trap(builder, msg_ptr, module);
+            emit_panic_cstr_and_trap(builder, msg_ptr, span, cg, module);
 
             let dead_block = builder.create_block();
             builder.switch_to_block(dead_block);
@@ -661,12 +679,11 @@ pub fn compile_macro_call<M: Module>(
                     let (ptr, _) = emit_format_interpolated(builder, &args[1..], cg, module);
                     ptr
                 } else {
-                    let (file, line, col) = cg.meta.source_map.get_location(span);
                     let snippet = cg.meta.source_map.get_snippet(&cond_expr.span());
-                    let msg = format!("assertion failed: {snippet} at {file}:{line}:{col}");
+                    let msg = format!("assertion failed: {snippet}");
                     compile_string_constant(builder, &msg, module)
                 };
-                emit_panic_cstr_and_trap(builder, msg_ptr, module);
+                emit_panic_cstr_and_trap(builder, msg_ptr, span, cg, module);
 
                 builder.switch_to_block(pass_blk);
                 builder.seal_block(pass_blk);
@@ -704,11 +721,10 @@ pub fn compile_macro_call<M: Module>(
                     let (ptr, _) = emit_format_interpolated(builder, &args[2..], cg, module);
                     ptr
                 } else {
-                    let (file, line, col) = cg.meta.source_map.get_location(span);
                     let op_str = if is_ne { "!=" } else { "==" };
                     let header = compile_string_constant(
                         builder,
-                        &format!("assertion `left {op_str} right` failed at {file}:{line}:{col}\n  left: "),
+                        &format!("assertion `left {op_str} right` failed\n  left: "),
                         module,
                     );
                     let mid = compile_string_constant(builder, "\n right: ", module);
@@ -728,7 +744,7 @@ pub fn compile_macro_call<M: Module>(
                         module,
                     )
                 };
-                emit_panic_cstr_and_trap(builder, msg_ptr, module);
+                emit_panic_cstr_and_trap(builder, msg_ptr, span, cg, module);
 
                 builder.switch_to_block(pass_blk);
                 builder.seal_block(pass_blk);

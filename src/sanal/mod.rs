@@ -385,6 +385,7 @@ pub fn check_semantics(
                 return_type: method.return_type,
                 where_clause: method.where_clause.clone(),
                 body: method.body.clone(),
+                is_track_caller: method.is_track_caller,
             });
         }
     }
@@ -418,6 +419,7 @@ pub fn check_semantics(
                             return_type: method.return_type,
                             where_clause: method.where_clause.clone(),
                             body: method.body.clone(),
+                            is_track_caller: method.is_track_caller,
                         });
                     }
                 }
@@ -761,6 +763,7 @@ pub fn check_semantics(
             return_type: resolved_return_type,
             where_clause: func.where_clause.clone(),
             body: typed_body,
+            is_track_caller: func.is_track_caller,
         });
     }
 

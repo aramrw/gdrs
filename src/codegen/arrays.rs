@@ -8,7 +8,7 @@ use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, StackSlotDat
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
 
-use crate::ast::{normalize_type_name, Type, TypedExpr};
+use crate::ast::{normalize_type_name, Span, Type, TypedExpr};
 use crate::codegen::ctx::CodegenCtx;
 use crate::codegen::drops::{emit_drop_for_value, has_drop_glue, EnumLayoutMap};
 use crate::codegen::expr::{coerce_typed_val, coerce_val, compile_expr, cranelift_type_of};
@@ -159,6 +159,8 @@ fn emit_bounds_check<M: Module>(
     builder: &mut FunctionBuilder,
     idx_val: Value,
     len_val: Value,
+    span: &Span,
+    cg: &CodegenCtx,
     module: &mut M,
 ) {
     let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, idx_val, len_val);
@@ -168,14 +170,30 @@ fn emit_bounds_check<M: Module>(
 
     builder.switch_to_block(panic_blk);
     builder.seal_block(panic_blk);
+    let (file_ptr, line_val, col_val) = if let Some(loc) = cg.current_caller_loc {
+        loc
+    } else {
+        let (file, line, col) = cg.meta.source_map.get_location(span);
+        (
+            crate::codegen::expr::compile_string_constant(builder, &file, module),
+            builder.ins().iconst(types::I64, line as i64),
+            builder.ins().iconst(types::I64, col as i64),
+        )
+    };
+
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
     sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
     let callee = module
-        .declare_function("intrinsic_bounds_panic", Linkage::Import, &sig)
+        .declare_function("intrinsic_bounds_panic_loc", Linkage::Import, &sig)
         .unwrap();
     let local_callee = module.declare_func_in_func(callee, builder.func);
-    builder.ins().call(local_callee, &[idx_val, len_val]);
+    builder
+        .ins()
+        .call(local_callee, &[idx_val, len_val, file_ptr, line_val, col_val]);
     builder
         .ins()
         .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
@@ -230,7 +248,7 @@ pub fn compile_index_addr<M: Module>(
     let raw_idx_val = compile_expr(builder, idx, cg, module);
     let idx_val = coerce_val(builder, raw_idx_val, types::I64);
     if let Some(len_val) = opt_len {
-        emit_bounds_check(builder, idx_val, len_val, module);
+        emit_bounds_check(builder, idx_val, len_val, &idx.span(), cg, module);
     }
 
     let actual_elem_ty = get_element_type(&target.ty(), elem_ty);
@@ -272,7 +290,7 @@ pub fn compile_index_assign<M: Module>(
     let raw_idx_val = compile_expr(builder, idx, cg, module);
     let idx_val = coerce_val(builder, raw_idx_val, types::I64);
     if let Some(len_val) = opt_len {
-        emit_bounds_check(builder, idx_val, len_val, module);
+        emit_bounds_check(builder, idx_val, len_val, &idx.span(), cg, module);
     }
     let new_val = compile_expr(builder, val, cg, module);
     cg.cancel_temp(new_val);

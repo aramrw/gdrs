@@ -137,7 +137,7 @@ pub fn compile_func<M: Module>(
 
     let is_drop_impl = func.name.ends_with("_drop");
     let param_tys: Vec<Type> = func.params.iter().map(|p| p.ty).collect();
-    let (sig, fn_abi) = abi_signature_for_fn(
+    let (mut sig, fn_abi) = abi_signature_for_fn(
         module.isa().default_call_conv(),
         &param_tys,
         &func.return_type,
@@ -145,6 +145,12 @@ pub fn compile_func<M: Module>(
         &meta.struct_layouts,
         meta.enum_layouts,
     );
+    if func.is_track_caller {
+        use cranelift_codegen::ir::AbiParam;
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+    }
 
     let func_id = match module.get_name(export_name) {
         Some(cranelift_module::FuncOrDataId::Func(id)) => id,
@@ -227,6 +233,14 @@ pub fn compile_func<M: Module>(
         if track_drop {
             cg.track_var_if_droppable(&mut builder, &param.name, &param.ty, true);
         }
+    }
+
+    if func.is_track_caller {
+        cg.current_caller_loc = Some((
+            block_params[param_cursor],
+            block_params[param_cursor + 1],
+            block_params[param_cursor + 2],
+        ));
     }
 
     let is_void = matches!(fn_abi.ret_mode, PassMode::Ignore);

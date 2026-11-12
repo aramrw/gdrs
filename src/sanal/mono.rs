@@ -942,6 +942,7 @@ pub fn monomorphize_struct(
                     return_type: ret_ty,
                     where_clause: None,
                     body,
+                    is_track_caller: method.is_track_caller,
                 };
 
                 fn_map
@@ -1176,6 +1177,7 @@ pub fn monomorphize_enum(
                     return_type: ret_ty,
                     where_clause: None,
                     body,
+                    is_track_caller: method.is_track_caller,
                 };
 
                 fn_map
@@ -1339,6 +1341,7 @@ pub fn monomorphize_fn(
         return_type: ret_ty,
         where_clause: None,
         body,
+        is_track_caller: decl.is_track_caller,
     };
 
     fn_map

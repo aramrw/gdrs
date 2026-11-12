@@ -22,21 +22,32 @@ fn mismatched_shape() -> Result<Matrix, MatrixError>:
 
 fn matmul():
 	let v1: Vec<f64> = vec![0.0, 1.0, 2.0]
-	let v2: Vec<f64> = vec![0.0, 10.0, 20.0]
+	let v2: Vec<f64> = vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]
 	let m1 = Matrix::from_vec(1, 3, v1).unwrap()
-	let m2 = Matrix::from_vec(3, 2, v2).unwrap()
+	let m2 = Matrix::from_vec(4, 2, v2).unwrap()
 	let r = m1.matmul(&m2)
 	if let Err(e) = r:
-		log!("{}", e)
+		log!("{}", e.fmt())
+	//log!("{}", r.fmt())
+
+fn transpose():
+	let v: Vec<f64> = vec![0.0, 1.0, 2.0]
+	let m = Matrix::from_vec(1, 3, v).unwrap()
+	log!("{}", m)
+	let mt = m.transpose()
+	log!("{}", mt)
+
 	
 fn main():
 	add()
 
 	// this should error
-	match mismatched_shape():
-		Ok(_) => log!("valid")
-		Err(e) => log!("{}", e.fmt())
+	// match mismatched_shape():
+	// 	Ok(_) => log!("valid")
+	// 	Err(e) => log!("{}", e.fmt())
 
-	matmul()
+	transpose()
+
+
 
 

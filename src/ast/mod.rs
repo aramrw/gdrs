@@ -782,6 +782,7 @@ pub struct FuncDecl {
     pub return_type: Type,
     pub where_clause: Option<WhereClause>,
     pub body: Vec<Expr>, // The indented block of code
+    pub is_track_caller: bool,
 }
 
 #[derive(Debug)]
@@ -803,6 +804,7 @@ pub struct TypedFuncDecl {
     pub return_type: Type,
     pub where_clause: Option<WhereClause>,
     pub body: Vec<TypedExpr>,
+    pub is_track_caller: bool,
 }
 
 /// Unescapes standard C/Rust escape sequences inside a source string literal.

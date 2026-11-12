@@ -89,7 +89,17 @@ impl Matrix:
 			r.push(self.data[i] - o.data[i])
 		let m = Matrix{ rows: self.rows, cols: self.cols, data: r }
 		return Ok(m)
-		
+
+	fn transpose(&self) -> Matrix:
+		let data = &self.data
+		let mut m = Matrix::zeros(self.cols, self.rows)
+
+		for r in 0..self.rows:
+			for c in 0..self.cols:
+				let _rc = self.get(r, c)
+				m.set(c, r, _rc)
+		return m
+
 	fn matmul(&self, o: &Matrix) -> Result<Matrix, MatrixError>:
 		if self.cols != o.rows:
 			return Err(MatrixError::MatMulMisalignment(self.shape(), o.shape()))

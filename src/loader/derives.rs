@@ -73,6 +73,7 @@ pub fn expand_derives(program: &mut Program) {
                 }],
                 return_type: Type::Str,
                 where_clause: None,
+                is_track_caller: false,
                 body: vec![to_string_body],
             };
 
@@ -86,6 +87,7 @@ pub fn expand_derives(program: &mut Program) {
                 }],
                 return_type: Type::Str,
                 where_clause: None,
+                is_track_caller: false,
                 body: vec![Expr::Call(".to_string".to_string(), vec![Expr::Ident("self".to_string(), dummy_span.clone())], dummy_span.clone())],
             };
 
@@ -170,6 +172,7 @@ pub fn expand_derives(program: &mut Program) {
                 }],
                 return_type: Type::Str,
                 where_clause: None,
+                is_track_caller: false,
                 body: vec![to_string_body],
             };
 
@@ -183,6 +186,7 @@ pub fn expand_derives(program: &mut Program) {
                 }],
                 return_type: Type::Str,
                 where_clause: None,
+                is_track_caller: false,
                 body: vec![Expr::Call(".to_string".to_string(), vec![Expr::Ident("self".to_string(), dummy_span.clone())], dummy_span.clone())],
             };
 

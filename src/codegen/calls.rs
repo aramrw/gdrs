@@ -33,7 +33,7 @@ pub fn compile_call<M: Module>(
     name: &str,
     args: &[TypedExpr],
     ret_ty: &Type,
-    _span: &Span,
+    span: &Span,
     cg: &mut CodegenCtx,
     module: &mut M,
 ) -> Value {
@@ -122,7 +122,7 @@ pub fn compile_call<M: Module>(
         .copied()
         .unwrap_or(*ret_ty);
 
-    let (sig, fn_abi) = abi_signature_for_fn(
+    let (mut sig, fn_abi) = abi_signature_for_fn(
         call_conv,
         &expected_param_tys,
         &expected_ret_ty,
@@ -130,6 +130,13 @@ pub fn compile_call<M: Module>(
         &cg.meta.struct_layouts,
         cg.meta.enum_layouts,
     );
+    let is_track_caller = cg.meta.track_caller_fns.contains(&target_symbol_name);
+    if is_track_caller {
+        use cranelift_codegen::ir::AbiParam;
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+    }
 
     let move_flags = cg.meta.fn_move_params.get(&target_symbol_name).cloned();
 
@@ -217,6 +224,22 @@ pub fn compile_call<M: Module>(
                 emit_memcpy_bytes(builder, module, arg_addr, compiled_arg, size);
                 compiled_args.push(arg_addr);
             }
+        }
+    }
+
+    if is_track_caller {
+        if let Some((cf, cl, cc)) = cg.current_caller_loc {
+            compiled_args.push(cf);
+            compiled_args.push(cl);
+            compiled_args.push(cc);
+        } else {
+            let (file, line, col) = cg.meta.source_map.get_location(span);
+            let f_ptr = crate::codegen::expr::compile_string_constant(builder, &file, module);
+            let l_val = builder.ins().iconst(types::I64, line as i64);
+            let c_val = builder.ins().iconst(types::I64, col as i64);
+            compiled_args.push(f_ptr);
+            compiled_args.push(l_val);
+            compiled_args.push(c_val);
         }
     }
 

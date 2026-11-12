@@ -75,6 +75,7 @@ fn build_substituted_method(
         return_type: ret_sub,
         where_clause: None,
         body: Vec::new(),
+        is_track_caller: tpl_method.is_track_caller,
     }
 }
 
@@ -1041,6 +1042,7 @@ pub fn type_check_call<'a>(
                     return_type: ret_sub,
                     where_clause: tpl_fn.where_clause.clone(),
                     body: Vec::new(),
+                    is_track_caller: tpl_fn.is_track_caller,
                 });
             }
         } else if let Some(mangled_fn) = crate::sanal::mono::monomorphize_fn(

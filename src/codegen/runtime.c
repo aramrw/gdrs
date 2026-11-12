@@ -10,25 +10,73 @@
 #include <sys/wait.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#if defined(__APPLE__) || defined(__linux__)
+#include <execinfo.h>
+#endif
 
 static int g_argc = 0;
 static char** g_argv = NULL;
 
 extern void gdrs_main(void);
 
+static void gdrs_print_backtrace_or_note(void) {
+    const char* bt = getenv("GDRS_BACKTRACE");
+    if (bt && (strcmp(bt, "1") == 0 || strcmp(bt, "full") == 0)) {
+#if defined(__APPLE__) || defined(__linux__)
+        void* callstack[128];
+        int frames = backtrace(callstack, 128);
+        char** strs = backtrace_symbols(callstack, frames);
+        if (strs) {
+            fprintf(stderr, "stack backtrace:\n");
+            for (int i = 0; i < frames; ++i) {
+                fprintf(stderr, "  %2d: %s\n", i, strs[i]);
+            }
+            free(strs);
+        }
+#else
+        fprintf(stderr, "stack backtrace: not supported on this platform\n");
+#endif
+    } else {
+        fprintf(stderr, "note: run with `GDRS_BACKTRACE=1` environment variable to display a backtrace\n");
+    }
+}
+
+void intrinsic_panic_loc(const char* msg, const char* file, int64_t line, int64_t col) {
+    if (file && file[0] != '\0' && line > 0) {
+        fprintf(stderr, "thread 'main' panicked at %s:%lld:%lld:\n%s\n",
+                file, (long long)line, (long long)col,
+                msg ? msg : "explicit panic");
+    } else {
+        fprintf(stderr, "thread 'main' panicked at %s\n",
+                msg ? msg : "explicit panic");
+    }
+    gdrs_print_backtrace_or_note();
+    fflush(stderr);
+    exit(101);
+}
+
 void intrinsic_panic(const char* msg) {
-    fprintf(stderr, "thread 'main' panicked at '%s'\n", msg ? msg : "explicit panic");
+    intrinsic_panic_loc(msg, NULL, 0, 0);
+}
+
+void intrinsic_bounds_panic_loc(int64_t idx, int64_t len, const char* file, int64_t line, int64_t col) {
+    if (file && file[0] != '\0' && line > 0) {
+        fprintf(stderr,
+                "thread 'main' panicked at %s:%lld:%lld:\nindex out of bounds: the len is %lld but the index is %lld\n",
+                file, (long long)line, (long long)col,
+                (long long)len, (long long)idx);
+    } else {
+        fprintf(stderr,
+                "thread 'main' panicked at index out of bounds: the len is %lld but the index is %lld\n",
+                (long long)len, (long long)idx);
+    }
+    gdrs_print_backtrace_or_note();
     fflush(stderr);
     exit(101);
 }
 
 void intrinsic_bounds_panic(int64_t idx, int64_t len) {
-    fprintf(stderr,
-            "thread 'main' panicked at 'index out of bounds: the len is %lld but the index is %lld'\n",
-            (long long)len,
-            (long long)idx);
-    fflush(stderr);
-    exit(101);
+    intrinsic_bounds_panic_loc(idx, len, NULL, 0, 0);
 }
 
 int main(int argc, char** argv) {

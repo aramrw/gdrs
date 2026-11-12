@@ -1770,8 +1770,9 @@ fn main():
     assert_eq!(eq_fail.status.code(), Some(101));
     let eq_stderr = String::from_utf8_lossy(&eq_fail.stderr);
     assert!(
-        eq_stderr.contains("assertion `left == right` failed at")
+        eq_stderr.contains("thread 'main' panicked at")
             && eq_stderr.contains(":4:")
+            && eq_stderr.contains("assertion `left == right` failed")
             && eq_stderr.contains("left: 10")
             && eq_stderr.contains("right: 20"),
         "Unexpected assert_eq! stderr:\n{eq_stderr}"
@@ -1785,8 +1786,9 @@ fn main():
     assert_eq!(ne_fail.status.code(), Some(101));
     let ne_stderr = String::from_utf8_lossy(&ne_fail.stderr);
     assert!(
-        ne_stderr.contains("assertion `left != right` failed at")
+        ne_stderr.contains("thread 'main' panicked at")
             && ne_stderr.contains(":3:")
+            && ne_stderr.contains("assertion `left != right` failed")
             && ne_stderr.contains("left: 42")
             && ne_stderr.contains("right: 42"),
         "Unexpected assert_ne! stderr:\n{ne_stderr}"
@@ -1800,7 +1802,9 @@ fn main():
     assert_eq!(assert_fail.status.code(), Some(101));
     let assert_stderr = String::from_utf8_lossy(&assert_fail.stderr);
     assert!(
-        assert_stderr.contains("assertion failed: x > 5 at") && assert_stderr.contains(":3:"),
+        assert_stderr.contains("thread 'main' panicked at")
+            && assert_stderr.contains(":3:")
+            && assert_stderr.contains("assertion failed: x > 5"),
         "Unexpected assert! stderr:\n{assert_stderr}"
     );
 
@@ -1924,5 +1928,170 @@ fn main():
 		log!("some={}", x)
 "#,
         &["err=boom", "ok=42", "pair=10+20", "some=7"],
+    );
+}
+
+#[test]
+fn round17_panic_locations_and_backtraces() {
+    // 1. Explicit panic! prints file:line:col and GDRS_BACKTRACE note
+    let panic_out = run_gdrs_source(
+        "round17_panic_loc",
+        "fn main():\n\tlet x = 1\n\tpanic!(\"kaboom {}\", x)\n",
+    );
+    assert_eq!(panic_out.status.code(), Some(101));
+    let panic_stderr = String::from_utf8_lossy(&panic_out.stderr);
+    assert!(
+        panic_stderr.contains("thread 'main' panicked at")
+            && panic_stderr.contains(":3:")
+            && panic_stderr.contains("kaboom 1")
+            && panic_stderr.contains("GDRS_BACKTRACE=1"),
+        "Unexpected panic! stderr:\n{panic_stderr}"
+    );
+
+    // 2. Out-of-bounds index panic prints file:line:col and index/len
+    let oob_out = run_gdrs_source(
+        "round17_bounds_loc",
+        "use std::vec::Vec\nfn main():\n\tlet v = vec![10, 20]\n\tlet x = v[5]\n\tlog!(\"{}\", x)\n",
+    );
+    assert_eq!(oob_out.status.code(), Some(101));
+    let oob_stderr = String::from_utf8_lossy(&oob_out.stderr);
+    assert!(
+        oob_stderr.contains("thread 'main' panicked at")
+            && oob_stderr.contains(":4:")
+            && oob_stderr.contains("index out of bounds: the len is 2 but the index is 5"),
+        "Unexpected bounds panic stderr:\n{oob_stderr}"
+    );
+
+    // 3. GDRS_BACKTRACE=1 prints stack backtrace with exported function symbols
+    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("gdrs_test_{}_{id}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let file_path = dir.join("round17_backtrace.gdrs");
+    fs::write(
+        &file_path,
+        "fn inner_boom():\n\tpanic!(\"trace me\")\nfn main():\n\tinner_boom()\n",
+    )
+    .unwrap();
+    let bt_out = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .env("GDRS_BACKTRACE", "1")
+        .arg(&file_path)
+        .output()
+        .expect("failed to execute gdrs with GDRS_BACKTRACE=1");
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(bt_out.status.code(), Some(101));
+    let bt_stderr = String::from_utf8_lossy(&bt_out.stderr);
+    assert!(
+        bt_stderr.contains("stack backtrace:")
+            && bt_stderr.contains("inner_boom")
+            && bt_stderr.contains("gdrs_main"),
+        "Unexpected backtrace stderr:\n{bt_stderr}"
+    );
+
+    // 4. #[track_caller] on Result::unwrap blames the caller's line, not std/core.gdrs
+    let unwrap_out = run_gdrs_source(
+        "round17_track_caller_unwrap",
+        "use std::core::Result\nfn make_err() -> Result<i64, str>:\n\treturn Err(\"bad\")\nfn main():\n\tlet r = make_err()\n\tlet x = r.unwrap()\n\tlog!(\"{}\", x)\n",
+    );
+    assert_eq!(unwrap_out.status.code(), Some(101));
+    let unwrap_stderr = String::from_utf8_lossy(&unwrap_out.stderr);
+    assert!(
+        unwrap_stderr.contains("round17_track_caller_unwrap.gdrs:6:")
+            && unwrap_stderr.contains("called `Result::unwrap()` on an `Err` value"),
+        "Expected unwrap() panic to blame caller line 6, got:\n{unwrap_stderr}"
+    );
+
+    // 5. Nested #[track_caller] forwarding blames the outermost non-tracked caller
+    let nested_tc_out = run_gdrs_source(
+        "round17_track_caller_nested",
+        "use std::core::Option\n#[track_caller]\nfn inner_unwrap(o: Option<i64>) -> i64:\n\treturn o.unwrap()\n#[track_caller]\nfn outer_helper(o: Option<i64>) -> i64:\n\treturn inner_unwrap(o)\nfn main():\n\tlet opt: Option<i64> = Option::None\n\tlet x = outer_helper(opt)\n\tlog!(\"{}\", x)\n",
+    );
+    assert_eq!(nested_tc_out.status.code(), Some(101));
+    let nested_stderr = String::from_utf8_lossy(&nested_tc_out.stderr);
+    assert!(
+        nested_stderr.contains("round17_track_caller_nested.gdrs:10:")
+            && nested_stderr.contains("called `Option::unwrap()` on a `None` value"),
+        "Expected nested #[track_caller] to blame main line 10, got:\n{nested_stderr}"
+    );
+}
+
+#[test]
+fn round18_braced_declarations() {
+    // 1. Single-line and multi-line braced functions, structs, enums, and impls
+    assert_ok_output(
+        "round18_braced_items",
+        r#"
+obj Point {
+	x: i64,
+	y: i64,
+}
+
+enum Color {
+	Red,
+	Green,
+	Blue,
+}
+
+impl Point {
+	fn new(x: i64, y: i64) -> Point {
+		return Point{ x: x, y: y }
+	}
+
+	fn sum(&self) -> i64 {
+		return self.x + self.y
+	}
+}
+
+fn add_coords(p: &Point) -> i64 {
+	return p.sum()
+}
+
+fn main() {
+	let pt = Point::new(10, 25)
+	log!("pt: {} {}", pt.x, pt.y)
+	log!("sum: {}", add_coords(&pt))
+
+	let c = Color::Green
+	match c:
+		Color::Red => log!("red")
+		Color::Green => log!("green")
+		Color::Blue => log!("blue")
+}
+"#,
+        &["pt: 10 25", "sum: 35", "green"],
+    );
+
+    // 2. Inline single-line definitions
+    assert_ok_output(
+        "round18_single_line_braced",
+        r#"
+obj BoxedVal { val: i64 }
+
+enum Action { Start, Stop }
+
+impl BoxedVal {
+	fn get_val(&self) -> i64 { return self.val }
+}
+
+fn compute(x: i64) -> i64 { return x * 2 }
+
+fn main():
+	let b = BoxedVal{ val: 21 }
+	log!("boxed: {}", b.get_val())
+	log!("computed: {}", compute(b.get_val()))
+"#,
+        &["boxed: 21", "computed: 42"],
+    );
+
+    // 3. Negative check: control-flow statements like `if` or `while` MUST NOT accept `{}`
+    assert_err_code(
+        "round18_disallow_braced_if",
+        r#"
+fn main():
+	if true {
+		log!("should fail")
+	}
+"#,
+        "Parse error",
     );
 }

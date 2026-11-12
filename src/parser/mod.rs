@@ -185,79 +185,6 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
         .ignore_then(where_clause.clone())
         .or_not();
 
-    // Function signature: fn name(params) -> return_type where T: Bounds:
-    let function = just(Token::Fn)
-        .ignore_then(select! { Token::Ident(s) => s })
-        .then_ignore(just(Token::LParen))
-        .then(param.clone().separated_by(just(Token::Comma)).allow_trailing())
-        .then_ignore(just(Token::RParen))
-        .then(just(Token::Arrow).ignore_then(type_parser.clone()).or_not())
-        .then(opt_where.clone())
-        .then_ignore(just(Token::Colon))
-        .then_ignore(just(Token::Newline).or_not())
-        .then(
-            stmt.repeated()
-                .at_least(1)
-                .delimited_by(just(Token::Indent), just(Token::Dedent)),
-        )
-        .map_with_span(
-            |((((name, params), opt_ret), where_clause), body), _| FuncDecl {
-                name,
-                params,
-                return_type: opt_ret.unwrap_or(Type::Unit),
-                where_clause,
-                body,
-            },
-        )
-        .boxed();
-
-    let func_sig = just(Token::Fn)
-        .ignore_then(select! { Token::Ident(s) => s })
-        .then_ignore(just(Token::LParen))
-        .then(param.clone().separated_by(just(Token::Comma)).allow_trailing())
-        .then_ignore(just(Token::RParen))
-        .then(just(Token::Arrow).ignore_then(type_parser.clone()).or_not())
-        .then(opt_where.clone())
-        .then_ignore(just(Token::Colon).or_not())
-        .then_ignore(just(Token::Newline).or_not())
-        .map_with_span(|(((name, params), opt_ret), where_clause), _| FuncDecl {
-            name,
-            params,
-            return_type: opt_ret.unwrap_or(Type::Unit),
-            where_clause,
-            body: Vec::new(),
-        });
-
-    let trait_method = function.clone().or(func_sig);
-
-    let trait_decl = just(Token::Trait)
-        .ignore_then(select! { Token::Ident(s) => s })
-        .then_ignore(just(Token::Colon))
-        .then_ignore(just(Token::Newline).or_not())
-        .then(
-            trait_method
-                .repeated()
-                .at_least(1)
-                .delimited_by(just(Token::Indent), just(Token::Dedent)),
-        )
-        .map_with_span(|(name, methods), span| TraitDecl {
-            name,
-            methods,
-            span,
-        })
-        .boxed();
-
-    let trait_alias_decl = just(Token::TypeKw)
-        .ignore_then(select! { Token::Ident(s) => s })
-        .then_ignore(just(Token::Assign))
-        .then(
-            select! { Token::Ident(s) => s }
-                .separated_by(just(Token::Plus))
-                .at_least(1),
-        )
-        .then_ignore(just(Token::Newline).or_not())
-        .map_with_span(|(name, traits), span| TraitAliasDecl { name, traits, span });
-
     let attr_arg = select! { Token::Ident(s) => s }
         .or(select! { Token::String(s) => s });
 
@@ -278,27 +205,152 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
 
     let opt_attributes = attribute.repeated();
 
+    let layout_junk = just(Token::Newline)
+        .or(just(Token::Indent))
+        .or(just(Token::Dedent))
+        .repeated();
+
+    let colon_fn_body = just(Token::Colon)
+        .then_ignore(just(Token::Newline).or_not())
+        .ignore_then(
+            stmt.clone()
+                .repeated()
+                .at_least(1)
+                .delimited_by(just(Token::Indent), just(Token::Dedent)),
+        );
+
+    let braced_fn_body = just(Token::Newline)
+        .repeated()
+        .ignore_then(just(Token::LBrace))
+        .ignore_then(layout_junk.clone())
+        .ignore_then(stmt.padded_by(layout_junk.clone()).repeated())
+        .then_ignore(layout_junk.clone())
+        .then_ignore(just(Token::RBrace));
+
+    let fn_body = colon_fn_body.or(braced_fn_body);
+
+    // Function signature: #[track_caller] fn name(params) -> return_type where T: Bounds:
+    let function = opt_attributes
+        .clone()
+        .then_ignore(just(Token::Fn))
+        .then(select! { Token::Ident(s) => s })
+        .then_ignore(just(Token::LParen))
+        .then(param.clone().separated_by(just(Token::Comma)).allow_trailing())
+        .then_ignore(just(Token::RParen))
+        .then(just(Token::Arrow).ignore_then(type_parser.clone()).or_not())
+        .then(opt_where.clone())
+        .then(fn_body)
+        .map_with_span(
+            |(((((attributes, name), params), opt_ret), where_clause), body), _| FuncDecl {
+                name,
+                params,
+                return_type: opt_ret.unwrap_or(Type::Unit),
+                where_clause,
+                body,
+                is_track_caller: attributes.iter().any(|a| a.name == "track_caller"),
+            },
+        )
+        .boxed();
+
+    let func_sig = opt_attributes
+        .clone()
+        .then_ignore(just(Token::Fn))
+        .then(select! { Token::Ident(s) => s })
+        .then_ignore(just(Token::LParen))
+        .then(param.clone().separated_by(just(Token::Comma)).allow_trailing())
+        .then_ignore(just(Token::RParen))
+        .then(just(Token::Arrow).ignore_then(type_parser.clone()).or_not())
+        .then(opt_where.clone())
+        .then_ignore(just(Token::Colon).or(just(Token::Semicolon)).or_not())
+        .then_ignore(just(Token::Newline).or_not())
+        .map_with_span(|((((attributes, name), params), opt_ret), where_clause), _| FuncDecl {
+            name,
+            params,
+            return_type: opt_ret.unwrap_or(Type::Unit),
+            where_clause,
+            body: Vec::new(),
+            is_track_caller: attributes.iter().any(|a| a.name == "track_caller"),
+        });
+
+    let trait_method = function.clone().or(func_sig);
+
+    let colon_trait_methods = just(Token::Colon)
+        .then_ignore(just(Token::Newline).or_not())
+        .ignore_then(
+            trait_method
+                .clone()
+                .padded_by(just(Token::Newline).repeated())
+                .repeated()
+                .at_least(1)
+                .delimited_by(just(Token::Indent), just(Token::Dedent)),
+        );
+
+    let braced_trait_methods = just(Token::Newline)
+        .repeated()
+        .ignore_then(just(Token::LBrace))
+        .ignore_then(layout_junk.clone())
+        .ignore_then(trait_method.padded_by(layout_junk.clone()).repeated())
+        .then_ignore(layout_junk.clone())
+        .then_ignore(just(Token::RBrace));
+
+    let trait_methods = colon_trait_methods.or(braced_trait_methods);
+
+    let trait_decl = just(Token::Trait)
+        .ignore_then(select! { Token::Ident(s) => s })
+        .then(trait_methods)
+        .map_with_span(|(name, methods), span| TraitDecl {
+            name,
+            methods,
+            span,
+        })
+        .boxed();
+
+    let trait_alias_decl = just(Token::TypeKw)
+        .ignore_then(select! { Token::Ident(s) => s })
+        .then_ignore(just(Token::Assign))
+        .then(
+            select! { Token::Ident(s) => s }
+                .separated_by(just(Token::Plus))
+                .at_least(1),
+        )
+        .then_ignore(just(Token::Newline).or_not())
+        .map_with_span(|(name, traits), span| TraitAliasDecl { name, traits, span });
+
     let field_decl = opt_attributes
         .clone()
         .then(select! { Token::Ident(name) => name })
         .then_ignore(just(Token::Colon))
         .then(type_parser.clone())
         .map_with_span(|((attributes, name), ty), span| FieldDecl { name, ty, attributes, span })
+        .then_ignore(just(Token::Comma).or_not())
         .then_ignore(just(Token::Newline).or_not());
+
+    let colon_obj_fields = just(Token::Colon)
+        .then_ignore(just(Token::Newline).or_not())
+        .ignore_then(
+            field_decl
+                .clone()
+                .repeated()
+                .at_least(1)
+                .delimited_by(just(Token::Indent), just(Token::Dedent)),
+        );
+
+    let braced_obj_fields = just(Token::Newline)
+        .repeated()
+        .ignore_then(just(Token::LBrace))
+        .ignore_then(layout_junk.clone())
+        .ignore_then(field_decl.padded_by(layout_junk.clone()).repeated())
+        .then_ignore(layout_junk.clone())
+        .then_ignore(just(Token::RBrace));
+
+    let obj_fields = colon_obj_fields.or(braced_obj_fields);
 
     let obj_decl = opt_attributes
         .clone()
         .then_ignore(just(Token::Obj))
         .then(select! { Token::Ident(s) => s })
         .then(opt_where.clone())
-        .then_ignore(just(Token::Colon))
-        .then_ignore(just(Token::Newline).or_not())
-        .then(
-            field_decl
-                .repeated()
-                .at_least(1)
-                .delimited_by(just(Token::Indent), just(Token::Dedent)),
-        )
+        .then(obj_fields)
         .map_with_span(|(((attributes, name), where_clause), fields), span| StructDecl {
             name,
             fields,
@@ -325,21 +377,35 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             attributes,
             span,
         })
+        .then_ignore(just(Token::Comma).or_not())
         .then_ignore(just(Token::Newline).or_not());
+
+    let colon_enum_variants = just(Token::Colon)
+        .then_ignore(just(Token::Newline).or_not())
+        .ignore_then(
+            enum_variant
+                .clone()
+                .repeated()
+                .at_least(1)
+                .delimited_by(just(Token::Indent), just(Token::Dedent)),
+        );
+
+    let braced_enum_variants = just(Token::Newline)
+        .repeated()
+        .ignore_then(just(Token::LBrace))
+        .ignore_then(layout_junk.clone())
+        .ignore_then(enum_variant.padded_by(layout_junk.clone()).repeated())
+        .then_ignore(layout_junk.clone())
+        .then_ignore(just(Token::RBrace));
+
+    let enum_variants = colon_enum_variants.or(braced_enum_variants);
 
     let enum_decl = opt_attributes
         .clone()
         .then_ignore(just(Token::Enum))
         .then(select! { Token::Ident(s) => s })
         .then(opt_where.clone())
-        .then_ignore(just(Token::Colon))
-        .then_ignore(just(Token::Newline).or_not())
-        .then(
-            enum_variant
-                .repeated()
-                .at_least(1)
-                .delimited_by(just(Token::Indent), just(Token::Dedent)),
-        )
+        .then(enum_variants)
         .map_with_span(|(((attributes, name), where_clause), variants), span| EnumDecl {
             name,
             variants,
@@ -362,18 +428,31 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             None => (None, first),
         });
 
-    let impl_decl = just(Token::Impl)
-        .ignore_then(impl_header)
-        .then(opt_where)
-        .then_ignore(just(Token::Colon))
+    let colon_impl_methods = just(Token::Colon)
         .then_ignore(just(Token::Newline).or_not())
-        .then(
+        .ignore_then(
             function
                 .clone()
+                .padded_by(just(Token::Newline).repeated())
                 .repeated()
                 .at_least(1)
                 .delimited_by(just(Token::Indent), just(Token::Dedent)),
-        )
+        );
+
+    let braced_impl_methods = just(Token::Newline)
+        .repeated()
+        .ignore_then(just(Token::LBrace))
+        .ignore_then(layout_junk.clone())
+        .ignore_then(function.clone().padded_by(layout_junk.clone()).repeated())
+        .then_ignore(layout_junk.clone())
+        .then_ignore(just(Token::RBrace));
+
+    let impl_methods = colon_impl_methods.or(braced_impl_methods);
+
+    let impl_decl = just(Token::Impl)
+        .ignore_then(impl_header)
+        .then(opt_where)
+        .then(impl_methods)
         .map_with_span(
             |(((trait_name, target_type), where_clause), methods), span| ImplDecl {
                 trait_name,
@@ -467,16 +546,30 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             span,
         });
 
-    let extern_decl = just(Token::Extern)
-        .ignore_then(select! { Token::String(s) => s })
-        .then_ignore(just(Token::Colon))
+    let colon_extern_funcs = just(Token::Colon)
         .then_ignore(just(Token::Newline).or_not())
-        .then(
+        .ignore_then(
             extern_fn_sig
+                .clone()
+                .padded_by(just(Token::Newline).repeated())
                 .repeated()
                 .at_least(1)
                 .delimited_by(just(Token::Indent), just(Token::Dedent)),
-        )
+        );
+
+    let braced_extern_funcs = just(Token::Newline)
+        .repeated()
+        .ignore_then(just(Token::LBrace))
+        .ignore_then(layout_junk.clone())
+        .ignore_then(extern_fn_sig.padded_by(layout_junk.clone()).repeated())
+        .then_ignore(layout_junk.clone())
+        .then_ignore(just(Token::RBrace));
+
+    let extern_funcs = colon_extern_funcs.or(braced_extern_funcs);
+
+    let extern_decl = just(Token::Extern)
+        .ignore_then(select! { Token::String(s) => s })
+        .then(extern_funcs)
         .map_with_span(|(abi, functions), span| ExternDecl {
             abi,
             functions,

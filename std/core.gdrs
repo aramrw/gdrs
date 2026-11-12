@@ -18,6 +18,7 @@ impl Option:
 			Option::Some(_) => false
 			Option::None => true
 
+	#[track_caller]
 	fn unwrap(self) -> $T:
 		match self:
 			Option::Some(val) => val
@@ -38,6 +39,7 @@ impl Result:
 			Result::Ok(_) => false
 			Result::Err(_) => true
 
+	#[track_caller]
 	fn unwrap(self) -> $T:
 		match self:
 			Result::Ok(val) => val
