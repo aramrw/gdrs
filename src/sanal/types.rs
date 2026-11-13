@@ -113,8 +113,8 @@ impl<'a> TypeCtx<'a> {
                 Type::Enum(name) => {
                     !(name.starts_with("std_core_Option_ptr")
                         || name.starts_with("std_core_Option_void")
-                        || name.contains("_ptr_")
-                        || name.contains("_void"))
+                        || name.starts_with("Option_ptr")
+                        || name.starts_with("Option_void"))
                 }
                 Type::Obj(name) => {
                     if !visited.insert((*name).to_string()) {

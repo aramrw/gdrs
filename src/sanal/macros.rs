@@ -66,7 +66,7 @@ pub static MACRO_REGISTRY: &[MacroDefinition] = &[
         kind: MacroKind::Format,
         min_args: 1,
         max_args: None,
-        returns: Type::Str,
+        returns: Type::String,
     },
     MacroDefinition {
         name: "log",

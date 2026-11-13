@@ -305,9 +305,9 @@ pub fn compile_match<M: Module>(
 
     let target_ptr = compile_expr(builder, target, cg, module);
     let is_self_ident = matches!(target, TypedExpr::Ident(n, _, _) if n == "self");
-    let is_unwrap_fn = cg.func_name.ends_with("_unwrap");
+    let self_is_consuming = cg.drop_flags.contains_key("self");
     let is_owned_target = !is_ref_target
-        && (!is_self_ident || is_unwrap_fn)
+        && (!is_self_ident || self_is_consuming)
         && !matches!(
             target,
             TypedExpr::FieldAccess(..) | TypedExpr::IndexAccess(..) | TypedExpr::Deref(..)

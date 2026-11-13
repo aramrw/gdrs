@@ -237,6 +237,39 @@ char* intrinsic_format_join(int64_t count, const char** parts, const uint8_t* is
     return buf;
 }
 
+typedef struct {
+    uint64_t ptr;
+    int64_t len;
+    int64_t cap;
+} GdrsString;
+
+void intrinsic_format_join_to_string(int64_t count, const char** parts, const uint8_t* is_owned, GdrsString* out) {
+    char* buf = intrinsic_format_join(count, parts, is_owned);
+    if (!out) {
+        free(buf);
+        return;
+    }
+    if (!buf) {
+        out->ptr = 0;
+        out->len = 0;
+        out->cap = 0;
+        return;
+    }
+    size_t len = strlen(buf);
+    out->ptr = (uint64_t)buf;
+    out->len = (int64_t)len;
+    out->cap = (int64_t)(len + 1);
+}
+
+void intrinsic_string_drop(GdrsString* s) {
+    if (s && s->ptr && s->cap > 0) {
+        free((void*)s->ptr);
+        s->ptr = 0;
+        s->len = 0;
+        s->cap = 0;
+    }
+}
+
 int8_t intrinsic_str_eq(int64_t a, int64_t a_is_obj, int64_t b, int64_t b_is_obj) {
     const char* sa = a_is_obj
         ? (a ? (((const char**)a)[0] ? ((const char**)a)[0] : "") : "")
@@ -303,7 +336,10 @@ int64_t intrinsic_spawn_thread(int64_t func_ptr, int64_t arg) {
     targs->arg = arg;
 
     pthread_t thread;
-    pthread_create(&thread, NULL, thread_entry, targs);
+    if (pthread_create(&thread, NULL, thread_entry, targs) != 0) {
+        free(targs);
+        return -1;
+    }
     pthread_detach(thread);
     return 0;
 }
@@ -462,12 +498,6 @@ int64_t intrinsic_push_str(int64_t header_ptr_val, const char* str) {
 }
 
 // Filesystem directory reading intrinsic (populates caller's stack Vec<DirEntry>)
-typedef struct {
-    uint64_t ptr;
-    int64_t len;
-    int64_t cap;
-} GdrsString;
-
 typedef struct {
     uint64_t ptr;
     int64_t len;

@@ -370,8 +370,40 @@ pub fn type_check_call<'a>(
                     .map(|(_, v)| v)
             });
             if let Some(methods) = methods_opt {
-                if let Some((_, _, ret_ty)) = methods.iter().find(|(m, _, _)| m == &m_name) {
+                if let Some((_, param_tys, ret_ty)) = methods.iter().find(|(m, _, _)| m == &m_name) {
                     let recv = typed_args.remove(0);
+                    let synthetic_params: Vec<crate::ast::Param> = param_tys
+                        .iter()
+                        .skip(1)
+                        .enumerate()
+                        .map(|(i, p_ty)| crate::ast::Param {
+                            name: format!("arg{i}"),
+                            is_mutable: false,
+                            ty: *p_ty,
+                            span: span.clone(),
+                        })
+                        .collect();
+                    let synthetic_fn = crate::ast::FuncDecl {
+                        name: format!("{trait_name}::{m_name}"),
+                        params: synthetic_params,
+                        return_type: *ret_ty,
+                        where_clause: None,
+                        is_track_caller: false,
+                        vis: crate::ast::Visibility::Pub,
+                        module_path: Vec::new(),
+                        is_trait_impl: false,
+                        body: Vec::new(),
+                    };
+                    validate_call_arguments(
+                        &synthetic_fn,
+                        &mut typed_args,
+                        false,
+                        &synthetic_fn.name,
+                        scopes,
+                        errors,
+                        type_ctx,
+                        span,
+                    );
                     return Some(TypedExpr::DynCall(
                         Box::new(recv),
                         m_name,
@@ -527,8 +559,23 @@ pub fn type_check_call<'a>(
                 }
             }
             let inner_opt = vec_elem_from_ty(typed_args[0].ty());
-            if let Some(elem_ty) = inner_opt {
-                if let Some(mangled_iter) = crate::sanal::mono::monomorphize_struct(
+            if let Some(raw_elem_ty) = inner_opt {
+                let elem_ty = type_ctx.infer.borrow_mut().resolve(raw_elem_ty);
+                if !elem_ty.is_copy() && !matches!(elem_ty, Type::Infer(_) | Type::Error) {
+                    errors.push(SemanticError {
+                        code: "E0507",
+                        message: format!(
+                            "Cannot iterate by value over `Vec<{elem_ty:?}>` because `{elem_ty:?}` is not `Copy`"
+                        ),
+                        label: "Would copy non-Copy element out of borrowed Vec".to_string(),
+                        secondary_label: None,
+                        help: Some(
+                            "Iterate by index (`for i in 0..v.len():`) and borrow elements (`&v[i]`) instead"
+                                .to_string(),
+                        ),
+                        span: span.clone(),
+                    });
+                } else if let Some(mangled_iter) = crate::sanal::mono::monomorphize_struct(
                     type_ctx.mono,
                     "std_vec_VecIter",
                     &[elem_ty],
@@ -628,8 +675,20 @@ pub fn type_check_call<'a>(
             }
         }
         *ext_ret_ty
-    } else if scopes.lookup(&resolved_name).is_some() {
-        Type::Int
+    } else if let Some(var_info) = scopes.lookup(&resolved_name) {
+        let var_ty = type_ctx.infer.borrow_mut().resolve(var_info.ty);
+        errors.push(SemanticError {
+            code: "E0618",
+            message: format!(
+                "Expected function, found local variable `{resolved_name}` of type `{:?}`",
+                var_ty
+            ),
+            label: "Not callable".to_string(),
+            secondary_label: None,
+            help: Some("Only named functions, methods, and inline closures are callable".to_string()),
+            span: span.clone(),
+        });
+        Type::Error
     } else if is_method_syntax && !typed_args.is_empty() {
         if typed_args[0].ty() != Type::Error {
             errors.push(SemanticError {

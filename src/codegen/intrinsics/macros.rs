@@ -146,11 +146,10 @@ fn emit_float_to_str<M: Module>(
     builder.inst_results(call_inst)[0]
 }
 
-fn emit_format_join_parts<M: Module>(
+fn stage_format_parts(
     builder: &mut FunctionBuilder,
     parts: &[(Value, bool)],
-    module: &mut M,
-) -> Value {
+) -> (Value, Value, Value) {
     let count = parts.len();
     let parts_size = (count.max(1) * 8) as u32;
     let owned_size = count.max(1) as u32;
@@ -181,6 +180,17 @@ fn emit_format_join_parts<M: Module>(
             .store(MemFlags::new(), flag_val, owned_addr, i as i32);
     }
 
+    let count_val = builder.ins().iconst(types::I64, count as i64);
+    (count_val, parts_addr, owned_addr)
+}
+
+fn emit_format_join_parts<M: Module>(
+    builder: &mut FunctionBuilder,
+    parts: &[(Value, bool)],
+    module: &mut M,
+) -> Value {
+    let (count_val, parts_addr, owned_addr) = stage_format_parts(builder, parts);
+
     let mut sig_join = module.make_signature();
     sig_join.params.push(AbiParam::new(types::I64));
     sig_join.params.push(AbiParam::new(types::I64));
@@ -191,11 +201,33 @@ fn emit_format_join_parts<M: Module>(
         .unwrap();
     let local_join = module.declare_func_in_func(callee_join, builder.func);
 
-    let count_val = builder.ins().iconst(types::I64, count as i64);
     let call_inst = builder
         .ins()
         .call(local_join, &[count_val, parts_addr, owned_addr]);
     builder.inst_results(call_inst)[0]
+}
+
+fn emit_format_join_parts_to_string<M: Module>(
+    builder: &mut FunctionBuilder,
+    parts: &[(Value, bool)],
+    module: &mut M,
+) -> Value {
+    let (count_val, parts_addr, owned_addr) = stage_format_parts(builder, parts);
+    let (_, out_addr) = crate::codegen::layout::alloc_stack_slot(builder, 24, 8);
+
+    let mut sig_join = module.make_signature();
+    sig_join.params.push(AbiParam::new(types::I64));
+    sig_join.params.push(AbiParam::new(types::I64));
+    sig_join.params.push(AbiParam::new(types::I64));
+    sig_join.params.push(AbiParam::new(types::I64));
+    let callee_join = module
+        .declare_function("intrinsic_format_join_to_string", Linkage::Import, &sig_join)
+        .unwrap();
+    let local_join = module.declare_func_in_func(callee_join, builder.func);
+    builder
+        .ins()
+        .call(local_join, &[count_val, parts_addr, owned_addr, out_addr]);
+    out_addr
 }
 
 fn has_custom_display(type_name: &str, cg: &CodegenCtx, module: &impl Module) -> bool {
@@ -359,13 +391,13 @@ fn emit_tuple_to_cstr<M: Module>(
     (joined, true, None)
 }
 
-/// Evaluates `args` where `args[0]` is a format string literal and returns `(cstr_ptr, temp_drops)`.
-fn emit_format_interpolated<M: Module>(
+/// Evaluates `args` where `args[0]` is a format string literal and collects parts + temp drops.
+fn collect_format_parts<M: Module>(
     builder: &mut FunctionBuilder,
     args: &[TypedExpr],
     cg: &mut CodegenCtx,
     module: &mut M,
-) -> (Value, Vec<(Value, Type)>) {
+) -> (Vec<(Value, bool)>, Vec<(Value, Type)>) {
     let mut parts: Vec<(Value, bool)> = Vec::new();
     let mut temp_string_drops: Vec<(Value, Type)> = Vec::new();
 
@@ -392,8 +424,31 @@ fn emit_format_interpolated<M: Module>(
         }
     }
 
+    (parts, temp_string_drops)
+}
+
+/// Evaluates `args` where `args[0]` is a format string literal and returns `(cstr_ptr, temp_drops)`.
+fn emit_format_interpolated<M: Module>(
+    builder: &mut FunctionBuilder,
+    args: &[TypedExpr],
+    cg: &mut CodegenCtx,
+    module: &mut M,
+) -> (Value, Vec<(Value, Type)>) {
+    let (parts, temp_string_drops) = collect_format_parts(builder, args, cg, module);
     let joined = emit_format_join_parts(builder, &parts, module);
     (joined, temp_string_drops)
+}
+
+/// Evaluates `args` and returns `(String stack slot ptr, temp_drops)`.
+fn emit_format_interpolated_to_string<M: Module>(
+    builder: &mut FunctionBuilder,
+    args: &[TypedExpr],
+    cg: &mut CodegenCtx,
+    module: &mut M,
+) -> (Value, Vec<(Value, Type)>) {
+    let (parts, temp_string_drops) = collect_format_parts(builder, args, cg, module);
+    let joined_str = emit_format_join_parts_to_string(builder, &parts, module);
+    (joined_str, temp_string_drops)
 }
 
 fn compile_print_macro<M: Module>(
@@ -657,7 +712,8 @@ pub fn compile_macro_call<M: Module>(
     let clean_name = name.trim_end_matches('!');
     match clean_name {
         "format" => {
-            let (joined, temp_drops) = emit_format_interpolated(builder, args, cg, module);
+            let (joined_str, temp_drops) =
+                emit_format_interpolated_to_string(builder, args, cg, module);
             for (tmp_val, tmp_ty) in temp_drops {
                 crate::codegen::drops::emit_drop_for_value(
                     builder,
@@ -669,7 +725,7 @@ pub fn compile_macro_call<M: Module>(
                     module,
                 );
             }
-            joined
+            joined_str
         }
         "panic" => {
             let msg_ptr = if args.is_empty() {
@@ -780,8 +836,8 @@ pub fn compile_macro_call<M: Module>(
                 return builder.ins().iconst(types::I64, 0);
             }
             let raw_func_ptr = compile_expr(builder, &args[0], cg, module);
-            let func_ptr = coerce_val(builder, raw_func_ptr, types::I64);
-            let raw_arg_val = if args.len() > 1 {
+            let mut func_ptr = coerce_val(builder, raw_func_ptr, types::I64);
+            let arg_val = if args.len() > 1 {
                 if let TypedExpr::Ident(v_name, v_ty, _) = &args[1] {
                     if !v_ty.is_copy() {
                         cg.mark_moved(builder, v_name);
@@ -789,11 +845,196 @@ pub fn compile_macro_call<M: Module>(
                 }
                 let val = compile_expr(builder, &args[1], cg, module);
                 cg.cancel_temp(val);
-                val
+
+                let arg_ty = args[1].ty();
+                let arg_repr = crate::codegen::layout::repr_kind(
+                    &arg_ty,
+                    &cg.meta.struct_layouts,
+                    cg.meta.enum_layouts,
+                );
+                let (param_tys, ret_ty) = match &args[0] {
+                    TypedExpr::Closure(_, params, _, ret, _) => {
+                        (params.iter().map(|(_, t)| *t).collect::<Vec<_>>(), *ret)
+                    }
+                    _ => (vec![arg_ty], Type::Unit),
+                };
+                let ret_mode = crate::codegen::layout::pass_mode_for_type(
+                    &ret_ty,
+                    false,
+                    &cg.meta.struct_layouts,
+                    cg.meta.enum_layouts,
+                );
+                let needs_trampoline = matches!(
+                    arg_repr,
+                    crate::codegen::layout::ReprKind::Aggregate { .. }
+                        | crate::codegen::layout::ReprKind::Zst
+                ) || matches!(ret_mode, crate::codegen::layout::PassMode::Indirect { .. });
+
+                if needs_trampoline {
+                    static TRAMPOLINE_COUNTER: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+                    let id = TRAMPOLINE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let (arg_offset, pkt_size) = match arg_repr {
+                        crate::codegen::layout::ReprKind::Aggregate { size, align } => {
+                            let off = crate::codegen::layout::align_up(8, align.max(8));
+                            (off, off + size)
+                        }
+                        _ => (8u32, 16u32),
+                    };
+
+                    let mut malloc_sig = module.make_signature();
+                    malloc_sig.params.push(AbiParam::new(types::I64));
+                    malloc_sig.returns.push(AbiParam::new(types::I64));
+                    let malloc_id = module
+                        .declare_function("malloc", Linkage::Import, &malloc_sig)
+                        .unwrap();
+                    let local_malloc = module.declare_func_in_func(malloc_id, builder.func);
+                    let pkt_sz_val = builder.ins().iconst(types::I64, pkt_size as i64);
+                    let malloc_call = builder.ins().call(local_malloc, &[pkt_sz_val]);
+                    let pkt_ptr = builder.inst_results(malloc_call)[0];
+
+                    builder.ins().store(MemFlags::new(), func_ptr, pkt_ptr, 0);
+                    match arg_repr {
+                        crate::codegen::layout::ReprKind::Aggregate { size, .. } => {
+                            let dst = builder.ins().iadd_imm(pkt_ptr, arg_offset as i64);
+                            crate::codegen::layout::emit_memcpy_bytes(builder, module, dst, val, size);
+                        }
+                        crate::codegen::layout::ReprKind::Scalar(_) => {
+                            let coerced = coerce_val(builder, val, types::I64);
+                            builder
+                                .ins()
+                                .store(MemFlags::new(), coerced, pkt_ptr, arg_offset as i32);
+                        }
+                        crate::codegen::layout::ReprKind::Zst => {}
+                    }
+
+                    // Synthesize thread entry trampoline: unpacks heap packet to child stack/regs and frees it.
+                    let mut tramp_sig = module.make_signature();
+                    tramp_sig.params.push(AbiParam::new(types::I64));
+                    tramp_sig.returns.push(AbiParam::new(types::I64));
+                    let tramp_name = format!("__gdrs_thread_trampoline_{id}");
+                    let tramp_id = module
+                        .declare_function(&tramp_name, Linkage::Local, &tramp_sig)
+                        .unwrap();
+
+                    let mut tctx = module.make_context();
+                    tctx.func.signature = tramp_sig;
+                    let mut tb_ctx = cranelift_frontend::FunctionBuilderContext::new();
+                    {
+                        let mut tbuilder = FunctionBuilder::new(&mut tctx.func, &mut tb_ctx);
+                        let entry = tbuilder.create_block();
+                        tbuilder.switch_to_block(entry);
+                        tbuilder.append_block_params_for_function_params(entry);
+                        let pkt = tbuilder.block_params(entry)[0];
+
+                        let real_fn = tbuilder.ins().load(types::I64, MemFlags::new(), pkt, 0);
+                        let call_conv = module.isa().default_call_conv();
+                        let (target_sig, fn_abi) = crate::codegen::layout::abi_signature_for_fn(
+                            call_conv,
+                            &param_tys,
+                            &ret_ty,
+                            false,
+                            &cg.meta.struct_layouts,
+                            cg.meta.enum_layouts,
+                        );
+
+                        let mut call_args = Vec::new();
+                        if let crate::codegen::layout::PassMode::Indirect { size, align } =
+                            fn_abi.ret_mode
+                        {
+                            let (_, sret_addr) =
+                                crate::codegen::layout::alloc_stack_slot(&mut tbuilder, size, align);
+                            call_args.push(sret_addr);
+                        }
+                        if let Some(pmode) = fn_abi.param_modes.first() {
+                            match pmode {
+                                crate::codegen::layout::PassMode::Ignore => {}
+                                crate::codegen::layout::PassMode::Direct(cl_ty) => {
+                                    let raw = tbuilder.ins().load(
+                                        types::I64,
+                                        MemFlags::new(),
+                                        pkt,
+                                        arg_offset as i32,
+                                    );
+                                    call_args.push(coerce_val(&mut tbuilder, raw, *cl_ty));
+                                }
+                                crate::codegen::layout::PassMode::MultiReg { size, chunks, .. } => {
+                                    let src = tbuilder.ins().iadd_imm(pkt, arg_offset as i64);
+                                    let loaded = crate::codegen::layout::load_multireg_chunks(
+                                        &mut tbuilder,
+                                        module,
+                                        src,
+                                        *size,
+                                        chunks,
+                                    );
+                                    call_args.extend(loaded);
+                                }
+                                crate::codegen::layout::PassMode::Indirect { size, align } => {
+                                    let (_, stack_arg) = crate::codegen::layout::alloc_stack_slot(
+                                        &mut tbuilder,
+                                        *size,
+                                        *align,
+                                    );
+                                    let src = tbuilder.ins().iadd_imm(pkt, arg_offset as i64);
+                                    crate::codegen::layout::emit_memcpy_bytes(
+                                        &mut tbuilder,
+                                        module,
+                                        stack_arg,
+                                        src,
+                                        *size,
+                                    );
+                                    call_args.push(stack_arg);
+                                }
+                            }
+                        }
+
+                        crate::codegen::drops::synthesis::emit_free_call(&mut tbuilder, pkt, module);
+
+                        let sig_ref = tbuilder.import_signature(target_sig);
+                        tbuilder.ins().call_indirect(sig_ref, real_fn, &call_args);
+
+                        let zero = tbuilder.ins().iconst(types::I64, 0);
+                        tbuilder.ins().return_(&[zero]);
+                        tbuilder.seal_all_blocks();
+                        tbuilder.finalize();
+                    }
+                    module
+                        .define_function(tramp_id, &mut tctx)
+                        .expect("failed to define thread trampoline");
+                    module.clear_context(&mut tctx);
+
+                    let local_tramp = module.declare_func_in_func(tramp_id, builder.func);
+                    func_ptr = builder.ins().func_addr(types::I64, local_tramp);
+
+                    let mut sig = module.make_signature();
+                    sig.params.push(AbiParam::new(types::I64));
+                    sig.params.push(AbiParam::new(types::I64));
+                    sig.returns.push(AbiParam::new(types::I64));
+                    let callee = module
+                        .declare_function("intrinsic_spawn_thread", Linkage::Import, &sig)
+                        .unwrap();
+                    let local_callee = module.declare_func_in_func(callee, builder.func);
+                    let call_inst = builder.ins().call(local_callee, &[func_ptr, pkt_ptr]);
+                    let res = builder.inst_results(call_inst)[0];
+
+                    // Free the heap packet if pthread_create failed (res < 0) so spawn errors don't leak.
+                    let fail_blk = builder.create_block();
+                    let ok_blk = builder.create_block();
+                    let is_err = builder.ins().icmp_imm(IntCC::SignedLessThan, res, 0);
+                    builder.ins().brif(is_err, fail_blk, &[], ok_blk, &[]);
+                    builder.switch_to_block(fail_blk);
+                    builder.seal_block(fail_blk);
+                    crate::codegen::drops::synthesis::emit_free_call(builder, pkt_ptr, module);
+                    builder.ins().jump(ok_blk, &[]);
+                    builder.switch_to_block(ok_blk);
+                    builder.seal_block(ok_blk);
+                    return res;
+                } else {
+                    coerce_val(builder, val, types::I64)
+                }
             } else {
                 builder.ins().iconst(types::I64, 0)
             };
-            let arg_val = coerce_val(builder, raw_arg_val, types::I64);
 
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64));

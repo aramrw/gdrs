@@ -212,7 +212,15 @@ pub fn compile_call<M: Module>(
         match pmode {
             PassMode::Ignore => {}
             PassMode::Direct(target_cl_ty) => {
-                let coerced = coerce_typed_val(builder, compiled_arg, &arg.ty(), target_cl_ty);
+                let coerced = if target_param_ty == Type::Str
+                    && matches!(
+                        arg.ty(),
+                        Type::String | Type::Obj("String") | Type::Obj("std_string_String")
+                    ) {
+                    builder.ins().load(types::I64, MemFlags::new(), compiled_arg, 0)
+                } else {
+                    coerce_typed_val(builder, compiled_arg, &arg.ty(), target_cl_ty)
+                };
                 compiled_args.push(coerced);
             }
             PassMode::MultiReg { size, chunks, .. } => {

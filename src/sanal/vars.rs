@@ -221,6 +221,20 @@ fn resolve_ref_borrow_info(
     span: &Span,
     is_assign: bool,
 ) -> (Option<(String, bool)>, bool) {
+    let temp_err = |errors: &mut Vec<SemanticError>, err_span: &Span| {
+        let action = if is_assign { "assignment to" } else { "binding" };
+        errors.push(SemanticError {
+            code: "E0716",
+            message: format!(
+                "Temporary value dropped while borrowed in {action} `{holder_name}`"
+            ),
+            label: "Creates a dangling reference to a temporary".to_string(),
+            secondary_label: None,
+            help: Some("Bind the value to a `let` variable before borrowing it".to_string()),
+            span: err_span.clone(),
+        });
+    };
+
     match typed_val {
         TypedExpr::Ref(inner, ref_is_mut, _, _) => {
             if let Some(target_var) = extract_root_var(inner) {
@@ -228,21 +242,35 @@ fn resolve_ref_borrow_info(
                 let from_caller = scopes.lookup(&target_owned).is_some_and(|i| i.from_caller);
                 (Some((target_owned, *ref_is_mut)), from_caller)
             } else {
-                let action = if is_assign { "assignment to" } else { "binding" };
-                errors.push(SemanticError {
-                    code: "E0716",
-                    message: format!(
-                        "Temporary value dropped while borrowed in {action} `{holder_name}`"
-                    ),
-                    label: "Creates a dangling reference to a temporary".to_string(),
-                    secondary_label: None,
-                    help: Some("Bind the value to a `let` variable before borrowing it".to_string()),
-                    span: span.clone(),
-                });
+                temp_err(errors, span);
                 (None, false)
             }
         }
-        TypedExpr::Ident(src_name, _, _) if matches!(dest_ty, Type::Ref(_) | Type::MutRef(_)) => {
+        TypedExpr::Call(fn_name, call_args, _, call_span)
+            if crate::sanal::control_flow::lifetimes::is_borrowed_view_call(fn_name) =>
+        {
+            if let Some(root) =
+                crate::sanal::control_flow::lifetimes::borrowed_view_root(fn_name, call_args)
+            {
+                let target_owned = match scopes.lookup(root).map(|i| i.ty) {
+                    Some(Type::Ref(_) | Type::MutRef(_))
+                        if !scopes.lookup(root).is_some_and(|i| i.from_caller) =>
+                    {
+                        scopes.borrow_target(root).unwrap_or_else(|| root.to_string())
+                    }
+                    _ => root.to_string(),
+                };
+                let from_caller = scopes.lookup(&target_owned).is_some_and(|i| i.from_caller);
+                (Some((target_owned, false)), from_caller)
+            } else {
+                temp_err(errors, call_span);
+                (None, false)
+            }
+        }
+        TypedExpr::Ident(src_name, _, _)
+            if matches!(dest_ty, Type::Ref(_) | Type::MutRef(_) | Type::Str)
+                || matches!(dest_ty, Type::Obj(s) if s.contains("VecIter")) =>
+        {
             let from_caller = scopes.lookup(src_name).is_some_and(|i| i.from_caller);
             let inherited = scopes
                 .borrow_target(src_name)
@@ -250,6 +278,89 @@ fn resolve_ref_borrow_info(
             (inherited, from_caller)
         }
         _ => (None, false),
+    }
+}
+
+/// Checks if assigning a compound expression (`IfElse` / `Match` / `Block`) could let an inner
+/// borrow outlive the assignment target `holder_name`.
+fn check_compound_assign_borrow_depths(
+    scopes: &ScopeStack,
+    errors: &mut Vec<SemanticError>,
+    holder_name: &str,
+    holder_depth: usize,
+    expr: &TypedExpr,
+    span: &Span,
+) {
+    let check_target = |errors: &mut Vec<SemanticError>, target: &str| {
+        let from_caller = scopes.lookup(target).is_some_and(|i| i.from_caller);
+        if !from_caller && scopes.scope_depth(target).is_some_and(|d| d > holder_depth) {
+            errors.push(SemanticError {
+                code: "E0597",
+                message: format!(
+                    "`{target}` does not live long enough for assignment to `{holder_name}`"
+                ),
+                label: "Borrowed value does not live long enough".to_string(),
+                secondary_label: None,
+                help: Some("Bind the value in an outer scope before borrowing it".to_string()),
+                span: span.clone(),
+            });
+        }
+    };
+
+    match expr {
+        TypedExpr::Ref(inner, _, _, _) => {
+            if let Some(root) = extract_root_var(inner) {
+                check_target(errors, root);
+            }
+        }
+        TypedExpr::Call(fn_name, call_args, _, _)
+            if crate::sanal::control_flow::lifetimes::is_borrowed_view_call(fn_name) =>
+        {
+            if let Some(root) =
+                crate::sanal::control_flow::lifetimes::borrowed_view_root(fn_name, call_args)
+            {
+                check_target(errors, root);
+            }
+        }
+        TypedExpr::Ident(src, ty, _)
+            if matches!(ty, Type::Ref(_) | Type::MutRef(_) | Type::Str)
+                || matches!(ty, Type::Obj(s) if s.contains("VecIter")) =>
+        {
+            if let Some(target) = scopes.borrow_target(src) {
+                check_target(errors, &target);
+            }
+        }
+        TypedExpr::IfElse(_, then_b, else_b, _, _) => {
+            check_compound_assign_borrow_depths(scopes, errors, holder_name, holder_depth, then_b, span);
+            check_compound_assign_borrow_depths(scopes, errors, holder_name, holder_depth, else_b, span);
+        }
+        TypedExpr::Match(_, arms, _, _) => {
+            for arm in arms {
+                if let Some(last) = arm.body.last() {
+                    check_compound_assign_borrow_depths(
+                        scopes,
+                        errors,
+                        holder_name,
+                        holder_depth,
+                        last,
+                        span,
+                    );
+                }
+            }
+        }
+        TypedExpr::Block(stmts, _, _) | TypedExpr::Unsafe(stmts, _, _) => {
+            if let Some(last) = stmts.last() {
+                check_compound_assign_borrow_depths(
+                    scopes,
+                    errors,
+                    holder_name,
+                    holder_depth,
+                    last,
+                    span,
+                );
+            }
+        }
+        _ => {}
     }
 }
 
@@ -564,6 +675,35 @@ pub fn type_check_assign<'a>(
 
         let (borrow_info, from_caller) =
             resolve_ref_borrow_info(scopes, errors, name, &var_ty, &typed_val, span, true);
+        if let Some(holder_depth) = scopes.scope_depth(name) {
+            if let Some((ref target_owned, _)) = borrow_info {
+                if !from_caller
+                    && scopes
+                        .scope_depth(target_owned)
+                        .is_some_and(|target_depth| target_depth > holder_depth)
+                {
+                    errors.push(SemanticError {
+                        code: "E0597",
+                        message: format!(
+                            "`{target_owned}` does not live long enough for assignment to `{name}`"
+                        ),
+                        label: "Borrowed value does not live long enough".to_string(),
+                        secondary_label: None,
+                        help: Some("Bind the value in an outer scope before borrowing it".to_string()),
+                        span: span.clone(),
+                    });
+                }
+            } else {
+                check_compound_assign_borrow_depths(
+                    scopes,
+                    errors,
+                    name,
+                    holder_depth,
+                    &typed_val,
+                    span,
+                );
+            }
+        }
         scopes.remove_borrow(name);
         if let Some((target_owned, ref_is_mut)) = borrow_info {
             scopes.add_borrow(name.to_string(), target_owned, ref_is_mut);

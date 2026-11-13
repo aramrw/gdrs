@@ -18,6 +18,18 @@ pub mod vars;
 pub use scope::{ScopeStack, VarInfo};
 use resolve::{resolve_type, substitute_self_type};
 
+pub(crate) fn type_contains_ref(ty: &Type) -> bool {
+    match ty {
+        Type::Ref(_) | Type::MutRef(_) => true,
+        Type::Ptr(t) | Type::Slice(t) | Type::Vec(t) | Type::Rc(t) | Type::Arc(t) => {
+            type_contains_ref(t)
+        }
+        Type::Array(t, _) => type_contains_ref(t),
+        Type::Tuple(tys) => tys.iter().any(type_contains_ref),
+        _ => false,
+    }
+}
+
 use crate::{
     ast::{intern_str, FuncDecl, Param, Program, Span, Type, TypedExpr, TypedFuncDecl, TypedProgram},
     sanal::mono::{extract_generic_params_enum, extract_generic_params_struct, Monomorphizer},
@@ -58,17 +70,6 @@ pub fn check_semantics(
     let mono_cell = std::cell::RefCell::new(mono);
 
     let mut struct_map = HashMap::new();
-    fn type_contains_ref(ty: &Type) -> bool {
-        match ty {
-            Type::Ref(_) | Type::MutRef(_) => true,
-            Type::Ptr(t) | Type::Slice(t) | Type::Vec(t) | Type::Rc(t) | Type::Arc(t) => {
-                type_contains_ref(t)
-            }
-            Type::Array(t, _) => type_contains_ref(t),
-            Type::Tuple(tys) => tys.iter().any(type_contains_ref),
-            _ => false,
-        }
-    }
 
     for s in &program.structs {
         for field in &s.fields {
@@ -432,7 +433,11 @@ pub fn check_semantics(
     for t in &program.traits {
         let mut entries = Vec::new();
         for method in &t.methods {
-            let p_types = method.params.iter().map(|p| p.ty).collect();
+            let p_types = method
+                .params
+                .iter()
+                .map(|p| resolve_type(p.ty, &enum_names, 0..1, &mut errors))
+                .collect();
             let ret_ty = resolve_type(method.return_type, &enum_names, 0..1, &mut errors);
             entries.push((method.name.clone(), p_types, ret_ty));
         }

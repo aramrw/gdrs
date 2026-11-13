@@ -58,22 +58,23 @@ impl String:
 				let mut new_cap = 16
 				if needed_cap > new_cap:
 					new_cap = needed_cap
-				self.cap = new_cap
-				let p = malloc(self.cap)
+				let p = malloc(new_cap)
 				if (p as i64) == 0:
 					return self
 				self.ptr = p as *i64
+				self.cap = new_cap
 				memcpy(self.ptr as *void, s as *void, s_len)
 				self.len = s_len
 				let end_ptr = (self.ptr as i64) + self.len
 				memset(end_ptr as *void, 0, 1)
 			else:
 				if needed_cap > self.cap:
-					self.cap = needed_cap * 2
-					let p = realloc(self.ptr as *void, self.cap)
+					let new_cap = needed_cap * 2
+					let p = realloc(self.ptr as *void, new_cap)
 					if (p as i64) == 0:
 						return self
 					self.ptr = p as *i64
+					self.cap = new_cap
 				let dst_ptr = (self.ptr as i64) + self.len
 				memcpy(dst_ptr as *void, s as *void, s_len)
 				self.len = self.len + s_len

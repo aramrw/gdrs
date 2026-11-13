@@ -20,8 +20,8 @@ pub type EnumLayoutMap = HashMap<String, Vec<(String, i64, Vec<Type>)>>;
 pub fn is_npo_enum(name: &str) -> bool {
     name.starts_with("std_core_Option_ptr")
         || name.starts_with("std_core_Option_void")
-        || name.contains("_ptr_")
-        || name.contains("_void")
+        || name.starts_with("Option_ptr")
+        || name.starts_with("Option_void")
 }
 
 pub fn find_enum_layout<'a>(

@@ -137,9 +137,12 @@ pub fn resolve_or_synthesize_drop_fn<M: Module>(
 
             let drop_fn = match module.get_name("std_string_String_drop") {
                 Some(cranelift_module::FuncOrDataId::Func(id)) => id,
-                _ => module
-                    .declare_function("std_string_String_drop", Linkage::Import, &sig)
-                    .ok()?,
+                _ => match module.get_name("intrinsic_string_drop") {
+                    Some(cranelift_module::FuncOrDataId::Func(id)) => id,
+                    _ => module
+                        .declare_function("intrinsic_string_drop", Linkage::Import, &sig)
+                        .ok()?,
+                },
             };
             let local_drop = module.declare_func_in_func(drop_fn, builder.func);
             builder.ins().call(local_drop, &[ptr_val]);

@@ -348,7 +348,13 @@ pub fn validate_call_arguments<'a>(
                 let unify_res = type_ctx.infer.borrow_mut().unify(param.ty, arg.ty());
                 let resolved_param = type_ctx.infer.borrow_mut().resolve(param.ty);
                 let resolved_arg = type_ctx.infer.borrow_mut().resolve(arg.ty());
-                if unify_res.is_err()
+                let is_string_borrow_as_str = resolved_param == Type::Str
+                    && matches!(
+                        resolved_arg,
+                        Type::String | Type::Obj("String") | Type::Obj("std_string_String")
+                    );
+                if !is_string_borrow_as_str
+                    && unify_res.is_err()
                     && !crate::sanal::compat::is_type_compatible(&resolved_param, &resolved_arg)
                 {
                     errors.push(SemanticError {

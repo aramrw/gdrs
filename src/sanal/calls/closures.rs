@@ -69,12 +69,28 @@ pub fn build_non_capturing_closure<'a>(
         errors.push(err);
     }
     let ret_ty = t_body.ty();
+    let resolved_ret_ty = type_ctx.infer.borrow_mut().resolve(ret_ty);
+    if crate::sanal::type_contains_ref(&resolved_ret_ty) {
+        errors.push(SemanticError {
+            code: "E0106",
+            message: "Closure cannot return a reference (`&T` / `&mut T`)".to_string(),
+            label: "References cannot escape a closure".to_string(),
+            secondary_label: None,
+            help: Some("Return an owned value, `rc<T>`, or `arc<T>` instead".to_string()),
+            span: t_body.span(),
+        });
+    }
+    crate::sanal::control_flow::lifetimes::check_block_escape_lifetime(
+        &closure_scopes,
+        &t_body,
+        errors,
+    );
 
     TypedExpr::Closure(
         closure_name,
         typed_params,
         Box::new(t_body),
-        ret_ty,
+        resolved_ret_ty,
         span.clone(),
     )
 }

@@ -182,7 +182,16 @@ pub fn expand_derives(program: &mut Program) {
 
                 let arm_body_expr = if fmt_args.is_empty() {
                     let s = if fmt_str.is_empty() { v.name.clone() } else { fmt_str };
-                    Expr::String(s, v_err_span.clone())
+                    let inner = s
+                        .strip_prefix('"')
+                        .and_then(|rest| rest.strip_suffix('"'))
+                        .unwrap_or(&s);
+                    let escaped = inner.replace('{', "{{").replace('}', "}}");
+                    Expr::MacroCall(
+                        "format".to_string(),
+                        vec![Expr::String(format!("\"{escaped}\""), v_err_span.clone())],
+                        v_err_span.clone(),
+                    )
                 } else {
                     let mut all_args = Vec::with_capacity(1 + fmt_args.len());
                     all_args.push(Expr::String(format!("\"{fmt_str}\""), v_err_span.clone()));
@@ -212,7 +221,7 @@ pub fn expand_derives(program: &mut Program) {
                     ty: Type::Unit,
                     span: e_span.clone(),
                 }],
-                return_type: Type::Str,
+                return_type: Type::String,
                 where_clause: None,
                 is_track_caller: false,
                 vis: Visibility::Pub,
@@ -229,7 +238,7 @@ pub fn expand_derives(program: &mut Program) {
                     ty: Type::Unit,
                     span: e_span.clone(),
                 }],
-                return_type: Type::Str,
+                return_type: Type::String,
                 where_clause: None,
                 is_track_caller: false,
                 vis: Visibility::Pub,
@@ -351,7 +360,16 @@ pub fn expand_derives(program: &mut Program) {
 
             let to_string_body = if fmt_args.is_empty() {
                 let st = if fmt_str.is_empty() { s.name.clone() } else { fmt_str };
-                Expr::String(st, s_err_span.clone())
+                let inner = st
+                    .strip_prefix('"')
+                    .and_then(|rest| rest.strip_suffix('"'))
+                    .unwrap_or(&st);
+                let escaped = inner.replace('{', "{{").replace('}', "}}");
+                Expr::MacroCall(
+                    "format".to_string(),
+                    vec![Expr::String(format!("\"{escaped}\""), s_err_span.clone())],
+                    s_err_span.clone(),
+                )
             } else {
                 let mut all_args = Vec::with_capacity(1 + fmt_args.len());
                 all_args.push(Expr::String(format!("\"{fmt_str}\""), s_err_span.clone()));
@@ -367,7 +385,7 @@ pub fn expand_derives(program: &mut Program) {
                     ty: Type::Unit,
                     span: s_err_span.clone(),
                 }],
-                return_type: Type::Str,
+                return_type: Type::String,
                 where_clause: None,
                 is_track_caller: false,
                 vis: Visibility::Pub,
@@ -384,7 +402,7 @@ pub fn expand_derives(program: &mut Program) {
                     ty: Type::Unit,
                     span: s_err_span.clone(),
                 }],
-                return_type: Type::Str,
+                return_type: Type::String,
                 where_clause: None,
                 is_track_caller: false,
                 vis: Visibility::Pub,

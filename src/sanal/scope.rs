@@ -101,6 +101,11 @@ impl ScopeStack {
         None
     }
 
+    /// Returns the zero-based scope stack index where `name` is declared (innermost match).
+    pub fn scope_depth(&self, name: &str) -> Option<usize> {
+        self.scopes.iter().rposition(|scope| scope.contains_key(name))
+    }
+
     /// Looks up mutable variable info from innermost scope up to parent scopes.
     pub fn lookup_mut(&mut self, name: &str) -> Option<&mut VarInfo> {
         for scope in self.scopes.iter_mut().rev() {
