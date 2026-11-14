@@ -230,6 +230,16 @@ fn collect_raw_capture_uses(
                 bind_tuple_pattern_locals(pat, cur);
             }
         }
+        Expr::LetStruct(pat, _, val, _) => {
+            collect_raw_capture_uses(val, CaptureNeed::Consume, locals, scopes, type_ctx, out);
+            if let Some(cur) = locals.last_mut() {
+                for f in &pat.fields {
+                    if f.binding_name != "_" {
+                        cur.insert(f.binding_name.clone());
+                    }
+                }
+            }
+        }
         Expr::Block(stmts, _) | Expr::Unsafe(stmts, _) => {
             locals.push(HashSet::new());
             for (i, s) in stmts.iter().enumerate() {
@@ -248,6 +258,11 @@ fn collect_raw_capture_uses(
             collect_raw_capture_uses(body, CaptureNeed::Consume, locals, scopes, type_ctx, out);
             locals.pop();
         }
+        Expr::Loop(body, _) => {
+            locals.push(HashSet::new());
+            collect_raw_capture_uses(body, CaptureNeed::Consume, locals, scopes, type_ctx, out);
+            locals.pop();
+        }
         Expr::IfElse(cond, then_b, else_b, _) => {
             collect_raw_capture_uses(cond, CaptureNeed::Read, locals, scopes, type_ctx, out);
             locals.push(HashSet::new());
@@ -261,6 +276,9 @@ fn collect_raw_capture_uses(
             collect_raw_capture_uses(target, CaptureNeed::Read, locals, scopes, type_ctx, out);
             for arm in arms {
                 locals.push(arm.bindings.iter().cloned().collect());
+                if let Some(g) = &arm.guard {
+                    collect_raw_capture_uses(g, CaptureNeed::Read, locals, scopes, type_ctx, out);
+                }
                 for (i, s) in arm.body.iter().enumerate() {
                     let n = if i + 1 == arm.body.len() {
                         ctx_need
@@ -270,6 +288,26 @@ fn collect_raw_capture_uses(
                     collect_raw_capture_uses(s, n, locals, scopes, type_ctx, out);
                 }
                 locals.pop();
+            }
+        }
+        Expr::LetElse {
+            bindings,
+            target,
+            else_body,
+            ..
+        } => {
+            collect_raw_capture_uses(target, CaptureNeed::Consume, locals, scopes, type_ctx, out);
+            locals.push(HashSet::new());
+            for s in else_body {
+                collect_raw_capture_uses(s, CaptureNeed::Consume, locals, scopes, type_ctx, out);
+            }
+            locals.pop();
+            if let Some(cur) = locals.last_mut() {
+                for (b_name, _) in bindings {
+                    if b_name != "_" {
+                        cur.insert(b_name.clone());
+                    }
+                }
             }
         }
         Expr::Assign(name, rhs, span) => {
@@ -409,7 +447,7 @@ fn collect_raw_capture_uses(
         | Expr::Shl(l, r, _)
         | Expr::Shr(l, r, _)
         | Expr::IndexAccess(l, r, _)
-        | Expr::Range(l, r, _) => {
+        | Expr::Range(l, r, _, _) => {
             collect_raw_capture_uses(l, CaptureNeed::Read, locals, scopes, type_ctx, out);
             collect_raw_capture_uses(r, CaptureNeed::Read, locals, scopes, type_ctx, out);
         }
@@ -419,7 +457,7 @@ fn collect_raw_capture_uses(
         | Expr::Cast(inner, _, _) => {
             collect_raw_capture_uses(inner, ctx_need, locals, scopes, type_ctx, out);
         }
-        Expr::Return(opt_e, _) => {
+        Expr::Return(opt_e, _) | Expr::Break(opt_e, _) => {
             if let Some(e) = opt_e {
                 collect_raw_capture_uses(e, CaptureNeed::Consume, locals, scopes, type_ctx, out);
             }
@@ -432,7 +470,7 @@ fn collect_raw_capture_uses(
         Expr::ObjInit(_, _, _) | Expr::EnumConstruct(_, _, _, _) => {
             unreachable_fields_walk(expr, locals, scopes, type_ctx, out);
         }
-        Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::String(..) | Expr::Break(..) | Expr::Continue(..) => {}
+        Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::String(..) | Expr::Continue(..) => {}
     }
 }
 
@@ -888,6 +926,17 @@ fn rewrite_closure_body(
             }
             Expr::LetTuple(pat.clone(), *opt_ty, nv, span.clone())
         }
+        Expr::LetStruct(pat, opt_ty, val, span) => {
+            let nv = Box::new(rewrite_closure_body(val, captures, locals));
+            if let Some(cur) = locals.last_mut() {
+                for f in &pat.fields {
+                    if f.binding_name != "_" {
+                        cur.insert(f.binding_name.clone());
+                    }
+                }
+            }
+            Expr::LetStruct(pat.clone(), *opt_ty, nv, span.clone())
+        }
         Expr::Block(stmts, span) => {
             locals.push(HashSet::new());
             let out: Vec<Expr> = stmts.iter().map(|s| rewrite_closure_body(s, captures, locals)).collect();
@@ -906,6 +955,12 @@ fn rewrite_closure_body(
             let nb = Box::new(rewrite_closure_body(b, captures, locals));
             locals.pop();
             Expr::While(nc, nb, span.clone())
+        }
+        Expr::Loop(b, span) => {
+            locals.push(HashSet::new());
+            let nb = Box::new(rewrite_closure_body(b, captures, locals));
+            locals.pop();
+            Expr::Loop(nb, span.clone())
         }
         Expr::If(c, b, span) => {
             let nc = Box::new(rewrite_closure_body(c, captures, locals));
@@ -930,17 +985,52 @@ fn rewrite_closure_body(
                 .iter()
                 .map(|arm| {
                     locals.push(arm.bindings.iter().cloned().collect());
+                    let new_guard = arm
+                        .guard
+                        .as_ref()
+                        .map(|g| Box::new(rewrite_closure_body(g, captures, locals)));
                     let body = arm.body.iter().map(|s| rewrite_closure_body(s, captures, locals)).collect();
                     locals.pop();
                     crate::ast::MatchArm {
                         variant_name: arm.variant_name.clone(),
                         bindings: arm.bindings.clone(),
+                        alt_patterns: arm.alt_patterns.clone(),
+                        guard: new_guard,
                         body,
                         span: arm.span.clone(),
                     }
                 })
                 .collect();
             Expr::Match(nt, new_arms, span.clone())
+        }
+        Expr::LetElse {
+            variant_name,
+            bindings,
+            target,
+            else_body,
+            span,
+        } => {
+            let nt = Box::new(rewrite_closure_body(target, captures, locals));
+            locals.push(HashSet::new());
+            let new_else = else_body
+                .iter()
+                .map(|s| rewrite_closure_body(s, captures, locals))
+                .collect();
+            locals.pop();
+            if let Some(cur) = locals.last_mut() {
+                for (b_name, _) in bindings {
+                    if b_name != "_" {
+                        cur.insert(b_name.clone());
+                    }
+                }
+            }
+            Expr::LetElse {
+                variant_name: variant_name.clone(),
+                bindings: bindings.clone(),
+                target: nt,
+                else_body: new_else,
+                span: span.clone(),
+            }
         }
         Expr::Closure(is_mv, inner_ps, inner_body, span) => {
             let mut s = HashSet::new();
@@ -971,7 +1061,7 @@ fn rewrite_closure_body(
         Expr::Shl(l, r, s) => Expr::Shl(Box::new(rewrite_closure_body(l, captures, locals)), Box::new(rewrite_closure_body(r, captures, locals)), s.clone()),
         Expr::Shr(l, r, s) => Expr::Shr(Box::new(rewrite_closure_body(l, captures, locals)), Box::new(rewrite_closure_body(r, captures, locals)), s.clone()),
         Expr::IndexAccess(l, r, s) => Expr::IndexAccess(Box::new(rewrite_closure_body(l, captures, locals)), Box::new(rewrite_closure_body(r, captures, locals)), s.clone()),
-        Expr::Range(l, r, s) => Expr::Range(Box::new(rewrite_closure_body(l, captures, locals)), Box::new(rewrite_closure_body(r, captures, locals)), s.clone()),
+        Expr::Range(l, r, inc, s) => Expr::Range(Box::new(rewrite_closure_body(l, captures, locals)), Box::new(rewrite_closure_body(r, captures, locals)), *inc, s.clone()),
         Expr::IndexAssign(t, i, v, s) => Expr::IndexAssign(
             Box::new(rewrite_closure_body(t, captures, locals)),
             Box::new(rewrite_closure_body(i, captures, locals)),
@@ -983,6 +1073,7 @@ fn rewrite_closure_body(
         Expr::Try(i, s) => Expr::Try(Box::new(rewrite_closure_body(i, captures, locals)), s.clone()),
         Expr::Cast(i, ty, s) => Expr::Cast(Box::new(rewrite_closure_body(i, captures, locals)), *ty, s.clone()),
         Expr::Return(opt_e, s) => Expr::Return(opt_e.as_ref().map(|e| Box::new(rewrite_closure_body(e, captures, locals))), s.clone()),
+        Expr::Break(opt_e, s) => Expr::Break(opt_e.as_ref().map(|e| Box::new(rewrite_closure_body(e, captures, locals))), s.clone()),
         Expr::ArrayInit(elems, s) => Expr::ArrayInit(elems.iter().map(|e| rewrite_closure_body(e, captures, locals)).collect(), s.clone()),
         Expr::TupleInit(elems, s) => Expr::TupleInit(elems.iter().map(|e| rewrite_closure_body(e, captures, locals)).collect(), s.clone()),
         Expr::ObjInit(n, fs, s) => Expr::ObjInit(n.clone(), fs.iter().map(|(fnm, e)| (fnm.clone(), rewrite_closure_body(e, captures, locals))).collect(), s.clone()),
@@ -1166,6 +1257,8 @@ pub fn build_closure<'a>(
             vis: Visibility::Pub,
             module_path: type_ctx.current_module.clone(),
             field_vis,
+            repr_align: 1,
+            repr_packed: None,
         },
     );
 

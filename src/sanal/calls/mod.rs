@@ -917,7 +917,7 @@ pub fn type_check_call<'a>(
         }
     }
 
-    let (mut resolved_name, deferred_target_func) = resolve_call_target(
+    let (mut resolved_name, mut deferred_target_func) = resolve_call_target(
         raw_name,
         &name,
         resolved_name,
@@ -927,6 +927,72 @@ pub fn type_check_call<'a>(
         type_ctx,
         span,
     );
+
+    if is_method_syntax && resolved_name == name && deferred_target_func.is_none() && !typed_args.is_empty() {
+        let has_callable_field = crate::sanal::objects::construction::lookup_struct_layout_for_type(
+            type_ctx,
+            type_ctx.infer.borrow_mut().resolve(typed_args[0].ty()),
+        )
+        .is_some_and(|(_, layout)| layout.field_offsets.contains_key(raw_name));
+        if !has_callable_field {
+            let mut probe_args = typed_args.clone();
+            let mut deref_depth = 0usize;
+            for step in 1..=8 {
+                let mut probe_errs = Vec::new();
+                let Some((derefed, _)) = crate::sanal::refs::try_lower_deref_target(
+                    scopes,
+                    &mut probe_errs,
+                    type_ctx,
+                    &probe_args[0],
+                    false,
+                    span,
+                ) else {
+                    break;
+                };
+                probe_args[0] = derefed;
+                let (cand_name, cand_deferred) = resolve_call_target(
+                    raw_name,
+                    &name,
+                    name.clone(),
+                    is_direct_concrete_fn,
+                    is_generic_fn,
+                    &probe_args,
+                    type_ctx,
+                    span,
+                );
+                if cand_name != name || cand_deferred.is_some() {
+                    deref_depth = step;
+                    resolved_name = cand_name;
+                    deferred_target_func = cand_deferred;
+                    break;
+                }
+            }
+            if deref_depth > 0 {
+                let mut_self = deferred_target_func
+                    .as_ref()
+                    .and_then(|f| f.params.first())
+                    .is_some_and(|p| matches!(p.ty, Type::MutRef(_)))
+                    || type_ctx
+                        .get_fn(&resolved_name)
+                        .and_then(|f| f.params.first().map(|p| matches!(p.ty, Type::MutRef(_))))
+                        .unwrap_or(false);
+                let mut cur = typed_args[0].clone();
+                for _ in 0..deref_depth {
+                    if let Some((derefed, _)) = crate::sanal::refs::try_lower_deref_target(
+                        scopes,
+                        errors,
+                        type_ctx,
+                        &cur,
+                        mut_self,
+                        span,
+                    ) {
+                        cur = derefed;
+                    }
+                }
+                typed_args[0] = cur;
+            }
+        }
+    }
 
     if (raw_name.ends_with(".push") || raw_name.ends_with("::push") || raw_name == "push") && typed_args.len() >= 2 {
         let elem_ty = type_ctx.infer.borrow_mut().resolve(typed_args[1].ty());

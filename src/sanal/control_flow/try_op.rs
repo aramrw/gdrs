@@ -112,18 +112,20 @@ pub fn type_check_try<'a>(
             })
             .unwrap_or((crate::ast::intern_str(&ret_enum_name), 1));
 
-        let arm_some = TypedMatchArm {
-            variant_name: format!("{enum_name}::Some"),
-            tag: some_tag,
-            bindings: vec![("__try_val".to_string(), payload_ty)],
-            body: vec![TypedExpr::Ident("__try_val".to_string(), payload_ty, span.clone())],
-            span: span.clone(),
-        };
-        let arm_none = TypedMatchArm {
-            variant_name: format!("{enum_name}::None"),
-            tag: none_tag,
-            bindings: vec![],
-            body: vec![TypedExpr::Return(
+        let arm_some = TypedMatchArm::simple(
+            format!("{enum_name}::Some"),
+            some_tag,
+            false,
+            vec![("__try_val".to_string(), payload_ty)],
+            vec![TypedExpr::Ident("__try_val".to_string(), payload_ty, span.clone())],
+            span.clone(),
+        );
+        let arm_none = TypedMatchArm::simple(
+            format!("{enum_name}::None"),
+            none_tag,
+            false,
+            vec![],
+            vec![TypedExpr::Return(
                 Some(Box::new(TypedExpr::EnumConstruct(
                     ret_static.to_string(),
                     "None".to_string(),
@@ -134,8 +136,8 @@ pub fn type_check_try<'a>(
                 ))),
                 span.clone(),
             )],
-            span: span.clone(),
-        };
+            span.clone(),
+        );
         Some(TypedExpr::Match(
             Box::new(t_inner),
             vec![arm_some, arm_none],
@@ -161,18 +163,20 @@ pub fn type_check_try<'a>(
             })
             .unwrap_or((crate::ast::intern_str(&ret_enum_name), 1));
 
-        let arm_ok = TypedMatchArm {
-            variant_name: format!("{enum_name}::Ok"),
-            tag: ok_tag,
-            bindings: vec![("__try_val".to_string(), payload_ty)],
-            body: vec![TypedExpr::Ident("__try_val".to_string(), payload_ty, span.clone())],
-            span: span.clone(),
-        };
-        let arm_err = TypedMatchArm {
-            variant_name: format!("{enum_name}::Err"),
-            tag: err_tag,
-            bindings: vec![("__try_err".to_string(), err_ty)],
-            body: vec![TypedExpr::Return(
+        let arm_ok = TypedMatchArm::simple(
+            format!("{enum_name}::Ok"),
+            ok_tag,
+            false,
+            vec![("__try_val".to_string(), payload_ty)],
+            vec![TypedExpr::Ident("__try_val".to_string(), payload_ty, span.clone())],
+            span.clone(),
+        );
+        let arm_err = TypedMatchArm::simple(
+            format!("{enum_name}::Err"),
+            err_tag,
+            false,
+            vec![("__try_err".to_string(), err_ty)],
+            vec![TypedExpr::Return(
                 Some(Box::new(TypedExpr::EnumConstruct(
                     ret_static.to_string(),
                     "Err".to_string(),
@@ -183,8 +187,8 @@ pub fn type_check_try<'a>(
                 ))),
                 span.clone(),
             )],
-            span: span.clone(),
-        };
+            span.clone(),
+        );
         Some(TypedExpr::Match(
             Box::new(t_inner),
             vec![arm_ok, arm_err],

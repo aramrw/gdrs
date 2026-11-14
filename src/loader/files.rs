@@ -320,11 +320,21 @@ pub fn load_source_str(
 
     // Mangle and push impls
     for mut i in program.impls {
-        if use_aliases.contains_key(&i.target_type) {
-            i.target_type = use_aliases[&i.target_type].clone();
-        } else if !prefix_str.is_empty() && local_types.contains(&i.target_type) {
-            i.target_type = format!("{}{}", prefix_str, i.target_type);
-        }
+        let (ref_prefix, base_target) = if let Some(rest) = i.target_type.strip_prefix("&mut ") {
+            ("&mut ", rest.to_string())
+        } else if let Some(rest) = i.target_type.strip_prefix('&') {
+            ("&", rest.to_string())
+        } else {
+            ("", i.target_type.clone())
+        };
+        let resolved_base = if use_aliases.contains_key(&base_target) {
+            use_aliases[&base_target].clone()
+        } else if !prefix_str.is_empty() && local_types.contains(&base_target) {
+            format!("{}{}", prefix_str, base_target)
+        } else {
+            base_target
+        };
+        i.target_type = format!("{ref_prefix}{resolved_base}");
 
         if let Some(t_name) = &mut i.trait_name {
             if use_aliases.contains_key(t_name) {

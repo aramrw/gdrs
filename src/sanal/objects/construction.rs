@@ -47,6 +47,8 @@ pub(crate) fn lookup_struct_layout_for_type<'a>(
                     field_offsets.insert(f.name.clone(), (0, f.ty));
                     field_vis.insert(f.name.clone(), f.vis);
                 }
+                let (repr_align, repr_packed) =
+                    crate::sanal::parse_struct_repr(&decl.attributes, &mut Vec::new());
                 StructLayout {
                     name: decl.name.clone(),
                     total_size: 0,
@@ -54,6 +56,8 @@ pub(crate) fn lookup_struct_layout_for_type<'a>(
                     vis: decl.vis,
                     module_path: decl.module_path.clone(),
                     field_vis,
+                    repr_align,
+                    repr_packed,
                 }
             })
     })?;

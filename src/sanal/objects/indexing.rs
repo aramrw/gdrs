@@ -133,7 +133,7 @@ pub fn type_check_index_access<'a>(
     let target_ty = resolved_target;
 
     if is_range {
-        if let TypedExpr::Range(ref s_expr, ref e_expr, _, _) = t_idx {
+        if let TypedExpr::Range(ref s_expr, ref e_expr, _, _, _) = t_idx {
             for bound_expr in [s_expr.as_ref(), e_expr.as_ref()] {
                 let b_ty = type_ctx.infer.borrow_mut().probe(bound_expr.ty());
                 if matches!(b_ty, Type::Infer(_)) {

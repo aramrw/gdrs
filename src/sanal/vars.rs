@@ -240,17 +240,23 @@ pub fn type_check_ident<'a>(
                         .find(|(k, _)| k.as_str() == normalized || k.ends_with(&format!("_{normalized}")))
                         .map(|(_, v)| v)
                 })
-                .map(|decl| crate::sanal::StructLayout {
-                    name: decl.name.clone(),
-                    total_size: 0,
-                    field_offsets: std::collections::HashMap::new(),
-                    vis: decl.vis,
-                    module_path: decl.module_path.clone(),
-                    field_vis: decl
-                        .fields
-                        .iter()
-                        .map(|f| (f.name.clone(), f.vis))
-                        .collect(),
+                .map(|decl| {
+                    let (repr_align, repr_packed) =
+                        crate::sanal::parse_struct_repr(&decl.attributes, &mut Vec::new());
+                    crate::sanal::StructLayout {
+                        name: decl.name.clone(),
+                        total_size: 0,
+                        field_offsets: std::collections::HashMap::new(),
+                        vis: decl.vis,
+                        module_path: decl.module_path.clone(),
+                        field_vis: decl
+                            .fields
+                            .iter()
+                            .map(|f| (f.name.clone(), f.vis))
+                            .collect(),
+                        repr_align,
+                        repr_packed,
+                    }
                 })
         });
         let found_enum = type_ctx.get_enum(&normalized);
@@ -611,7 +617,7 @@ pub fn type_check_let<'a>(
     ))
 }
 
-fn bind_tuple_pattern(
+pub fn bind_tuple_pattern(
     scopes: &mut ScopeStack,
     errors: &mut Vec<SemanticError>,
     type_ctx: &TypeCtx<'_>,
@@ -759,6 +765,206 @@ pub fn type_check_let_tuple<'a>(
     let typed_pat = bind_tuple_pattern(scopes, errors, type_ctx, pat, final_ty);
 
     Some(TypedExpr::LetTuple(
+        typed_pat,
+        final_ty,
+        Box::new(typed_val),
+        span.clone(),
+    ))
+}
+
+pub fn type_check_let_struct<'a>(
+    scopes: &mut ScopeStack,
+    errors: &mut Vec<SemanticError>,
+    type_ctx: &TypeCtx<'a>,
+    pat: &crate::ast::StructPattern,
+    explicit_ty: Option<&Type>,
+    value: &Expr,
+    span: &Span,
+) -> Option<TypedExpr> {
+    let resolved_explicit = explicit_ty.map(|t| type_ctx.resolve_type_annotation(*t));
+    let mut let_ctx = type_ctx.clone();
+    if resolved_explicit.is_some() {
+        let_ctx.current_expected_type = resolved_explicit;
+    }
+    let typed_val = type_check_expr(scopes, errors, &let_ctx, value)?;
+    let inferred_ty = type_ctx.infer.borrow_mut().resolve(typed_val.ty());
+
+    let final_ty = if let Some(annotated) = resolved_explicit {
+        let unify_res = type_ctx.infer.borrow_mut().unify(annotated, inferred_ty);
+        let resolved_inferred = type_ctx.infer.borrow_mut().resolve(inferred_ty);
+        let resolved_annotated = type_ctx.infer.borrow_mut().resolve(annotated);
+        if unify_res.is_err() && !is_type_compatible(&resolved_annotated, &resolved_inferred) {
+            errors.push(SemanticError {
+                code: "E0308",
+                message: format!(
+                    "Cannot destructure value of type `{resolved_inferred:?}` as `{resolved_annotated:?}`"
+                ),
+                label: "Type mismatch in struct `let` binding".to_string(),
+                secondary_label: None,
+                help: None,
+                span: span.clone(),
+            });
+        }
+        resolved_annotated
+    } else {
+        inferred_ty
+    };
+
+    type_ctx.check_not_moved_from_projection(&typed_val, errors);
+    mark_expr_moved_if_ident(scopes, errors, &typed_val);
+
+    let Some((struct_name, layout)) =
+        crate::sanal::objects::construction::lookup_struct_layout_for_type(type_ctx, final_ty)
+    else {
+        errors.push(SemanticError {
+            code: "E0308",
+            message: format!(
+                "Mismatched types in struct destructuring: expected struct `{}`, found `{:?}`",
+                pat.struct_path, final_ty
+            ),
+            label: "Expected struct value".to_string(),
+            secondary_label: None,
+            help: None,
+            span: span.clone(),
+        });
+        return None;
+    };
+
+    let pat_base = pat.struct_path.rsplit("::").next().unwrap_or(&pat.struct_path);
+    let matches_pat_struct = struct_name == pat.struct_path
+        || struct_name == pat_base
+        || struct_name.ends_with(&format!("_{}", pat.struct_path))
+        || struct_name.ends_with(&format!("_{pat_base}"))
+        || struct_name.starts_with(&format!("{}_", pat.struct_path))
+        || struct_name.starts_with(&format!("{pat_base}_"));
+    if !matches_pat_struct {
+        errors.push(SemanticError {
+            code: "E0308",
+            message: format!(
+                "Mismatched types in struct destructuring: expected `{}`, found `{struct_name}`",
+                pat.struct_path
+            ),
+            label: "Wrong struct type in pattern".to_string(),
+            secondary_label: None,
+            help: None,
+            span: pat.span.clone(),
+        });
+    }
+
+    if type_ctx
+        .fn_map
+        .borrow()
+        .contains_key(&format!("{struct_name}_drop"))
+    {
+        errors.push(SemanticError {
+            code: "E0509",
+            message: format!(
+                "Cannot move out of type `{struct_name}`, which implements the `Drop` trait"
+            ),
+            label: "Cannot destructure a type with a custom `Drop` implementation".to_string(),
+            secondary_label: None,
+            help: Some("Access fields by reference or remove `impl Drop`".to_string()),
+            span: pat.span.clone(),
+        });
+    }
+
+    let mut seen_fields = std::collections::HashSet::new();
+    let mut bindings = Vec::new();
+    let mut dropped_fields = Vec::new();
+
+    for f in &pat.fields {
+        if !seen_fields.insert(f.field_name.clone()) {
+            errors.push(SemanticError {
+                code: "E0025",
+                message: format!(
+                    "Field `{}` bound more than once in `{struct_name}` pattern",
+                    f.field_name
+                ),
+                label: "Duplicate field in struct pattern".to_string(),
+                secondary_label: None,
+                help: None,
+                span: f.span.clone(),
+            });
+            continue;
+        }
+        let Some(&(offset, raw_f_ty)) = layout.field_offsets.get(&f.field_name) else {
+            errors.push(SemanticError {
+                code: "E0026",
+                message: format!("Struct `{struct_name}` does not have a field named `{}`", f.field_name),
+                label: "Unknown field in struct pattern".to_string(),
+                secondary_label: None,
+                help: None,
+                span: f.span.clone(),
+            });
+            continue;
+        };
+        if let Some(&f_vis) = layout.field_vis.get(&f.field_name) {
+            if !crate::ast::is_visible(f_vis, &layout.module_path, &type_ctx.current_module) {
+                errors.push(SemanticError {
+                    code: "E0616",
+                    message: format!("Field `{}` of struct `{struct_name}` is private", f.field_name),
+                    label: "Private field".to_string(),
+                    secondary_label: None,
+                    help: Some(format!(
+                        "Mark `{}` with `pub` if it should be accessible outside its module",
+                        f.field_name
+                    )),
+                    span: f.span.clone(),
+                });
+            }
+        }
+
+        let resolved_f_ty = type_ctx.resolve_type_annotation(raw_f_ty);
+        if f.binding_name == "_" {
+            dropped_fields.push((f.field_name.clone(), resolved_f_ty, offset));
+        } else {
+            scopes.declare(f.binding_name.clone(), f.is_mutable, resolved_f_ty);
+            bindings.push(crate::ast::TypedStructPatternField {
+                field_name: f.field_name.clone(),
+                binding_name: f.binding_name.clone(),
+                is_mutable: f.is_mutable,
+                ty: resolved_f_ty,
+                offset,
+                span: f.span.clone(),
+            });
+        }
+    }
+
+    let mut missing_fields: Vec<String> = layout
+        .field_offsets
+        .keys()
+        .filter(|fname| !seen_fields.contains(*fname))
+        .cloned()
+        .collect();
+    missing_fields.sort();
+
+    if !pat.has_rest && !missing_fields.is_empty() {
+        errors.push(SemanticError {
+            code: "E0027",
+            message: format!(
+                "Pattern `{struct_name} {{ ... }}` does not mention field(s): {}",
+                missing_fields.join(", ")
+            ),
+            label: "Missing fields in struct pattern".to_string(),
+            secondary_label: None,
+            help: Some("List the remaining fields or add `..` to ignore the rest".to_string()),
+            span: pat.span.clone(),
+        });
+    } else {
+        for fname in missing_fields {
+            if let Some(&(off, raw_f_ty)) = layout.field_offsets.get(&fname) {
+                dropped_fields.push((fname, type_ctx.resolve_type_annotation(raw_f_ty), off));
+            }
+        }
+    }
+
+    let typed_pat = crate::ast::TypedStructPattern {
+        struct_name,
+        bindings,
+        dropped_fields,
+        span: pat.span.clone(),
+    };
+    Some(TypedExpr::LetStruct(
         typed_pat,
         final_ty,
         Box::new(typed_val),

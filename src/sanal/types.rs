@@ -31,6 +31,13 @@ fn parse_suffix_to_type(s: &str) -> Option<Type> {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct LoopBreakTracker {
+    pub allow_value: bool,
+    pub expected_ty: Option<Type>,
+    pub seen_types: Vec<(Type, crate::ast::Span)>,
+}
+
 #[derive(Clone)]
 pub struct TypeCtx<'a> {
     pub fn_map: &'a RefCell<HashMap<String, FuncDecl>>,
@@ -48,6 +55,7 @@ pub struct TypeCtx<'a> {
     pub extern_vis: &'a HashMap<String, (crate::ast::Visibility, Vec<String>)>,
     pub is_unsafe: bool,
     pub loop_depth: usize,
+    pub current_loop_breaks: Option<std::rc::Rc<RefCell<LoopBreakTracker>>>,
     pub current_return_type: Option<Type>,
     pub current_expected_type: Option<Type>,
     pub mono: &'a RefCell<Monomorphizer>,
@@ -181,7 +189,10 @@ impl<'a> TypeCtx<'a> {
                 if matches!(
                     inner.as_ref(),
                     TypedExpr::Call(fn_name, ..)
-                        if fn_name.ends_with("_index") || fn_name.ends_with("_index_mut")
+                        if fn_name.ends_with("_index")
+                            || fn_name.ends_with("_index_mut")
+                            || fn_name.ends_with("_deref")
+                            || fn_name.ends_with("_deref_mut")
                 ) && self.has_drop_ownership(elem_ty) =>
             {
                 errors.push(SemanticError {
@@ -312,6 +323,8 @@ impl<'a> TypeCtx<'a> {
                         field_vis.insert(field.name.clone(), field.vis);
                         offset += 8;
                     }
+                    let (repr_align, repr_packed) =
+                        crate::sanal::parse_struct_repr(&decl.attributes, &mut Vec::new());
                     return Some(StructLayout {
                         name: name.to_string(),
                         total_size: offset,
@@ -319,6 +332,8 @@ impl<'a> TypeCtx<'a> {
                         vis: decl.vis,
                         module_path: decl.module_path.clone(),
                         field_vis,
+                        repr_align,
+                        repr_packed,
                     });
                 }
             }
@@ -477,7 +492,7 @@ pub fn type_check_expr<'a>(
         Expr::Float(f, span) => Some(TypedExpr::Float(*f, span.clone())),
         Expr::Bool(b, span) => Some(TypedExpr::Bool(*b, span.clone())),
         Expr::String(s, span) => Some(TypedExpr::String(s.clone(), span.clone())),
-        Expr::Range(start, end, span) => {
+        Expr::Range(start, end, inclusive, span) => {
             let t_start = type_check_expr(scopes, errors, type_ctx, start)?;
             let t_end = if let Expr::Ident(end_name, end_span) = end.as_ref() {
                 if end_name == "__slice_len__" {
@@ -491,6 +506,7 @@ pub fn type_check_expr<'a>(
             Some(TypedExpr::Range(
                 Box::new(t_start),
                 Box::new(t_end),
+                *inclusive,
                 Type::Obj(crate::ast::intern_str("Range")),
                 span.clone(),
             ))
@@ -503,6 +519,9 @@ pub fn type_check_expr<'a>(
         }
         Expr::LetTuple(pat, explicit_ty, value, span) => {
             vars::type_check_let_tuple(scopes, errors, type_ctx, pat, explicit_ty.as_ref(), value, span)
+        }
+        Expr::LetStruct(pat, explicit_ty, value, span) => {
+            vars::type_check_let_struct(scopes, errors, type_ctx, pat, explicit_ty.as_ref(), value, span)
         }
         Expr::Assign(name, value, span) => {
             vars::type_check_assign(scopes, errors, type_ctx, name, value, span)
@@ -536,12 +555,29 @@ pub fn type_check_expr<'a>(
         Expr::Block(stmts, span) => control_flow::type_check_block(scopes, errors, type_ctx, stmts, span),
         Expr::Unsafe(stmts, span) => control_flow::type_check_unsafe(scopes, errors, type_ctx, stmts, span),
         Expr::Match(target_expr, arms, span) => control_flow::type_check_match(scopes, errors, type_ctx, target_expr, arms, span),
+        Expr::LetElse {
+            variant_name,
+            bindings,
+            target,
+            else_body,
+            span,
+        } => control_flow::type_check_let_else(
+            scopes,
+            errors,
+            type_ctx,
+            variant_name,
+            bindings,
+            target,
+            else_body,
+            span,
+        ),
         Expr::Try(inner_expr, span) => control_flow::type_check_try(scopes, errors, type_ctx, inner_expr, span),
         Expr::While(cond, body, span) => control_flow::type_check_while(scopes, errors, type_ctx, cond, body, span),
+        Expr::Loop(body, span) => control_flow::type_check_loop(scopes, errors, type_ctx, body, span),
         Expr::If(cond, body, span) => control_flow::type_check_if(scopes, errors, type_ctx, cond, body, span),
         Expr::IfElse(cond, then_b, else_b, span) => control_flow::type_check_if_else(scopes, errors, type_ctx, cond, then_b, else_b, span),
         Expr::Return(opt_expr, span) => control_flow::type_check_return(scopes, errors, type_ctx, opt_expr.as_deref(), span),
-        Expr::Break(span) => control_flow::type_check_break(errors, type_ctx, span),
+        Expr::Break(opt_expr, span) => control_flow::type_check_break(scopes, errors, type_ctx, opt_expr.as_deref(), span),
         Expr::Continue(span) => control_flow::type_check_continue(errors, type_ctx, span),
 
         // Functions & Invocation

@@ -12,7 +12,17 @@ use crate::codegen::drops::{
     mark_drop_flag_moved,
 };
 use crate::codegen::expr::{coerce_val, cranelift_type_of};
+use crate::codegen::layout::ReprKind;
 use crate::sanal::StructLayout;
+
+#[derive(Clone, Copy)]
+pub struct LoopTarget {
+    pub header_block: Block,
+    pub exit_block: Block,
+    pub scope_depth: usize,
+    pub temp_depth: usize,
+    pub result_repr: Option<(ReprKind, Option<Value>)>,
+}
 
 pub struct ProgramMeta<'a> {
     pub struct_layouts: HashMap<String, StructLayout>,
@@ -65,8 +75,9 @@ impl<'a> ProgramMeta<'a> {
         for imp in &program.impls {
             if let Some(ref tr_name) = imp.trait_name {
                 if tr_name != "Drop" && !tr_name.ends_with("Drop") {
+                    let prefix = crate::ast::impl_method_prefix(&imp.target_type);
                     for m in &imp.methods {
-                        non_drop_trait_methods.insert(format!("{}_{}", imp.target_type, m.name));
+                        non_drop_trait_methods.insert(format!("{prefix}_{}", m.name));
                     }
                 }
             }
@@ -191,7 +202,7 @@ pub struct CodegenCtx<'a, 'b> {
     pub var_counter: usize,
     pub scopes: Vec<ScopeFrame>,
     pub drop_flags: HashMap<String, StackSlot>,
-    pub loop_stack: Vec<(Block, Block, usize, usize)>,
+    pub loop_stack: Vec<LoopTarget>,
     /// Variables whose address is taken via `&` / `&mut` inside this function.
     pub addr_taken: HashSet<String>,
     /// Stack slots backing addressable scalar variables so `&mut x` mutates `x` in place.

@@ -13,7 +13,10 @@ use crate::{
 
 fn block_tail_ty(last: Option<&TypedExpr>) -> Type {
     match last {
-        Some(TypedExpr::Let(..)) | Some(TypedExpr::LetTuple(..)) | None => Type::Unit,
+        Some(TypedExpr::Let(..))
+        | Some(TypedExpr::LetTuple(..))
+        | Some(TypedExpr::LetStruct(..))
+        | None => Type::Unit,
         Some(expr) => expr.ty(),
     }
 }
@@ -37,7 +40,7 @@ pub fn type_check_block<'a>(
     }
     if let Some(last) = typed_stmts.last() {
         consume_tail_expr(scopes, errors, type_ctx, last);
-        if !matches!(last, TypedExpr::Let(..) | TypedExpr::LetTuple(..)) {
+        if !matches!(last, TypedExpr::Let(..) | TypedExpr::LetTuple(..) | TypedExpr::LetStruct(..)) {
             check_block_escape_lifetime(scopes, last, errors);
         }
     }
@@ -67,7 +70,7 @@ pub fn type_check_unsafe<'a>(
     }
     if let Some(last) = typed_stmts.last() {
         consume_tail_expr(scopes, errors, &unsafe_ctx, last);
-        if !matches!(last, TypedExpr::Let(..) | TypedExpr::LetTuple(..)) {
+        if !matches!(last, TypedExpr::Let(..) | TypedExpr::LetTuple(..) | TypedExpr::LetStruct(..)) {
             check_block_escape_lifetime(scopes, last, errors);
         }
     }

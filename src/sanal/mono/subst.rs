@@ -283,6 +283,20 @@ pub fn substitute_expr(expr: &Expr, env: &HashMap<String, Type>) -> Expr {
             Box::new(substitute_expr(val, env)),
             span.clone(),
         ),
+        Expr::LetStruct(pat, opt_ty, val, span) => {
+            let mut new_pat = pat.clone();
+            if pat.struct_path == "Self" {
+                if let Some(Type::Obj(self_name)) = env.get("Self") {
+                    new_pat.struct_path = (*self_name).to_string();
+                }
+            }
+            Expr::LetStruct(
+                new_pat,
+                opt_ty.map(|t| substitute_type(t, env)),
+                Box::new(substitute_expr(val, env)),
+                span.clone(),
+            )
+        }
         Expr::Block(stmts, span) => Expr::Block(
             stmts.iter().map(|s| substitute_expr(s, env)).collect(),
             span.clone(),
@@ -301,6 +315,10 @@ pub fn substitute_expr(expr: &Expr, env: &HashMap<String, Type>) -> Expr {
             Box::new(substitute_expr(body, env)),
             span.clone(),
         ),
+        Expr::Loop(body, span) => Expr::Loop(
+            Box::new(substitute_expr(body, env)),
+            span.clone(),
+        ),
         Expr::If(cond, body, span) => Expr::If(
             Box::new(substitute_expr(cond, env)),
             Box::new(substitute_expr(body, env)),
@@ -316,7 +334,10 @@ pub fn substitute_expr(expr: &Expr, env: &HashMap<String, Type>) -> Expr {
             opt_val.as_ref().map(|v| Box::new(substitute_expr(v, env))),
             span.clone(),
         ),
-        Expr::Break(span) => Expr::Break(span.clone()),
+        Expr::Break(opt_val, span) => Expr::Break(
+            opt_val.as_ref().map(|v| Box::new(substitute_expr(v, env))),
+            span.clone(),
+        ),
         Expr::Continue(span) => Expr::Continue(span.clone()),
         Expr::MacroCall(name, args, span) => Expr::MacroCall(
             name.clone(),
@@ -455,12 +476,27 @@ pub fn substitute_expr(expr: &Expr, env: &HashMap<String, Type>) -> Expr {
                 .map(|arm| MatchArm {
                     variant_name: arm.variant_name.clone(),
                     bindings: arm.bindings.clone(),
+                    alt_patterns: arm.alt_patterns.clone(),
+                    guard: arm.guard.as_ref().map(|g| Box::new(substitute_expr(g, env))),
                     body: arm.body.iter().map(|s| substitute_expr(s, env)).collect(),
                     span: arm.span.clone(),
                 })
                 .collect(),
             span.clone(),
         ),
+        Expr::LetElse {
+            variant_name,
+            bindings,
+            target,
+            else_body,
+            span,
+        } => Expr::LetElse {
+            variant_name: variant_name.clone(),
+            bindings: bindings.clone(),
+            target: Box::new(substitute_expr(target, env)),
+            else_body: else_body.iter().map(|s| substitute_expr(s, env)).collect(),
+            span: span.clone(),
+        },
         Expr::Ref(inner, is_mut, span) => Expr::Ref(
             Box::new(substitute_expr(inner, env)),
             *is_mut,
@@ -489,9 +525,10 @@ pub fn substitute_expr(expr: &Expr, env: &HashMap<String, Type>) -> Expr {
             substitute_type(*target_ty, env),
             span.clone(),
         ),
-        Expr::Range(start, end, span) => Expr::Range(
+        Expr::Range(start, end, inclusive, span) => Expr::Range(
             Box::new(substitute_expr(start, env)),
             Box::new(substitute_expr(end, env)),
+            *inclusive,
             span.clone(),
         ),
     }

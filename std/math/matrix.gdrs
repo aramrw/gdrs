@@ -1,6 +1,7 @@
 use std::vec::Vec
 use std::fmt::Display
 use std::rand::Rng
+use std::ops::{Add, Sub}
 
 #[derive(Error, Debug)]
 pub enum MatrixError:

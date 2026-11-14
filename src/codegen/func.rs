@@ -353,7 +353,7 @@ fn collect_addr_taken_expr(expr: &TypedExpr, out: &mut std::collections::HashSet
         | TypedExpr::Shr(l, r, _, _)
         | TypedExpr::IndexAccess(l, r, _, _)
         | TypedExpr::DerefAssign(l, r, _)
-        | TypedExpr::Range(l, r, _, _) => {
+        | TypedExpr::Range(l, r, _, _, _) => {
             collect_addr_taken_expr(l, out);
             collect_addr_taken_expr(r, out);
         }
@@ -362,13 +362,14 @@ fn collect_addr_taken_expr(expr: &TypedExpr, out: &mut std::collections::HashSet
         | TypedExpr::Assign(_, inner, _)
         | TypedExpr::Let(_, _, inner, _, _)
         | TypedExpr::LetTuple(_, _, inner, _)
+        | TypedExpr::LetStruct(_, _, inner, _)
         | TypedExpr::FieldAccess(inner, _, _, _)
         | TypedExpr::Deref(inner, _, _)
         | TypedExpr::CastF32(inner, _)
         | TypedExpr::CastI32(inner, _)
         | TypedExpr::Cast(inner, _, _)
         | TypedExpr::CoerceToDyn(inner, _, _) => collect_addr_taken_expr(inner, out),
-        TypedExpr::Return(opt, _) => {
+        TypedExpr::Return(opt, _) | TypedExpr::Break(opt, _) => {
             if let Some(inner) = opt {
                 collect_addr_taken_expr(inner, out);
             }
@@ -377,6 +378,9 @@ fn collect_addr_taken_expr(expr: &TypedExpr, out: &mut std::collections::HashSet
             for s in stmts {
                 collect_addr_taken_expr(s, out);
             }
+        }
+        TypedExpr::Loop(b, _, _) => {
+            collect_addr_taken_expr(b, out);
         }
         TypedExpr::While(c, b, _) | TypedExpr::If(c, b, _) => {
             collect_addr_taken_expr(c, out);
@@ -390,6 +394,9 @@ fn collect_addr_taken_expr(expr: &TypedExpr, out: &mut std::collections::HashSet
         TypedExpr::Match(t, arms, _, _) => {
             collect_addr_taken_expr(t, out);
             for arm in arms {
+                if let Some(g) = &arm.guard {
+                    collect_addr_taken_expr(g, out);
+                }
                 for s in &arm.body {
                     collect_addr_taken_expr(s, out);
                 }
@@ -430,7 +437,6 @@ fn collect_addr_taken_expr(expr: &TypedExpr, out: &mut std::collections::HashSet
         | TypedExpr::Ident(..)
         | TypedExpr::Bool(..)
         | TypedExpr::String(..)
-        | TypedExpr::Break(..)
         | TypedExpr::Continue(..) => {}
     }
 }

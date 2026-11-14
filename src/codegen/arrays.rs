@@ -335,6 +335,28 @@ pub fn compile_index_addr<M: Module>(
     (builder.ins().iadd(buffer_ptr, offset), actual_elem_ty)
 }
 
+fn compile_inclusive_range_end<M: Module>(
+    builder: &mut FunctionBuilder,
+    end_expr: &TypedExpr,
+    inclusive: bool,
+    open_end_val: Value,
+    cg: &mut CodegenCtx,
+    module: &mut M,
+) -> Value {
+    if matches!(end_expr, TypedExpr::Ident(n, _, _) if n == "__slice_len__") {
+        return open_end_val;
+    }
+    let raw_end = compile_expr(builder, end_expr, cg, module);
+    let end_i64 = coerce_val(builder, raw_end, types::I64);
+    if inclusive {
+        let plus_one = builder.ins().iadd_imm(end_i64, 1);
+        let is_neg = builder.ins().icmp_imm(IntCC::SignedLessThan, end_i64, 0);
+        builder.ins().select(is_neg, end_i64, plus_one)
+    } else {
+        end_i64
+    }
+}
+
 pub fn compile_index_access<M: Module>(
     builder: &mut FunctionBuilder,
     target: &TypedExpr,
@@ -343,7 +365,7 @@ pub fn compile_index_access<M: Module>(
     cg: &mut CodegenCtx,
     module: &mut M,
 ) -> Value {
-    if let TypedExpr::Range(start_expr, end_expr, _, range_span) = idx {
+    if let TypedExpr::Range(start_expr, end_expr, inclusive, _, range_span) = idx {
         let (base_ptr, unwrapped_target_ty) =
             eval_index_target_ptr_and_ty(builder, target, cg, module);
         if matches!(
@@ -352,12 +374,9 @@ pub fn compile_index_access<M: Module>(
         ) {
             let raw_start = compile_expr(builder, start_expr, cg, module);
             let start_val = coerce_val(builder, raw_start, types::I64);
-            let end_val = if matches!(end_expr.as_ref(), TypedExpr::Ident(n, _, _) if n == "__slice_len__") {
-                builder.ins().iconst(types::I64, -1)
-            } else {
-                let raw_end = compile_expr(builder, end_expr, cg, module);
-                coerce_val(builder, raw_end, types::I64)
-            };
+            let sentinel = builder.ins().iconst(types::I64, -1);
+            let end_val =
+                compile_inclusive_range_end(builder, end_expr, *inclusive, sentinel, cg, module);
             let is_obj_val = builder.ins().iconst(
                 types::I64,
                 if unwrapped_target_ty == Type::Str { 0 } else { 1 },
@@ -395,12 +414,8 @@ pub fn compile_index_access<M: Module>(
         let len_val = opt_len.unwrap_or_else(|| builder.ins().iconst(types::I64, 0));
         let raw_start = compile_expr(builder, start_expr, cg, module);
         let start_val = coerce_val(builder, raw_start, types::I64);
-        let end_val = if matches!(end_expr.as_ref(), TypedExpr::Ident(n, _, _) if n == "__slice_len__") {
-            len_val
-        } else {
-            let raw_end = compile_expr(builder, end_expr, cg, module);
-            coerce_val(builder, raw_end, types::I64)
-        };
+        let end_val =
+            compile_inclusive_range_end(builder, end_expr, *inclusive, len_val, cg, module);
         emit_slice_bounds_check(builder, start_val, end_val, len_val, range_span, cg, module);
 
         let elem_fallback = match elem_ty {
@@ -589,14 +604,21 @@ pub fn compile_range<M: Module>(
     builder: &mut FunctionBuilder,
     start_expr: &TypedExpr,
     end_expr: &TypedExpr,
+    inclusive: bool,
     cg: &mut CodegenCtx,
     module: &mut M,
 ) -> Value {
     let start = compile_expr(builder, start_expr, cg, module);
     let end = compile_expr(builder, end_expr, cg, module);
+    let adj_end = if inclusive {
+        let end_i64 = coerce_val(builder, end, types::I64);
+        builder.ins().iadd_imm(end_i64, 1)
+    } else {
+        end
+    };
 
     let (_, slot_ptr) = alloc_stack_slot(builder, 16, 8);
     builder.ins().store(MemFlags::new(), start, slot_ptr, 0);
-    builder.ins().store(MemFlags::new(), end, slot_ptr, 8);
+    builder.ins().store(MemFlags::new(), adj_end, slot_ptr, 8);
     slot_ptr
 }

@@ -63,6 +63,22 @@ pub fn find_struct_layout<'a>(
     })
 }
 
+fn effective_field_align(natural_align: u32, repr_packed: Option<u32>) -> u32 {
+    let fa = natural_align.max(1);
+    match repr_packed {
+        Some(pack) => fa.min(pack.max(1)),
+        None => fa,
+    }
+}
+
+fn effective_struct_align(natural_max_align: u32, repr_align: u32, repr_packed: Option<u32>) -> u32 {
+    let base = natural_max_align.max(1);
+    match repr_packed {
+        Some(pack) => base.min(pack.max(1)),
+        None => base.max(repr_align.max(1)),
+    }
+}
+
 /// Recomputes C-ABI aligned offsets and sizes for all structs in `layouts` in a fixed-point pass
 /// so nested structs receive exact field offsets regardless of declaration order.
 pub fn normalize_struct_layouts(
@@ -93,12 +109,13 @@ pub fn normalize_struct_layouts(
                     enum_layouts,
                     &mut HashSet::from([name.clone()]),
                 );
-                let fa = f_align.max(1);
+                let fa = effective_field_align(f_align, layout.repr_packed);
                 offset = align_up(offset, fa);
                 new_fields.insert(fname, (offset, fty));
                 offset += f_size;
                 max_align = max_align.max(fa);
             }
+            max_align = effective_struct_align(max_align, layout.repr_align, layout.repr_packed);
             let total = if offset == 0 { 0 } else { align_up(offset, max_align) };
             if layout.total_size != total || layout.field_offsets != new_fields {
                 layout.total_size = total;
@@ -222,7 +239,7 @@ fn size_and_align_inner(
             }
             let res = if let Some(layout) = find_struct_layout(struct_layouts, name) {
                 if layout.field_offsets.is_empty() {
-                    (0, 1)
+                    (0, effective_struct_align(1, layout.repr_align, layout.repr_packed))
                 } else {
                     let mut ordered: Vec<(u32, Type)> =
                         layout.field_offsets.values().copied().collect();
@@ -232,11 +249,18 @@ fn size_and_align_inner(
                     for (off, fty) in ordered {
                         let (fs, fa) =
                             size_and_align_inner(&fty, struct_layouts, enum_layouts, visited);
-                        max_align = max_align.max(fa);
+                        let eff_fa = effective_field_align(fa, layout.repr_packed);
+                        max_align = max_align.max(eff_fa);
                         max_end = max_end.max(off + fs);
                     }
-                    let computed = align_up(max_end, max_align);
-                    (computed.max(layout.total_size), max_align)
+                    max_align =
+                        effective_struct_align(max_align, layout.repr_align, layout.repr_packed);
+                    let computed = if max_end == 0 {
+                        0
+                    } else {
+                        align_up(max_end, max_align)
+                    };
+                    (computed, max_align)
                 }
             } else if find_enum_layout(name, enum_layouts).is_some() {
                 if is_npo_enum(name) {
@@ -439,7 +463,10 @@ fn collect_hfa_leaves(
             let Some(layout) = find_struct_layout(struct_layouts, name) else {
                 return false;
             };
-            if layout.field_offsets.is_empty() || !visited.insert((*name).to_string()) {
+            if layout.repr_packed.is_some()
+                || layout.field_offsets.is_empty()
+                || !visited.insert((*name).to_string())
+            {
                 return false;
             }
             let mut ordered: Vec<(u32, Type)> = layout.field_offsets.values().copied().collect();
@@ -598,20 +625,37 @@ pub fn abi_signature_for_fn(
 }
 
 /// Allocates a stack slot for an aggregate of `(size, align)` and returns `(slot, stack_addr)`.
+/// When `align > 16` (above typical ABI stack alignment), over-allocates by `align - 1` and aligns
+/// the resulting pointer dynamically so `#[repr(align(N))]` guarantees hold at runtime.
 pub fn alloc_stack_slot(
     builder: &mut FunctionBuilder,
     size: u32,
     align: u32,
 ) -> (StackSlot, Value) {
+    let eff_align = align.max(1);
     let alloc_size = size.max(1);
-    let align_shift = align.max(1).trailing_zeros() as u8;
-    let slot = builder.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        alloc_size,
-        align_shift,
-    ));
-    let addr = builder.ins().stack_addr(types::I64, slot, 0);
-    (slot, addr)
+    if eff_align <= 16 {
+        let align_shift = eff_align.trailing_zeros() as u8;
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            alloc_size,
+            align_shift,
+        ));
+        let addr = builder.ins().stack_addr(types::I64, slot, 0);
+        (slot, addr)
+    } else {
+        let raw_size = alloc_size.saturating_add(eff_align - 1);
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            raw_size,
+            4,
+        ));
+        let raw_addr = builder.ins().stack_addr(types::I64, slot, 0);
+        let mask_low = (eff_align as i64) - 1;
+        let rounded = builder.ins().iadd_imm(raw_addr, mask_low);
+        let aligned = builder.ins().band_imm(rounded, !mask_low);
+        (slot, aligned)
+    }
 }
 
 /// Copies `size` bytes from `src_ptr` to `dst_ptr`.

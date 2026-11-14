@@ -270,6 +270,9 @@ fn finish_overloaded_op_call<'a>(
     type_ctx: &TypeCtx<'a>,
     span: &Span,
 ) -> TypedExpr {
+    if !args.is_empty() && !fn_info.params.is_empty() {
+        auto_borrow_op_arg_if_ref(fn_info.params[0].ty, &mut args[0], scopes, errors, type_ctx);
+    }
     if args.len() == 2 && fn_info.params.len() == 2 {
         auto_borrow_op_arg_if_ref(fn_info.params[1].ty, &mut args[1], scopes, errors, type_ctx);
     }
@@ -287,6 +290,42 @@ fn finish_overloaded_op_call<'a>(
     TypedExpr::Call(fn_info.name.clone(), args, ret_ty, span.clone())
 }
 
+fn lookup_op_method_for_ty<'a>(
+    type_ctx: &TypeCtx<'a>,
+    ty: Type,
+    method: &str,
+) -> Option<crate::ast::FuncDecl> {
+    let resolved = type_ctx.infer.borrow_mut().probe(ty);
+    match resolved {
+        Type::Ref(inner) => {
+            if let Type::Obj(s) = *inner {
+                let ref_prefix = format!("__ref_{s}");
+                if let Some(f) = lookup_struct_method_fn(type_ctx, &ref_prefix, method) {
+                    return Some(f);
+                }
+                return lookup_struct_method_fn(type_ctx, s, method);
+            }
+            None
+        }
+        Type::MutRef(inner) => {
+            if let Type::Obj(s) = *inner {
+                let mutref_prefix = format!("__mutref_{s}");
+                if let Some(f) = lookup_struct_method_fn(type_ctx, &mutref_prefix, method) {
+                    return Some(f);
+                }
+                let ref_prefix = format!("__ref_{s}");
+                if let Some(f) = lookup_struct_method_fn(type_ctx, &ref_prefix, method) {
+                    return Some(f);
+                }
+                return lookup_struct_method_fn(type_ctx, s, method);
+            }
+            None
+        }
+        Type::Obj(s) => lookup_struct_method_fn(type_ctx, s, method),
+        _ => None,
+    }
+}
+
 fn try_type_check_overloaded_binop<'a>(
     t_lhs: &TypedExpr,
     t_rhs: &TypedExpr,
@@ -296,8 +335,7 @@ fn try_type_check_overloaded_binop<'a>(
     type_ctx: &TypeCtx<'a>,
     span: &Span,
 ) -> Option<TypedExpr> {
-    let struct_name = extract_struct_name_from_ty(type_ctx, t_lhs.ty())?;
-    let fn_info = lookup_struct_method_fn(type_ctx, struct_name, method)?;
+    let fn_info = lookup_op_method_for_ty(type_ctx, t_lhs.ty(), method)?;
     Some(finish_overloaded_op_call(
         fn_info,
         vec![t_lhs.clone(), t_rhs.clone()],
@@ -316,8 +354,7 @@ fn try_type_check_overloaded_unop<'a>(
     type_ctx: &TypeCtx<'a>,
     span: &Span,
 ) -> Option<TypedExpr> {
-    let struct_name = extract_struct_name_from_ty(type_ctx, t_val.ty())?;
-    let fn_info = lookup_struct_method_fn(type_ctx, struct_name, method)?;
+    let fn_info = lookup_op_method_for_ty(type_ctx, t_val.ty(), method)?;
     Some(finish_overloaded_op_call(
         fn_info,
         vec![t_val.clone()],
@@ -653,6 +690,11 @@ pub fn type_check_not<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
+    if let Some(call) =
+        try_type_check_overloaded_unop(&t_val, "not", scopes, errors, type_ctx, span)
+    {
+        return Some(call);
+    }
 
     if t_val.ty() != Type::Bool {
         errors.push(SemanticError {
@@ -1047,6 +1089,12 @@ pub fn type_check_compound_assign<'a>(
         AssignOp::Sub => ("sub_assign", Expr::Sub),
         AssignOp::Mul => ("mul_assign", Expr::Mul),
         AssignOp::Div => ("div_assign", Expr::Div),
+        AssignOp::Rem => ("rem_assign", Expr::Mod),
+        AssignOp::BitAnd => ("bitand_assign", Expr::Ampersand),
+        AssignOp::BitOr => ("bitor_assign", Expr::Pipe),
+        AssignOp::BitXor => ("bitxor_assign", Expr::Caret),
+        AssignOp::Shl => ("shl_assign", Expr::Shl),
+        AssignOp::Shr => ("shr_assign", Expr::Shr),
     };
 
     let saved_moves = scopes.snapshot_moves();

@@ -1,41 +1,44 @@
 pub trait Add:
-	fn add(self, other: $T) -> $T
+	fn add(self, other: $Rhs) -> $Output
 	where T: Add:
 
 pub trait Sub:
-	fn sub(self, other: $T) -> $T
+	fn sub(self, other: $Rhs) -> $Output
 	where T: Sub:
 
 pub trait Mul:
-	fn mul(self, other: $T) -> $T
+	fn mul(self, other: $Rhs) -> $Output
 	where T: Mul:
 
 pub trait Div:
-	fn div(self, other: $T) -> $T
+	fn div(self, other: $Rhs) -> $Output
 	where T: Div:
 
 pub trait Rem:
-	fn rem(self, other: $T) -> $T
+	fn rem(self, other: $Rhs) -> $Output
 	where T: Rem:
 
 pub trait Neg:
-	fn neg(self) -> $T
+	fn neg(self) -> $Output
 	where T: Neg:
 
+pub trait Not:
+	fn not(self) -> $Output
+
 pub trait BitAnd:
-	fn bitand(self, other: $T) -> $T
+	fn bitand(self, other: $Rhs) -> $Output
 
 pub trait BitOr:
-	fn bitor(self, other: $T) -> $T
+	fn bitor(self, other: $Rhs) -> $Output
 
 pub trait BitXor:
-	fn bitxor(self, other: $T) -> $T
+	fn bitxor(self, other: $Rhs) -> $Output
 
 pub trait Shl:
-	fn shl(self, other: $T) -> $T
+	fn shl(self, other: $Rhs) -> $Output
 
 pub trait Shr:
-	fn shr(self, other: $T) -> $T
+	fn shr(self, other: $Rhs) -> $Output
 
 pub trait AddAssign:
 	fn add_assign(&mut self, other: $Rhs)
@@ -49,8 +52,32 @@ pub trait MulAssign:
 pub trait DivAssign:
 	fn div_assign(&mut self, other: $Rhs)
 
+pub trait RemAssign:
+	fn rem_assign(&mut self, other: $Rhs)
+
+pub trait BitAndAssign:
+	fn bitand_assign(&mut self, other: $Rhs)
+
+pub trait BitOrAssign:
+	fn bitor_assign(&mut self, other: $Rhs)
+
+pub trait BitXorAssign:
+	fn bitxor_assign(&mut self, other: $Rhs)
+
+pub trait ShlAssign:
+	fn shl_assign(&mut self, other: $Rhs)
+
+pub trait ShrAssign:
+	fn shr_assign(&mut self, other: $Rhs)
+
 pub trait Index:
 	fn index(&self, idx: $Idx) -> &$Output
 
 pub trait IndexMut:
 	fn index_mut(&mut self, idx: $Idx) -> &mut $Output
+
+pub trait Deref:
+	fn deref(&self) -> &$Target
+
+pub trait DerefMut:
+	fn deref_mut(&mut self) -> &mut $Target

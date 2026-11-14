@@ -14,9 +14,96 @@ pub fn lower_for_loop(
         std::sync::atomic::AtomicUsize::new(0);
     let loop_id = LOOP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    if let Expr::Range(start, end, range_span) = iter_expr {
+    if let Expr::Range(start, end, inclusive, range_span) = iter_expr {
         let idx_var = format!("__range_idx_{loop_id}");
         let end_var = format!("__range_end_{loop_id}");
+
+        if inclusive {
+            let started_var = format!("__range_started_{loop_id}");
+            let started_ident = || Expr::Ident(started_var.clone(), range_span.clone());
+            let idx_ident = || Expr::Ident(idx_var.clone(), range_span.clone());
+            let end_ident = || Expr::Ident(end_var.clone(), range_span.clone());
+
+            let cond = Expr::Or(
+                Box::new(Expr::And(
+                    Box::new(started_ident()),
+                    Box::new(Expr::LessThan(
+                        Box::new(idx_ident()),
+                        Box::new(end_ident()),
+                        range_span.clone(),
+                    )),
+                    range_span.clone(),
+                )),
+                Box::new(Expr::And(
+                    Box::new(Expr::Not(Box::new(started_ident()), range_span.clone())),
+                    Box::new(Expr::LessEqual(
+                        Box::new(idx_ident()),
+                        Box::new(end_ident()),
+                        range_span.clone(),
+                    )),
+                    range_span.clone(),
+                )),
+                range_span.clone(),
+            );
+
+            let advance = Expr::IfElse(
+                Box::new(started_ident()),
+                Box::new(Expr::Block(
+                    vec![Expr::Assign(
+                        idx_var.clone(),
+                        Box::new(Expr::Add(
+                            Box::new(idx_ident()),
+                            Box::new(Expr::Int(1, range_span.clone())),
+                            range_span.clone(),
+                        )),
+                        range_span.clone(),
+                    )],
+                    range_span.clone(),
+                )),
+                Box::new(Expr::Block(
+                    vec![Expr::Assign(
+                        started_var.clone(),
+                        Box::new(Expr::Bool(true, range_span.clone())),
+                        range_span.clone(),
+                    )],
+                    range_span.clone(),
+                )),
+                range_span.clone(),
+            );
+
+            let mut while_body = Vec::with_capacity(body_stmts.len() + 2);
+            while_body.push(advance);
+            if item_name != "_" {
+                while_body.push(Expr::Let(
+                    item_name,
+                    None,
+                    false,
+                    Box::new(idx_ident()),
+                    range_span.clone(),
+                ));
+            }
+            while_body.extend(body_stmts);
+
+            return Expr::Block(
+                vec![
+                    Expr::Let(
+                        started_var,
+                        None,
+                        true,
+                        Box::new(Expr::Bool(false, range_span.clone())),
+                        range_span.clone(),
+                    ),
+                    Expr::Let(idx_var, None, true, start, range_span.clone()),
+                    Expr::Let(end_var, None, false, end, range_span.clone()),
+                    Expr::While(
+                        Box::new(cond),
+                        Box::new(Expr::Block(while_body, span.clone())),
+                        span.clone(),
+                    ),
+                ],
+                span,
+            );
+        }
 
         let mut while_body = Vec::with_capacity(body_stmts.len() + 2);
         if item_name != "_" {
@@ -58,28 +145,25 @@ pub fn lower_for_loop(
     }
 
     let iter_var = format!("__iter_{loop_id}");
-    let mut arm_body = body_stmts;
-    arm_body.push(Expr::Bool(true, span.clone()));
-
-    let match_cond = Expr::Match(
+    let match_step = Expr::Match(
         Box::new(Expr::Call(
             ".next".to_string(),
             vec![Expr::Ident(iter_var.clone(), span.clone())],
             span.clone(),
         )),
         vec![
-            crate::ast::MatchArm {
-                variant_name: "Some".to_string(),
-                bindings: vec![item_name],
-                body: arm_body,
-                span: span.clone(),
-            },
-            crate::ast::MatchArm {
-                variant_name: "_".to_string(),
-                bindings: vec![],
-                body: vec![Expr::Bool(false, span.clone())],
-                span: span.clone(),
-            },
+            crate::ast::MatchArm::simple(
+                "Some".to_string(),
+                vec![item_name],
+                body_stmts,
+                span.clone(),
+            ),
+            crate::ast::MatchArm::simple(
+                "_".to_string(),
+                vec![],
+                vec![Expr::Break(None, span.clone())],
+                span.clone(),
+            ),
         ],
         span.clone(),
     );
@@ -100,8 +184,8 @@ pub fn lower_for_loop(
         vec![
             Expr::Let(iter_var, None, true, Box::new(init_iter), span.clone()),
             Expr::While(
-                Box::new(match_cond),
-                Box::new(Expr::Block(vec![], span.clone())),
+                Box::new(Expr::Bool(true, span.clone())),
+                Box::new(Expr::Block(vec![match_step], span.clone())),
                 span.clone(),
             ),
         ],
@@ -117,6 +201,175 @@ pub(crate) fn dot_field_segments_parser<'a>(
         Token::Int(n) if n >= 0 => vec![n.to_string()],
         Token::Float(raw) => raw.split('.').map(|s| s.to_string()).collect(),
     })
+}
+
+pub type ParsedArmPat = ((String, Vec<String>), Vec<(String, Vec<String>)>, Option<Box<Expr>>);
+
+/// Parses a `match` arm pattern supporting `_`, bool/int literals (including negative ints),
+/// `Enum::Variant(bindings...)`, `|`-separated or-patterns, and an optional `if guard`.
+pub fn match_arm_pattern_parser<'a>(
+    math: impl Parser<Token, Expr, Error = Simple<Token>> + Clone + 'a,
+) -> BoxedParser<'a, Token, ParsedArmPat, Simple<Token>> {
+    let path = select! { Token::Ident(s) => s }
+        .separated_by(just(Token::ColonColon))
+        .at_least(1)
+        .map(|parts| parts.join("::"));
+    let wildcard = select! { Token::Ident(s) if s == "_" => s }
+        .map(|_| ("_".to_string(), Vec::new()));
+    let lit_bool = select! { Token::Bool(b) => b }
+        .map(|b| (format!("__lit_bool:{b}"), Vec::new()));
+    let lit_neg_int = just(Token::Minus)
+        .ignore_then(select! { Token::Int(n) => n })
+        .map(|n| (format!("__lit_int:{}", n.wrapping_neg()), Vec::new()));
+    let lit_int = select! { Token::Int(n) => n }
+        .map(|n| (format!("__lit_int:{n}"), Vec::new()));
+    let variant_pat = path.then(
+        select! { Token::Ident(s) => s }
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .delimited_by(just(Token::LParen), just(Token::RParen))
+            .or_not()
+            .map(|opt| opt.unwrap_or_default()),
+    );
+    let single_pat = wildcard
+        .or(lit_bool)
+        .or(lit_neg_int)
+        .or(lit_int)
+        .or(variant_pat);
+
+    single_pat
+        .separated_by(just(Token::Pipe))
+        .at_least(1)
+        .then(just(Token::If).ignore_then(math).or_not())
+        .map(|(mut pats, guard)| {
+            let first = pats.remove(0);
+            (first, pats, guard.map(Box::new))
+        })
+        .boxed()
+}
+
+pub fn let_else_stmt_parser<'a>(
+    math: impl Parser<Token, Expr, Error = Simple<Token>> + Clone + 'a,
+    else_body: impl Parser<Token, Vec<Expr>, Error = Simple<Token>> + Clone + 'a,
+) -> BoxedParser<'a, Token, Expr, Simple<Token>> {
+    let path = select! { Token::Ident(s) => s }
+        .separated_by(just(Token::ColonColon))
+        .at_least(1)
+        .map(|parts| parts.join("::"));
+    let binding = just(Token::Mut)
+        .or_not()
+        .then(select! { Token::Ident(s) => s })
+        .map(|(m, name)| (name, m.is_some()));
+    let pattern = path.then(
+        binding
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .delimited_by(just(Token::LParen), just(Token::RParen))
+            .or_not()
+            .map(|opt| opt.unwrap_or_default()),
+    );
+    just(Token::Let)
+        .ignore_then(pattern)
+        .then_ignore(just(Token::Assign))
+        .then(math)
+        .then_ignore(just(Token::Else))
+        .then_ignore(just(Token::Colon).or_not())
+        .then_ignore(just(Token::Newline).or_not())
+        .then(else_body)
+        .map_with_span(|(((variant_name, bindings), target), else_body), span: Span| {
+            Expr::LetElse {
+                variant_name,
+                bindings,
+                target: Box::new(target),
+                else_body,
+                span,
+            }
+        })
+        .boxed()
+}
+
+pub fn let_struct_stmt_parser<'a>(
+    math: impl Parser<Token, Expr, Error = Simple<Token>> + Clone + 'a,
+    type_parser: impl Parser<Token, crate::ast::Type, Error = Simple<Token>> + Clone + 'a,
+) -> BoxedParser<'a, Token, Expr, Simple<Token>> {
+    use crate::ast::{StructPattern, StructPatternField};
+
+    let path = select! { Token::Ident(s) => s }
+        .separated_by(just(Token::ColonColon))
+        .at_least(1)
+        .map(|parts| parts.join("::"));
+
+    let renamed_field = select! { Token::Ident(s) => s }
+        .then_ignore(just(Token::Colon))
+        .then(just(Token::Mut).or_not())
+        .then(select! { Token::Ident(s) => s })
+        .map_with_span(|((fname, m), bname), span: Span| {
+            Some(StructPatternField {
+                field_name: fname,
+                binding_name: bname,
+                is_mutable: m.is_some(),
+                span,
+            })
+        });
+
+    let shorthand_field = just(Token::Mut)
+        .or_not()
+        .then(select! { Token::Ident(s) => s })
+        .map_with_span(|(m, fname), span: Span| {
+            Some(StructPatternField {
+                field_name: fname.clone(),
+                binding_name: fname,
+                is_mutable: m.is_some(),
+                span,
+            })
+        });
+
+    let rest_entry = just(Token::DotDot).to(None);
+    let field_entry = rest_entry.or(renamed_field).or(shorthand_field);
+
+    let junk = just(Token::Newline)
+        .or(just(Token::Indent))
+        .or(just(Token::Dedent))
+        .repeated();
+
+    let struct_pat = path
+        .then(
+            junk.clone()
+                .ignore_then(
+                    field_entry
+                        .padded_by(junk.clone())
+                        .separated_by(just(Token::Comma))
+                        .allow_trailing(),
+                )
+                .then_ignore(junk)
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with_span(|(struct_path, entries), span: Span| {
+            let mut fields = Vec::new();
+            let mut has_rest = false;
+            for entry in entries {
+                match entry {
+                    Some(f) => fields.push(f),
+                    None => has_rest = true,
+                }
+            }
+            StructPattern {
+                struct_path,
+                fields,
+                has_rest,
+                span,
+            }
+        });
+
+    just(Token::Let)
+        .ignore_then(struct_pat)
+        .then(just(Token::Colon).ignore_then(type_parser).or_not())
+        .then_ignore(just(Token::Assign))
+        .then(math)
+        .map_with_span(|((pat, ty), rhs), span: Span| {
+            Expr::LetStruct(pat, ty, Box::new(rhs), span)
+        })
+        .boxed()
 }
 
 pub fn math_parser<'a>(
@@ -163,8 +416,11 @@ pub fn math_parser<'a>(
     // The recursive core
     recursive(|math| {
         let field_init = select! { Token::Ident(s) => s }
-            .then_ignore(just(Token::Colon))
-            .then(math.clone());
+            .then(just(Token::Colon).ignore_then(math.clone()).or_not())
+            .map_with_span(|(name, opt_val), span: Span| {
+                let val = opt_val.unwrap_or_else(|| Expr::Ident(name.clone(), span));
+                (name, val)
+            });
 
         let path_segment = select! {
             Token::Ident(s) => s,
@@ -262,12 +518,7 @@ pub fn math_parser<'a>(
             .or(just(Token::Or).to(Vec::new()))
             .or(just(Token::Pipe).then(just(Token::Pipe)).to(Vec::new()));
 
-        let assign_op = just(Token::Assign)
-            .to(None)
-            .or(just(Token::PlusEqual).to(Some(crate::ast::AssignOp::Add)))
-            .or(just(Token::MinusEqual).to(Some(crate::ast::AssignOp::Sub)))
-            .or(just(Token::StarEqual).to(Some(crate::ast::AssignOp::Mul)))
-            .or(just(Token::SlashEqual).to(Some(crate::ast::AssignOp::Div)));
+        let assign_op = super::assign_op_parser();
 
         let simple_assign_stmt = select! { Token::Ident(s) => s }
             .then(assign_op.clone())
@@ -357,6 +608,8 @@ pub fn math_parser<'a>(
                 }
             });
 
+        let closure_let_struct = let_struct_stmt_parser(math.clone(), type_parser.clone());
+
         let let_stmt = just(Token::Let)
             .ignore_then(just(Token::Mut).or_not())
             .then(select! { Token::Ident(s) => s })
@@ -373,19 +626,65 @@ pub fn math_parser<'a>(
                 .repeated()
                 .at_least(1)
                 .delimited_by(just(Token::Indent), just(Token::Dedent))
-                .map_with_span(|exprs, span: Span| Expr::Block(exprs, span));
+                .map_with_span(|exprs, span: Span| Expr::Block(exprs, span))
+                .or(just(Token::Newline)
+                    .repeated()
+                    .ignore_then(
+                        cstmt
+                            .clone()
+                            .padded_by(just(Token::Newline).repeated())
+                            .repeated(),
+                    )
+                    .delimited_by(just(Token::LBrace), just(Token::RBrace))
+                    .map_with_span(|exprs, span: Span| Expr::Block(exprs, span)));
+
+            let closure_return = just(Token::Return)
+                .ignore_then(math.clone().or_not())
+                .map_with_span(|opt, span: Span| Expr::Return(opt.map(Box::new), span));
+
+            let closure_break = just(Token::Break)
+                .ignore_then(math.clone().or_not())
+                .map_with_span(|opt, span: Span| Expr::Break(opt.map(Box::new), span));
+            let closure_continue = just(Token::Continue)
+                .map_with_span(|_, span: Span| Expr::Continue(span));
+
+            let closure_else_body = closure_subblock
+                .clone()
+                .map(|b| match b {
+                    Expr::Block(stmts, _) => stmts,
+                    other => vec![other],
+                })
+                .or(closure_return
+                    .clone()
+                    .or(closure_break.clone())
+                    .or(closure_continue.clone())
+                    .map(|e| vec![e]));
+
+            let closure_let_else = let_else_stmt_parser(math.clone(), closure_else_body);
+
+            let closure_expr_body = closure_subblock
+                .clone()
+                .or(closure_return.clone())
+                .or(closure_break.clone())
+                .or(closure_continue.clone())
+                .or(math.clone());
 
             let closure_if = recursive(|cif| {
-                let else_if_br = just(Token::Else).ignore_then(cif);
-                let else_blk_br = just(Token::Else)
+                let else_if_br = just(Token::Newline)
+                    .repeated()
+                    .ignore_then(just(Token::Else))
+                    .ignore_then(cif);
+                let else_blk_br = just(Token::Newline)
+                    .repeated()
+                    .ignore_then(just(Token::Else))
                     .ignore_then(just(Token::Colon))
                     .ignore_then(just(Token::Newline).or_not())
-                    .ignore_then(closure_subblock.clone());
+                    .ignore_then(closure_expr_body.clone());
                 just(Token::If)
                     .ignore_then(math.clone())
                     .then_ignore(just(Token::Colon))
                     .then_ignore(just(Token::Newline).or_not())
-                    .then(closure_subblock.clone())
+                    .then(closure_expr_body.clone())
                     .then(else_if_br.or(else_blk_br).or_not())
                     .map_with_span(|((cond, then_b), else_b), span: Span| match else_b {
                         Some(eb) => Expr::IfElse(Box::new(cond), Box::new(then_b), Box::new(eb), span),
@@ -393,12 +692,12 @@ pub fn math_parser<'a>(
                     })
             });
 
-            let closure_return = just(Token::Return)
-                .ignore_then(math.clone().or_not())
-                .map_with_span(|opt, span: Span| Expr::Return(opt.map(Box::new), span));
-
             closure_if
                 .or(closure_return)
+                .or(closure_break)
+                .or(closure_continue)
+                .or(closure_let_else)
+                .or(closure_let_struct.clone())
                 .or(let_stmt)
                 .or(index_assign_stmt)
                 .or(field_assign_stmt)
@@ -407,6 +706,7 @@ pub fn math_parser<'a>(
         });
 
         let closure_block_body = closure_stmt
+            .clone()
             .then_ignore(just(Token::Newline).repeated())
             .repeated()
             .at_least(1)
@@ -464,8 +764,166 @@ pub fn math_parser<'a>(
                 }
             });
 
+        let layout_junk = just(Token::Newline)
+            .or(just(Token::Indent))
+            .or(just(Token::Dedent))
+            .repeated();
+
+        let expr_subblock = layout_junk
+            .clone()
+            .ignore_then(
+                closure_stmt
+                    .clone()
+                    .padded_by(layout_junk.clone())
+                    .repeated(),
+            )
+            .then_ignore(layout_junk.clone())
+            .delimited_by(just(Token::LBrace), just(Token::RBrace))
+            .map_with_span(|exprs, span: Span| Expr::Block(exprs, span))
+            .or(closure_stmt
+                .clone()
+                .then_ignore(just(Token::Newline).repeated())
+                .repeated()
+                .at_least(1)
+                .delimited_by(just(Token::Indent), just(Token::Dedent))
+                .map_with_span(|exprs, span: Span| Expr::Block(exprs, span)));
+
+        let expr_branch_body = expr_subblock
+            .clone()
+            .or(just(Token::Return)
+                .ignore_then(math.clone().or_not())
+                .map_with_span(|opt, span: Span| Expr::Return(opt.map(Box::new), span)))
+            .or(just(Token::Break)
+                .ignore_then(math.clone().or_not())
+                .map_with_span(|opt, span: Span| Expr::Break(opt.map(Box::new), span)))
+            .or(just(Token::Continue).map_with_span(|_, span: Span| Expr::Continue(span)))
+            .or(math.clone());
+
+        let expr_arm_pattern = select! { Token::Ident(s) if s == "_" => s }
+            .then(empty().to(Vec::new()))
+            .or(path.clone().then(
+                select! { Token::Ident(s) => s }
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .delimited_by(just(Token::LParen), just(Token::RParen))
+                    .or_not()
+                    .map(|opt| opt.unwrap_or_default()),
+            ));
+
+        let if_expr = recursive(|if_e| {
+            let else_if_br = just(Token::Newline)
+                .repeated()
+                .ignore_then(just(Token::Else))
+                .ignore_then(if_e);
+            let else_blk_br = just(Token::Newline)
+                .repeated()
+                .ignore_then(just(Token::Else))
+                .ignore_then(just(Token::Colon))
+                .ignore_then(just(Token::Newline).or_not())
+                .ignore_then(expr_branch_body.clone());
+
+            let if_let_e = just(Token::If)
+                .ignore_then(just(Token::Let))
+                .ignore_then(expr_arm_pattern.clone())
+                .then_ignore(just(Token::Assign))
+                .then(math.clone())
+                .then_ignore(just(Token::Colon))
+                .then_ignore(just(Token::Newline).or_not())
+                .then(expr_branch_body.clone())
+                .then(else_if_br.clone().or(else_blk_br.clone()).or_not())
+                .map_with_span(|((((variant_name, bindings), target), then_b), else_b), span: Span| {
+                    let then_stmts = match then_b {
+                        Expr::Block(stmts, _) => stmts,
+                        other => vec![other],
+                    };
+                    let else_stmts = match else_b {
+                        Some(Expr::Block(stmts, _)) => stmts,
+                        Some(other) => vec![other],
+                        None => vec![Expr::TupleInit(Vec::new(), span.clone())],
+                    };
+                    Expr::Match(
+                        Box::new(target),
+                        vec![
+                            crate::ast::MatchArm::simple(
+                                variant_name,
+                                bindings,
+                                then_stmts,
+                                span.clone(),
+                            ),
+                            crate::ast::MatchArm::simple(
+                                "_".to_string(),
+                                Vec::new(),
+                                else_stmts,
+                                span.clone(),
+                            ),
+                        ],
+                        span,
+                    )
+                });
+
+            let if_cond_e = just(Token::If)
+                .ignore_then(math.clone())
+                .then_ignore(just(Token::Colon))
+                .then_ignore(just(Token::Newline).or_not())
+                .then(expr_branch_body.clone())
+                .then(else_if_br.or(else_blk_br).or_not())
+                .map_with_span(|((cond, then_b), else_b), span: Span| match else_b {
+                    Some(eb) => Expr::IfElse(Box::new(cond), Box::new(then_b), Box::new(eb), span),
+                    None => Expr::If(Box::new(cond), Box::new(then_b), span),
+                });
+
+            if_let_e.or(if_cond_e)
+        });
+
+        let expr_match_arm = match_arm_pattern_parser(math.clone())
+            .then_ignore(just(Token::FatArrow))
+            .then_ignore(just(Token::Newline).or_not())
+            .then(expr_branch_body)
+            .map_with_span(|(((variant_name, bindings), alt_patterns, guard), body_expr), span: Span| {
+                let body = match body_expr {
+                    Expr::Block(stmts, _) => stmts,
+                    other => vec![other],
+                };
+                crate::ast::MatchArm {
+                    variant_name,
+                    bindings,
+                    alt_patterns,
+                    guard,
+                    body,
+                    span,
+                }
+            })
+            .then_ignore(just(Token::Comma).or_not())
+            .then_ignore(just(Token::Newline).repeated());
+
+        let match_expr = just(Token::Match)
+            .ignore_then(math.clone())
+            .then_ignore(just(Token::Colon))
+            .then_ignore(just(Token::Newline).or_not())
+            .then(
+                expr_match_arm
+                    .clone()
+                    .repeated()
+                    .at_least(1)
+                    .delimited_by(just(Token::Indent), just(Token::Dedent))
+                    .or(layout_junk
+                        .clone()
+                        .ignore_then(expr_match_arm.padded_by(layout_junk).repeated().at_least(1))
+                        .delimited_by(just(Token::LBrace), just(Token::RBrace))),
+            )
+            .map_with_span(|(target, arms), span: Span| Expr::Match(Box::new(target), arms, span));
+
+        let loop_expr = just(Token::Loop)
+            .ignore_then(just(Token::Colon))
+            .ignore_then(just(Token::Newline).or_not())
+            .ignore_then(expr_subblock)
+            .map_with_span(|body, span: Span| Expr::Loop(Box::new(body), span));
+
         let atom = closure_block
             .or(closure_expr)
+            .or(if_expr)
+            .or(match_expr)
+            .or(loop_expr)
             .or(string)
             .or(float_lit)
             .or(int)
@@ -572,27 +1030,30 @@ pub fn math_parser<'a>(
             })
             .boxed();
 
-        let neg = just(Token::Minus)
-            .ignore_then(postfix_atom.clone())
-            .map_with_span(|expr, span| Expr::Neg(Box::new(expr), span));
+        let unary = recursive(|unary| {
+            let neg = just(Token::Minus)
+                .ignore_then(unary.clone())
+                .map_with_span(|expr, span| Expr::Neg(Box::new(expr), span));
 
-        let not = just(Token::Exclamation)
-            .or(just(Token::Not))
-            .ignore_then(postfix_atom.clone())
-            .map_with_span(|expr, span| Expr::Not(Box::new(expr), span));
+            let not = just(Token::Exclamation)
+                .or(just(Token::Not))
+                .ignore_then(unary.clone())
+                .map_with_span(|expr, span| Expr::Not(Box::new(expr), span));
 
-        let deref = just(Token::Star)
-            .ignore_then(postfix_atom.clone())
-            .map_with_span(|expr, span| Expr::Deref(Box::new(expr), span));
+            let deref = just(Token::Star)
+                .ignore_then(unary.clone())
+                .map_with_span(|expr, span| Expr::Deref(Box::new(expr), span));
 
-        let reference = just(Token::Ampersand)
-            .then(just(Token::Mut).or_not())
-            .then(postfix_atom.clone())
-            .map_with_span(|((_, opt_mut), expr), span| {
-                Expr::Ref(Box::new(expr), opt_mut.is_some(), span)
-            });
+            let reference = just(Token::Ampersand)
+                .then(just(Token::Mut).or_not())
+                .then(unary.clone())
+                .map_with_span(|((_, opt_mut), expr), span| {
+                    Expr::Ref(Box::new(expr), opt_mut.is_some(), span)
+                });
 
-        let unary = neg.or(not).or(deref).or(reference).or(postfix_atom).boxed();
+            neg.or(not).or(deref).or(reference).or(postfix_atom)
+        })
+        .boxed();
 
         let cast = unary
             .then(
@@ -625,27 +1086,39 @@ pub fn math_parser<'a>(
                 })
                 .boxed();
 
-        let open_start_range = just(Token::DotDot)
-            .then(term.clone().or_not())
-            .map_with_span(|(_, opt_rhs), span: Span| {
+        let open_start_range = just(Token::DotDotEq)
+            .ignore_then(term.clone())
+            .map_with_span(|end, span: Span| {
                 let start = Expr::Int(0, span.clone());
-                let end = opt_rhs
-                    .unwrap_or_else(|| Expr::Ident("__slice_len__".to_string(), span.clone()));
-                Expr::Range(Box::new(start), Box::new(end), span)
-            });
+                Expr::Range(Box::new(start), Box::new(end), true, span)
+            })
+            .or(just(Token::DotDot)
+                .then(term.clone().or_not())
+                .map_with_span(|(_, opt_rhs), span: Span| {
+                    let start = Expr::Int(0, span.clone());
+                    let end = opt_rhs
+                        .unwrap_or_else(|| Expr::Ident("__slice_len__".to_string(), span.clone()));
+                    Expr::Range(Box::new(start), Box::new(end), false, span)
+                }));
 
         let range_term = open_start_range
             .or(term
                 .clone()
-                .then(just(Token::DotDot).then(term.clone().or_not()).or_not())
+                .then(
+                    just(Token::DotDotEq)
+                        .to(true)
+                        .then(term.clone().map(Some))
+                        .or(just(Token::DotDot).to(false).then(term.clone().or_not()))
+                        .or_not(),
+                )
                 .map_with_span(|(lhs, opt_dotdot), span: Span| match opt_dotdot {
-                    Some((_, Some(rhs))) => {
+                    Some((inclusive, Some(rhs))) => {
                         let rspan = lhs.span().start..rhs.span().end;
-                        Expr::Range(Box::new(lhs), Box::new(rhs), rspan)
+                        Expr::Range(Box::new(lhs), Box::new(rhs), inclusive, rspan)
                     }
-                    Some((_, None)) => {
+                    Some((inclusive, None)) => {
                         let end = Expr::Ident("__slice_len__".to_string(), span.clone());
-                        Expr::Range(Box::new(lhs), Box::new(end), span)
+                        Expr::Range(Box::new(lhs), Box::new(end), inclusive, span)
                     }
                     None => lhs,
                 }))

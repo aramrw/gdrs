@@ -77,28 +77,28 @@ pub fn expand_derives(program: &mut Program) {
                 let inner_match = Expr::Match(
                     Box::new(Expr::Ident("other".to_string(), v_span.clone())),
                     vec![
-                        MatchArm {
-                            variant_name: format!("{}::{}", e.name, v.name),
-                            bindings: rhs_bindings,
-                            body: inner_body,
-                            span: v_span.clone(),
-                        },
-                        MatchArm {
-                            variant_name: "_".to_string(),
-                            bindings: Vec::new(),
-                            body: vec![Expr::Bool(false, v_span.clone())],
-                            span: v_span.clone(),
-                        },
+                        MatchArm::simple(
+                            format!("{}::{}", e.name, v.name),
+                            rhs_bindings,
+                            inner_body,
+                            v_span.clone(),
+                        ),
+                        MatchArm::simple(
+                            "_".to_string(),
+                            Vec::new(),
+                            vec![Expr::Bool(false, v_span.clone())],
+                            v_span.clone(),
+                        ),
                     ],
                     v_span.clone(),
                 );
 
-                outer_arms.push(MatchArm {
-                    variant_name: format!("{}::{}", e.name, v.name),
-                    bindings: lhs_bindings,
-                    body: vec![inner_match],
-                    span: v_span,
-                });
+                outer_arms.push(MatchArm::simple(
+                    format!("{}::{}", e.name, v.name),
+                    lhs_bindings,
+                    vec![inner_match],
+                    v_span,
+                ));
             }
 
             let eq_body = if outer_arms.is_empty() {
@@ -209,12 +209,12 @@ pub fn expand_derives(program: &mut Program) {
                     Expr::MacroCall("format".to_string(), all_args, v_err_span.clone())
                 };
 
-                match_arms.push(MatchArm {
-                    variant_name: format!("{}::{}", e.name, v.name),
+                match_arms.push(MatchArm::simple(
+                    format!("{}::{}", e.name, v.name),
                     bindings,
-                    body: vec![arm_body_expr],
-                    span: v_err_span,
-                });
+                    vec![arm_body_expr],
+                    v_err_span,
+                ));
             }
 
             let to_string_body = Expr::Match(

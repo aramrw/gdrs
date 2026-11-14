@@ -9,6 +9,22 @@ use stmt::{stmt_parser};
 // Types
 // impl Parser<Token, Expr, Error = Simple<Token>> + Clone + 'a;
 
+pub(crate) fn assign_op_parser(
+) -> impl Parser<Token, Option<AssignOp>, Error = Simple<Token>> + Clone {
+    just(Token::Assign)
+        .to(None)
+        .or(just(Token::PlusEqual).to(Some(AssignOp::Add)))
+        .or(just(Token::MinusEqual).to(Some(AssignOp::Sub)))
+        .or(just(Token::StarEqual).to(Some(AssignOp::Mul)))
+        .or(just(Token::SlashEqual).to(Some(AssignOp::Div)))
+        .or(just(Token::PercentEqual).to(Some(AssignOp::Rem)))
+        .or(just(Token::AmpersandEqual).to(Some(AssignOp::BitAnd)))
+        .or(just(Token::PipeEqual).to(Some(AssignOp::BitOr)))
+        .or(just(Token::CaretEqual).to(Some(AssignOp::BitXor)))
+        .or(just(Token::ShlEqual).to(Some(AssignOp::Shl)))
+        .or(just(Token::ShrEqual).to(Some(AssignOp::Shr)))
+}
+
 // ==========================================
 // 4. PARSER (Chumsky)
 // ==========================================
@@ -260,8 +276,25 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
         .ignore_then(where_clause.clone())
         .or_not();
 
+    let attr_atom = select! { Token::Ident(s) => s }
+        .or(select! { Token::String(s) => s })
+        .or(just(Token::Minus).ignore_then(select! { Token::Int(n) => format!("-{}", n) }))
+        .or(select! { Token::Int(n) => n.to_string() });
+
     let attr_arg = select! { Token::Ident(s) => s }
-        .or(select! { Token::String(s) => s });
+        .then(
+            attr_atom
+                .clone()
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .delimited_by(just(Token::LParen), just(Token::RParen))
+                .or_not(),
+        )
+        .map(|(head, nested)| match nested {
+            Some(items) => format!("{}({})", head, items.join(", ")),
+            None => head,
+        })
+        .or(attr_atom);
 
     let attr_args = attr_arg
         .separated_by(just(Token::Comma))
@@ -316,12 +349,17 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
         .or_not()
         .map(|opt| opt.unwrap_or(Visibility::Private));
 
+    let fn_name_ident = select! {
+        Token::Ident(s) => s,
+        Token::Not => "not".to_string(),
+    };
+
     // Function signature: #[track_caller] pub fn name(params) -> return_type where T: Bounds:
     let function = opt_attributes
         .clone()
         .then(opt_vis.clone())
         .then_ignore(just(Token::Fn))
-        .then(select! { Token::Ident(s) => s })
+        .then(fn_name_ident.clone())
         .then_ignore(just(Token::LParen))
         .then(param.clone().separated_by(just(Token::Comma)).allow_trailing())
         .then_ignore(just(Token::RParen))
@@ -346,7 +384,7 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
     let func_sig = opt_attributes
         .clone()
         .then_ignore(just(Token::Fn))
-        .then(select! { Token::Ident(s) => s })
+        .then(fn_name_ident)
         .then_ignore(just(Token::LParen))
         .then(param.clone().separated_by(just(Token::Comma)).allow_trailing())
         .then_ignore(just(Token::RParen))
@@ -534,12 +572,22 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
         })
         .boxed();
 
+    let impl_target_name = just(Token::Ampersand)
+        .ignore_then(just(Token::Mut).or_not())
+        .or_not()
+        .then(select! { Token::Ident(s) => s })
+        .map(|(ref_prefix, name)| match ref_prefix {
+            Some(Some(_)) => format!("&mut {name}"),
+            Some(None) => format!("&{name}"),
+            None => name,
+        });
+
     let impl_header = select! { Token::Ident(s) => s }
         .then(
             just(Token::For)
                 .map(|_| "for".to_string())
                 .or(select! { Token::Ident(s) if s == "for" => s })
-                .ignore_then(select! { Token::Ident(s) => s })
+                .ignore_then(impl_target_name)
                 .or_not(),
         )
         .map(|(first, opt_target)| match opt_target {

@@ -376,6 +376,7 @@ pub fn validate_call_arguments<'a>(
                         }
                     }
                     let arg_span = arg.span();
+                    crate::sanal::refs::check_unaligned_packed_borrow(arg, type_ctx, errors, &arg_span);
                     *arg = TypedExpr::Ref(
                         Box::new(arg.clone()),
                         true,
@@ -403,6 +404,7 @@ pub fn validate_call_arguments<'a>(
                         }
                     }
                     let arg_span = arg.span();
+                    crate::sanal::refs::check_unaligned_packed_borrow(arg, type_ctx, errors, &arg_span);
                     *arg = TypedExpr::Ref(
                         Box::new(arg.clone()),
                         false,

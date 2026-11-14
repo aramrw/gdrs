@@ -41,6 +41,12 @@ pub fn stmt_parser<'a>(
             })
             .then_ignore(just(Token::Newline).or_not());
 
+        let let_struct_stmt = crate::parser::math::let_struct_stmt_parser(
+            math.clone(),
+            type_parser.clone(),
+        )
+        .then_ignore(just(Token::Newline).or_not());
+
         let let_stmt = just(Token::Let)
             .ignore_then(just(Token::Mut).or_not())
             .then(select! { Token::Ident(s) => s })
@@ -51,6 +57,7 @@ pub fn stmt_parser<'a>(
                 Expr::Let(name, ty, is_mut.is_some(), Box::new(expr), span)
             })
             .then_ignore(just(Token::Newline).or_not())
+            .or(let_struct_stmt)
             .or(let_tuple_stmt);
 
         let path = select! { Token::Ident(s) => s }
@@ -58,13 +65,8 @@ pub fn stmt_parser<'a>(
             .at_least(1)
             .map(|parts| parts.join("::"));
 
-        // Parses `=`, `+=`, `-=`, `*=`, `/=`
-        let assign_op = just(Token::Assign)
-            .to(None)
-            .or(just(Token::PlusEqual).to(Some(crate::ast::AssignOp::Add)))
-            .or(just(Token::MinusEqual).to(Some(crate::ast::AssignOp::Sub)))
-            .or(just(Token::StarEqual).to(Some(crate::ast::AssignOp::Mul)))
-            .or(just(Token::SlashEqual).to(Some(crate::ast::AssignOp::Div)));
+        // Parses `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`
+        let assign_op = super::assign_op_parser();
 
         let field_target_expr = path
             .clone()
@@ -179,19 +181,98 @@ pub fn stmt_parser<'a>(
 
         let braced_block = just(Token::LBrace)
             .ignore_then(layout_junk.clone())
-            .ignore_then(stmt.padded_by(layout_junk.clone()).repeated())
-            .then_ignore(layout_junk)
+            .ignore_then(stmt.clone().padded_by(layout_junk.clone()).repeated())
+            .then_ignore(layout_junk.clone())
             .then_ignore(just(Token::RBrace))
-            .map_with_span(|stmts, span| Expr::Block(stmts, span));
+            .map_with_span(|stmts, span| Expr::Block(stmts, span))
+            .boxed();
 
-        let block = indented_block.or(braced_block).boxed();
+        let block = indented_block.or(braced_block.clone()).boxed();
 
-        let while_stmt = just(Token::While)
+        let while_let_binding = just(Token::Mut)
+            .or_not()
+            .then(select! { Token::Ident(s) => s })
+            .map(|(m, name)| (name, m.is_some()));
+
+        let while_let_stmt = just(Token::While)
+            .ignore_then(just(Token::Let))
+            .ignore_then(
+                path.clone().then(
+                    while_let_binding
+                        .separated_by(just(Token::Comma))
+                        .allow_trailing()
+                        .delimited_by(just(Token::LParen), just(Token::RParen))
+                        .or_not()
+                        .map(|opt| opt.unwrap_or_default()),
+                ),
+            )
+            .then_ignore(just(Token::Assign))
+            .then(math.clone())
+            .then_ignore(just(Token::Colon))
+            .then_ignore(just(Token::Newline).or_not())
+            .then(block.clone())
+            .map_with_span(|(((variant_name, bindings), target), body_block), span| {
+                let body_stmts = match body_block {
+                    Expr::Block(stmts, _) => stmts,
+                    single => vec![single],
+                };
+                let mut raw_bindings = Vec::with_capacity(bindings.len());
+                let mut mut_rebinds = Vec::new();
+                for (idx, (b_name, is_mut)) in bindings.into_iter().enumerate() {
+                    if b_name == "_" || !is_mut {
+                        raw_bindings.push(b_name);
+                    } else {
+                        let tmp = format!("__wl_{}_{idx}", span.start);
+                        raw_bindings.push(tmp.clone());
+                        mut_rebinds.push(Expr::Let(
+                            b_name,
+                            None,
+                            true,
+                            Box::new(Expr::Ident(tmp, span.clone())),
+                            span.clone(),
+                        ));
+                    }
+                }
+                let mut arm_body = mut_rebinds;
+                arm_body.extend(body_stmts);
+                if !matches!(
+                    arm_body.last(),
+                    Some(Expr::Break(..) | Expr::Continue(..) | Expr::Return(..))
+                ) {
+                    arm_body.push(Expr::TupleInit(Vec::new(), span.clone()));
+                }
+
+                let match_body = Expr::Match(
+                    Box::new(target),
+                    vec![
+                        crate::ast::MatchArm::simple(
+                            variant_name,
+                            raw_bindings,
+                            arm_body,
+                            span.clone(),
+                        ),
+                        crate::ast::MatchArm::simple(
+                            "_".to_string(),
+                            Vec::new(),
+                            vec![Expr::Break(None, span.clone())],
+                            span.clone(),
+                        ),
+                    ],
+                    span.clone(),
+                );
+                Expr::While(
+                    Box::new(Expr::Bool(true, span.clone())),
+                    Box::new(Expr::Block(vec![match_body], span.clone())),
+                    span,
+                )
+            });
+
+        let while_stmt = while_let_stmt.or(just(Token::While)
             .ignore_then(math.clone())
             .then_ignore(just(Token::Colon))
             .then_ignore(just(Token::Newline).or_not())
             .then(block.clone())
-            .map_with_span(|(cond, body), span| Expr::While(Box::new(cond), Box::new(body), span));
+            .map_with_span(|(cond, body), span| Expr::While(Box::new(cond), Box::new(body), span)));
 
         let for_stmt = just(Token::For)
             .ignore_then(tuple_pattern.clone())
@@ -267,18 +348,18 @@ pub fn stmt_parser<'a>(
                     Expr::Match(
                         Box::new(target),
                         vec![
-                            crate::ast::MatchArm {
+                            crate::ast::MatchArm::simple(
                                 variant_name,
                                 bindings,
-                                body: then_stmts,
-                                span: span.clone(),
-                            },
-                            crate::ast::MatchArm {
-                                variant_name: "_".to_string(),
-                                bindings: Vec::new(),
-                                body: else_stmts,
-                                span: span.clone(),
-                            },
+                                then_stmts,
+                                span.clone(),
+                            ),
+                            crate::ast::MatchArm::simple(
+                                "_".to_string(),
+                                Vec::new(),
+                                else_stmts,
+                                span.clone(),
+                            ),
                         ],
                         span,
                     )
@@ -306,13 +387,32 @@ pub fn stmt_parser<'a>(
             .map_with_span(|opt_expr, span| Expr::Return(opt_expr.map(Box::new), span))
             .then_ignore(just(Token::Newline).or_not());
 
+        let loop_stmt = just(Token::Loop)
+            .ignore_then(just(Token::Colon))
+            .ignore_then(just(Token::Newline).or_not())
+            .ignore_then(block.clone())
+            .map_with_span(|body, span| Expr::Loop(Box::new(body), span));
+
         let break_stmt = just(Token::Break)
-            .map_with_span(|_, span| Expr::Break(span))
+            .ignore_then(math.clone().or_not())
+            .map_with_span(|opt_expr, span| Expr::Break(opt_expr.map(Box::new), span))
             .then_ignore(just(Token::Newline).or_not());
 
         let continue_stmt = just(Token::Continue)
             .map_with_span(|_, span| Expr::Continue(span))
             .then_ignore(just(Token::Newline).or_not());
+
+        let let_else_body = block
+            .clone()
+            .or(return_stmt.clone())
+            .or(break_stmt.clone())
+            .or(continue_stmt.clone())
+            .map(|body_expr| match body_expr {
+                Expr::Block(stmts, _) => stmts,
+                other => vec![other],
+            });
+
+        let let_else_stmt = crate::parser::math::let_else_stmt_parser(math.clone(), let_else_body);
 
         let macro_call = select! { Token::MacroIdent(name) => name }
             .then(
@@ -333,7 +433,7 @@ pub fn stmt_parser<'a>(
                 other => Expr::Unsafe(vec![other], span),
             });
 
-        let match_arm = arm_pattern
+        let match_arm = crate::parser::math::match_arm_pattern_parser(math.clone())
             .then_ignore(just(Token::FatArrow))
             .then_ignore(just(Token::Newline).or_not())
             .then(
@@ -341,10 +441,10 @@ pub fn stmt_parser<'a>(
                     .clone()
                     .or(break_stmt.clone())
                     .or(continue_stmt.clone())
-                    .or(math.clone())
-                    .or(block.clone()),
+                    .or(block.clone())
+                    .or(math.clone()),
             )
-            .map_with_span(|((variant_name, bindings), body_expr), span| {
+            .map_with_span(|(((variant_name, bindings), alt_patterns, guard), body_expr), span| {
                 let body = match body_expr {
                     Expr::Block(stmts, _) => stmts,
                     other => vec![other],
@@ -352,10 +452,13 @@ pub fn stmt_parser<'a>(
                 crate::ast::MatchArm {
                     variant_name,
                     bindings,
+                    alt_patterns,
+                    guard,
                     body,
                     span,
                 }
             })
+            .then_ignore(just(Token::Comma).or_not())
             .then_ignore(just(Token::Newline).repeated());
 
         let match_stmt = just(Token::Match)
@@ -364,9 +467,14 @@ pub fn stmt_parser<'a>(
             .then_ignore(just(Token::Newline).or_not())
             .then(
                 match_arm
+                    .clone()
                     .repeated()
                     .at_least(1)
-                    .delimited_by(just(Token::Indent), just(Token::Dedent)),
+                    .delimited_by(just(Token::Indent), just(Token::Dedent))
+                    .or(layout_junk
+                        .clone()
+                        .ignore_then(match_arm.padded_by(layout_junk).repeated().at_least(1))
+                        .delimited_by(just(Token::LBrace), just(Token::RBrace))),
             )
             .map_with_span(|(target, arms), span| Expr::Match(Box::new(target), arms, span))
             .boxed();
@@ -392,6 +500,7 @@ pub fn stmt_parser<'a>(
             .repeated()
             .ignore_then(
                 deref_assign_stmt
+                    .or(let_else_stmt)
                     .or(let_stmt)
                     .or(index_assign_stmt)
                     .or(field_assign_stmt)
@@ -402,6 +511,7 @@ pub fn stmt_parser<'a>(
                     .or(unsafe_stmt)
                     .or(match_stmt)
                     .or(if_stmt)
+                    .or(loop_stmt)
                     .or(while_stmt)
                     .or(for_stmt)
                     .or(macro_call)

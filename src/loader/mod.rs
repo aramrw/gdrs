@@ -431,7 +431,12 @@ fn rewrite_expr(
 ) {
     match expr {
         Expr::Int(_, _) | Expr::Float(_, _) | Expr::Bool(_, _) | Expr::String(_, _)
-        | Expr::Break(_) | Expr::Continue(_) => {}
+        | Expr::Continue(_) => {}
+        Expr::Break(opt_expr, _) => {
+            if let Some(e) = opt_expr {
+                rewrite_expr(e, local_types, aliases, prefix);
+            }
+        }
         Expr::Ident(name, _) => {
             if let Some(r) = resolve_name_alias(name, aliases, local_types, prefix) {
                 *name = r;
@@ -505,6 +510,9 @@ fn rewrite_expr(
             rewrite_expr(cond, local_types, aliases, prefix);
             rewrite_expr(body, local_types, aliases, prefix);
         }
+        Expr::Loop(body, _) => {
+            rewrite_expr(body, local_types, aliases, prefix);
+        }
         Expr::Match(target, arms, _) => {
             rewrite_expr(target, local_types, aliases, prefix);
             for arm in arms {
@@ -513,12 +521,47 @@ fn rewrite_expr(
                         arm.variant_name = format!("{r}::{variant_part}");
                     }
                 }
+                for (alt_v, _) in &mut arm.alt_patterns {
+                    if let Some((enum_part, variant_part)) = alt_v.split_once("::") {
+                        if let Some(r) = resolve_name_alias(enum_part, aliases, local_types, prefix) {
+                            *alt_v = format!("{r}::{variant_part}");
+                        }
+                    }
+                }
+                if let Some(g) = &mut arm.guard {
+                    rewrite_expr(g, local_types, aliases, prefix);
+                }
                 for stmt in &mut arm.body {
                     rewrite_expr(stmt, local_types, aliases, prefix);
                 }
             }
         }
+        Expr::LetElse {
+            variant_name,
+            target,
+            else_body,
+            ..
+        } => {
+            if let Some((enum_part, variant_part)) = variant_name.split_once("::") {
+                if let Some(r) = resolve_name_alias(enum_part, aliases, local_types, prefix) {
+                    *variant_name = format!("{r}::{variant_part}");
+                }
+            }
+            rewrite_expr(target, local_types, aliases, prefix);
+            for stmt in else_body {
+                rewrite_expr(stmt, local_types, aliases, prefix);
+            }
+        }
         Expr::Let(_, opt_ty, _, val, _) | Expr::LetTuple(_, opt_ty, val, _) => {
+            if let Some(ty) = opt_ty {
+                rewrite_type(ty, local_types, aliases, prefix);
+            }
+            rewrite_expr(val, local_types, aliases, prefix);
+        }
+        Expr::LetStruct(pat, opt_ty, val, _) => {
+            if let Some(r) = resolve_name_alias(&pat.struct_path, aliases, local_types, prefix) {
+                pat.struct_path = r;
+            }
             if let Some(ty) = opt_ty {
                 rewrite_type(ty, local_types, aliases, prefix);
             }
@@ -565,7 +608,7 @@ fn rewrite_expr(
         | Expr::IndexAccess(lhs, rhs, _)
         | Expr::DerefAssign(lhs, rhs, _)
         | Expr::CompoundAssign(_, lhs, rhs, _)
-        | Expr::Range(lhs, rhs, _) => {
+        | Expr::Range(lhs, rhs, _, _) => {
             rewrite_expr(lhs, local_types, aliases, prefix);
             rewrite_expr(rhs, local_types, aliases, prefix);
         }

@@ -148,6 +148,8 @@ pub fn monomorphize_struct(
         total_size += 8;
     }
 
+    let (repr_align, repr_packed) = crate::sanal::parse_struct_repr(&decl.attributes, &mut Vec::new());
+
     struct_map.borrow_mut().insert(
         mangled_name.clone(),
         StructLayout {
@@ -157,6 +159,8 @@ pub fn monomorphize_struct(
             vis: decl.vis,
             module_path: decl.module_path.clone(),
             field_vis,
+            repr_align,
+            repr_packed,
         },
     );
 
@@ -371,7 +375,7 @@ fn rewrite_self_obj_init(expr: Expr, decl_name: &str, mangled_name: &str) -> Exp
     let rwb = |b: Box<Expr>| Box::new(rewrite_self_obj_init(*b, decl_name, mangled_name));
     match expr {
         Expr::Int(..) | Expr::Float(..) | Expr::Ident(..) | Expr::Bool(..) | Expr::String(..)
-        | Expr::Break(..) | Expr::Continue(..) => expr,
+        | Expr::Continue(..) => expr,
         Expr::ObjInit(name, fields, span) => {
             let new_name = if name == decl_name || name == short_decl {
                 mangled_name.to_string()
@@ -387,10 +391,18 @@ fn rewrite_self_obj_init(expr: Expr, decl_name: &str, mangled_name: &str) -> Exp
         Expr::Block(stmts, span) => Expr::Block(stmts.into_iter().map(rw).collect(), span),
         Expr::Unsafe(stmts, span) => Expr::Unsafe(stmts.into_iter().map(rw).collect(), span),
         Expr::Return(opt, span) => Expr::Return(opt.map(rwb), span),
+        Expr::Break(opt, span) => Expr::Break(opt.map(rwb), span),
         Expr::Let(n, ty, m, val, span) => Expr::Let(n, ty, m, rwb(val), span),
         Expr::LetTuple(p, ty, val, span) => Expr::LetTuple(p, ty, rwb(val), span),
+        Expr::LetStruct(mut p, ty, val, span) => {
+            if p.struct_path == decl_name || p.struct_path == short_decl {
+                p.struct_path = mangled_name.to_string();
+            }
+            Expr::LetStruct(p, ty, rwb(val), span)
+        }
         Expr::Assign(n, val, span) => Expr::Assign(n, rwb(val), span),
         Expr::While(c, b, span) => Expr::While(rwb(c), rwb(b), span),
+        Expr::Loop(b, span) => Expr::Loop(rwb(b), span),
         Expr::If(c, b, span) => Expr::If(rwb(c), rwb(b), span),
         Expr::IfElse(c, t, e, span) => Expr::IfElse(rwb(c), rwb(t), rwb(e), span),
         Expr::Match(t, arms, span) => Expr::Match(
@@ -399,12 +411,27 @@ fn rewrite_self_obj_init(expr: Expr, decl_name: &str, mangled_name: &str) -> Exp
                 .map(|arm| MatchArm {
                     variant_name: arm.variant_name,
                     bindings: arm.bindings,
+                    alt_patterns: arm.alt_patterns,
+                    guard: arm.guard.map(rwb),
                     body: arm.body.into_iter().map(rw).collect(),
                     span: arm.span,
                 })
                 .collect(),
             span,
         ),
+        Expr::LetElse {
+            variant_name,
+            bindings,
+            target,
+            else_body,
+            span,
+        } => Expr::LetElse {
+            variant_name,
+            bindings,
+            target: rwb(target),
+            else_body: else_body.into_iter().map(rw).collect(),
+            span,
+        },
         Expr::Try(inner, span) => Expr::Try(rwb(inner), span),
         Expr::Neg(inner, span) => Expr::Neg(rwb(inner), span),
         Expr::Not(inner, span) => Expr::Not(rwb(inner), span),
@@ -443,7 +470,7 @@ fn rewrite_self_obj_init(expr: Expr, decl_name: &str, mangled_name: &str) -> Exp
         Expr::CompoundAssign(op, l, r, span) => Expr::CompoundAssign(op, rwb(l), rwb(r), span),
         Expr::Closure(is_move, p, body, span) => Expr::Closure(is_move, p, rwb(body), span),
         Expr::Cast(inner, ty, span) => Expr::Cast(rwb(inner), ty, span),
-        Expr::Range(s, e, span) => Expr::Range(rwb(s), rwb(e), span),
+        Expr::Range(s, e, inc, span) => Expr::Range(rwb(s), rwb(e), inc, span),
     }
 }
 

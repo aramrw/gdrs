@@ -19,6 +19,8 @@ pub enum Token {
     Assign,
     #[token("+")]
     Plus,
+    #[token("..=")]
+    DotDotEq,
     #[token("..")]
     DotDot,
     #[token("-")]
@@ -35,6 +37,18 @@ pub enum Token {
     StarEqual,
     #[token("/=")]
     SlashEqual,
+    #[token("%=")]
+    PercentEqual,
+    #[token("&=")]
+    AmpersandEqual,
+    #[token("|=")]
+    PipeEqual,
+    #[token("^=")]
+    CaretEqual,
+    #[token("<<=")]
+    ShlEqual,
+    #[token(">>=")]
+    ShrEqual,
     #[token("%")]
     Percent,
     #[token(">")]
@@ -137,6 +151,8 @@ pub enum Token {
     String(String),
     #[token("while")]
     While,
+    #[token("loop")]
+    Loop,
     #[token("for")]
     For,
     #[token("in")]
@@ -447,6 +463,17 @@ pub struct ImplDecl {
     pub span: Span,
 }
 
+/// Converts an `impl` target name (including `&T` / `&mut T`) into its method symbol prefix.
+pub fn impl_method_prefix(target_type: &str) -> String {
+    if let Some(base) = target_type.strip_prefix("&mut ") {
+        format!("__mutref_{base}")
+    } else if let Some(base) = target_type.strip_prefix('&') {
+        format!("__ref_{base}")
+    } else {
+        target_type.to_string()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Param {
     pub name: String,
@@ -477,6 +504,40 @@ pub enum TypedTuplePattern {
 }
 
 #[derive(Debug, Clone)]
+pub struct StructPatternField {
+    pub field_name: String,
+    pub binding_name: String,
+    pub is_mutable: bool,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructPattern {
+    pub struct_path: String,
+    pub fields: Vec<StructPatternField>,
+    pub has_rest: bool,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct TypedStructPatternField {
+    pub field_name: String,
+    pub binding_name: String,
+    pub is_mutable: bool,
+    pub ty: Type,
+    pub offset: u32,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct TypedStructPattern {
+    pub struct_name: String,
+    pub bindings: Vec<TypedStructPatternField>,
+    pub dropped_fields: Vec<(String, Type, u32)>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64, Span),
     Float(f64, Span),
@@ -504,14 +565,16 @@ pub enum Expr {
 
     Let(String, Option<Type>, bool, Box<Expr>, Span),
     LetTuple(TuplePattern, Option<Type>, Box<Expr>, Span),
+    LetStruct(StructPattern, Option<Type>, Box<Expr>, Span),
     Block(Vec<Expr>, Span),
     Unsafe(Vec<Expr>, Span),
     Assign(String, Box<Expr>, Span),
     While(Box<Expr>, Box<Expr>, Span),
+    Loop(Box<Expr>, Span),
     If(Box<Expr>, Box<Expr>, Span),
     IfElse(Box<Expr>, Box<Expr>, Box<Expr>, Span),
     Return(Option<Box<Expr>>, Span),
-    Break(Span),
+    Break(Option<Box<Expr>>, Span),
     Continue(Span),
     MacroCall(String, Vec<Expr>, Span),
     Call(String, Vec<Expr>, Span),
@@ -534,13 +597,20 @@ pub enum Expr {
 
     EnumConstruct(String, String, Vec<Expr>, Span),
     Match(Box<Expr>, Vec<MatchArm>, Span),
+    LetElse {
+        variant_name: String,
+        bindings: Vec<(String, bool)>,
+        target: Box<Expr>,
+        else_body: Vec<Expr>,
+        span: Span,
+    },
     Ref(Box<Expr>, bool, Span),
     Deref(Box<Expr>, Span),
     DerefAssign(Box<Expr>, Box<Expr>, Span),
     Closure(bool, Vec<String>, Box<Expr>, Span),
     CompoundAssign(AssignOp, Box<Expr>, Box<Expr>, Span),
     Cast(Box<Expr>, Type, Span),
-    Range(Box<Expr>, Box<Expr>, Span),
+    Range(Box<Expr>, Box<Expr>, bool, Span),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -549,23 +619,69 @@ pub enum AssignOp {
     Sub,
     Mul,
     Div,
+    Rem,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 #[derive(Debug, Clone)]
 pub struct MatchArm {
     pub variant_name: String,
     pub bindings: Vec<String>,
+    pub alt_patterns: Vec<(String, Vec<String>)>,
+    pub guard: Option<Box<Expr>>,
     pub body: Vec<Expr>,
     pub span: Span,
+}
+
+impl MatchArm {
+    pub fn simple(variant_name: String, bindings: Vec<String>, body: Vec<Expr>, span: Span) -> Self {
+        Self {
+            variant_name,
+            bindings,
+            alt_patterns: Vec::new(),
+            guard: None,
+            body,
+            span,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct TypedMatchArm {
     pub variant_name: String,
     pub tag: i64,
+    pub alt_tags: Vec<i64>,
+    pub is_wildcard: bool,
     pub bindings: Vec<(String, Type)>,
+    pub guard: Option<Box<TypedExpr>>,
     pub body: Vec<TypedExpr>,
     pub span: Span,
+}
+
+impl TypedMatchArm {
+    pub fn simple(
+        variant_name: String,
+        tag: i64,
+        is_wildcard: bool,
+        bindings: Vec<(String, Type)>,
+        body: Vec<TypedExpr>,
+        span: Span,
+    ) -> Self {
+        Self {
+            variant_name,
+            tag,
+            alt_tags: Vec::new(),
+            is_wildcard,
+            bindings,
+            guard: None,
+            body,
+            span,
+        }
+    }
 }
 
 impl Expr {
@@ -597,14 +713,16 @@ impl Expr {
             Expr::Neg(_, s) | Expr::Not(_, s) => s.clone(),
             Expr::Let(_, _, _, _, s) => s.clone(),
             Expr::LetTuple(_, _, _, s) => s.clone(),
+            Expr::LetStruct(_, _, _, s) => s.clone(),
             Expr::Block(_, s) => s.clone(),
             Expr::Unsafe(_, s) => s.clone(),
             Expr::Assign(_, _, s) => s.clone(),
             Expr::While(_, _, s) => s.clone(),
+            Expr::Loop(_, s) => s.clone(),
             Expr::If(_, _, s) => s.clone(),
             Expr::IfElse(_, _, _, s) => s.clone(),
             Expr::Return(_, s) => s.clone(),
-            Expr::Break(s) | Expr::Continue(s) => s.clone(),
+            Expr::Break(_, s) | Expr::Continue(s) => s.clone(),
             Expr::MacroCall(_, _, s) => s.clone(),
             Expr::Call(_, _, s) => s.clone(),
             Expr::ObjInit(_, _, s) => s.clone(),
@@ -616,13 +734,14 @@ impl Expr {
             Expr::IndexAssign(_, _, _, s) => s.clone(),
             Expr::EnumConstruct(_, _, _, s) => s.clone(),
             Expr::Match(_, _, s) => s.clone(),
+            Expr::LetElse { span, .. } => span.clone(),
             Expr::Ref(_, _, s) => s.clone(),
             Expr::Deref(_, s) => s.clone(),
             Expr::DerefAssign(_, _, s) => s.clone(),
             Expr::Closure(_, _, _, s) => s.clone(),
             Expr::CompoundAssign(_, _, _, s) => s.clone(),
             Expr::Cast(_, _, s) => s.clone(),
-            Expr::Range(_, _, s) => s.clone(),
+            Expr::Range(_, _, _, s) => s.clone(),
             Expr::Try(_, s) => s.clone(),
         }
     }
@@ -667,14 +786,16 @@ pub enum TypedExpr {
 
     Let(String, bool, Box<TypedExpr>, Type, Span),
     LetTuple(TypedTuplePattern, Type, Box<TypedExpr>, Span),
+    LetStruct(TypedStructPattern, Type, Box<TypedExpr>, Span),
     Block(Vec<TypedExpr>, Type, Span),
     Unsafe(Vec<TypedExpr>, Type, Span),
     Assign(String, Box<TypedExpr>, Span),
     While(Box<TypedExpr>, Box<TypedExpr>, Span),
+    Loop(Box<TypedExpr>, Type, Span),
     If(Box<TypedExpr>, Box<TypedExpr>, Span),
     IfElse(Box<TypedExpr>, Box<TypedExpr>, Box<TypedExpr>, Type, Span),
     Return(Option<Box<TypedExpr>>, Span),
-    Break(Span),
+    Break(Option<Box<TypedExpr>>, Span),
     Continue(Span),
     MacroCall(String, Vec<TypedExpr>, Type, Span),
     Call(String, Vec<TypedExpr>, Type, Span),
@@ -699,7 +820,7 @@ pub enum TypedExpr {
     DerefAssign(Box<TypedExpr>, Box<TypedExpr>, Span),
     Closure(String, Vec<(String, Type)>, Box<TypedExpr>, Type, Span),
     Cast(Box<TypedExpr>, Type, Span),
-    Range(Box<TypedExpr>, Box<TypedExpr>, Type, Span),
+    Range(Box<TypedExpr>, Box<TypedExpr>, bool, Type, Span),
 }
 
 impl TypedExpr {
@@ -734,8 +855,10 @@ impl TypedExpr {
             TypedExpr::Ident(_, ty, _)
             | TypedExpr::Let(_, _, _, ty, _)
             | TypedExpr::LetTuple(_, ty, _, _)
+            | TypedExpr::LetStruct(_, ty, _, _)
             | TypedExpr::Block(_, ty, _)
             | TypedExpr::Unsafe(_, ty, _)
+            | TypedExpr::Loop(_, ty, _)
             | TypedExpr::IfElse(_, _, _, ty, _)
             | TypedExpr::MacroCall(_, _, ty, _)
             | TypedExpr::Call(_, _, ty, _)
@@ -749,7 +872,7 @@ impl TypedExpr {
             | TypedExpr::Ref(_, _, ty, _)
             | TypedExpr::Deref(_, ty, _)
             | TypedExpr::Cast(_, ty, _)
-            | TypedExpr::Range(_, _, ty, _)
+            | TypedExpr::Range(_, _, _, ty, _)
             | TypedExpr::DynCall(_, _, _, ty, _) => *ty,
             TypedExpr::Closure(_, params, _, ret_ty, _) => {
                 let p_tys: Vec<Type> = params.iter().map(|(_, t)| *t).collect();
@@ -798,13 +921,15 @@ impl TypedExpr {
             TypedExpr::Neg(_, _, s) | TypedExpr::Not(_, s) => s.clone(),
             TypedExpr::Let(_, _, _, _, s) => s.clone(),
             TypedExpr::LetTuple(_, _, _, s) => s.clone(),
+            TypedExpr::LetStruct(_, _, _, s) => s.clone(),
             TypedExpr::Block(_, _, s) => s.clone(),
             TypedExpr::Unsafe(_, _, s) => s.clone(),
             TypedExpr::Assign(_, _, s) => s.clone(),
             TypedExpr::While(_, _, s) => s.clone(),
+            TypedExpr::Loop(_, _, s) => s.clone(),
             TypedExpr::If(_, _, s) => s.clone(),
             TypedExpr::IfElse(_, _, _, _, s) => s.clone(),
-            TypedExpr::Return(_, s) | TypedExpr::Break(s) | TypedExpr::Continue(s) => s.clone(),
+            TypedExpr::Return(_, s) | TypedExpr::Break(_, s) | TypedExpr::Continue(s) => s.clone(),
             TypedExpr::MacroCall(_, _, _, s) => s.clone(),
             TypedExpr::Call(_, _, _, s) => s.clone(),
             TypedExpr::ObjInit(_, _, _, s) => s.clone(),
@@ -824,7 +949,7 @@ impl TypedExpr {
             TypedExpr::DerefAssign(_, _, s) => s.clone(),
             TypedExpr::Closure(_, _, _, _, s) => s.clone(),
             TypedExpr::Cast(_, _, s) => s.clone(),
-            TypedExpr::Range(_, _, _, s) => s.clone(),
+            TypedExpr::Range(_, _, _, _, s) => s.clone(),
         }
     }
 }

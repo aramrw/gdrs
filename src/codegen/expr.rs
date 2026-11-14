@@ -11,10 +11,11 @@ use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{DataDescription, Linkage, Module};
 
 use crate::ast::{Type, TypedExpr};
-use crate::codegen::assign::{compile_assign, compile_let, compile_let_tuple};
+use crate::codegen::assign::{compile_assign, compile_let, compile_let_struct, compile_let_tuple};
 use crate::codegen::branching::{compile_if, compile_if_else, compile_match, expr_is_terminator};
 use crate::codegen::ctx::CodegenCtx;
-use crate::codegen::loops::compile_while;
+use crate::codegen::layout::{emit_memcpy_bytes, ReprKind};
+use crate::codegen::loops::{compile_loop, compile_while};
 use crate::codegen::objects::compile_enum_construct;
 use crate::codegen::refs::{compile_deref, compile_deref_assign, compile_ref};
 
@@ -165,22 +166,45 @@ pub fn compile_expr<M: Module>(
             crate::codegen::func::emit_explicit_return(builder, opt_expr.as_deref(), cg, module)
         }
 
-        TypedExpr::Break(_) => {
+        TypedExpr::Break(opt_val, _) => {
             let zero = builder.ins().iconst(types::I64, 0);
-            if let Some((_, exit_block, loop_depth, loop_temp_depth)) = cg.loop_stack.last().copied() {
-                cg.emit_temp_drops_down_to_depth(builder, module, loop_temp_depth);
-                cg.emit_drops_down_to_depth(builder, module, loop_depth);
-                builder.ins().jump(exit_block, &[]);
+            if let Some(target) = cg.loop_stack.last().copied() {
+                let mut jump_args = Vec::new();
+                if let Some(val_expr) = opt_val {
+                    let v = compile_expr(builder, val_expr, cg, module);
+                    if !builder.is_unreachable() {
+                        cg.cancel_temp(v);
+                        if let TypedExpr::Ident(name, v_ty, _) = val_expr.as_ref() {
+                            if !v_ty.is_copy() {
+                                cg.mark_moved(builder, name);
+                            }
+                        }
+                        match target.result_repr {
+                            Some((ReprKind::Aggregate { size, .. }, Some(out_addr))) => {
+                                emit_memcpy_bytes(builder, module, out_addr, v, size);
+                            }
+                            Some((ReprKind::Scalar(cl_ty), _)) => {
+                                jump_args.push(coerce_val(builder, v, cl_ty));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if !builder.is_unreachable() {
+                    cg.emit_temp_drops_down_to_depth(builder, module, target.temp_depth);
+                    cg.emit_drops_down_to_depth(builder, module, target.scope_depth);
+                    builder.ins().jump(target.exit_block, &jump_args);
+                }
             }
             zero
         }
 
         TypedExpr::Continue(_) => {
             let zero = builder.ins().iconst(types::I64, 0);
-            if let Some((header_block, _, loop_depth, loop_temp_depth)) = cg.loop_stack.last().copied() {
-                cg.emit_temp_drops_down_to_depth(builder, module, loop_temp_depth);
-                cg.emit_drops_down_to_depth(builder, module, loop_depth);
-                builder.ins().jump(header_block, &[]);
+            if let Some(target) = cg.loop_stack.last().copied() {
+                cg.emit_temp_drops_down_to_depth(builder, module, target.temp_depth);
+                cg.emit_drops_down_to_depth(builder, module, target.scope_depth);
+                builder.ins().jump(target.header_block, &[]);
             }
             zero
         }
@@ -190,6 +214,9 @@ pub fn compile_expr<M: Module>(
         }
         TypedExpr::LetTuple(pat, _ty, value, _) => {
             compile_let_tuple(builder, pat, value, cg, module)
+        }
+        TypedExpr::LetStruct(pat, _ty, value, _) => {
+            compile_let_struct(builder, pat, value, cg, module)
         }
         TypedExpr::Assign(name, value, _) => {
             compile_assign(builder, value, cg, module, name)
@@ -292,6 +319,13 @@ pub fn compile_expr<M: Module>(
             val
         }
         TypedExpr::While(cond, body, _) => compile_while(builder, cond, body, cg, module),
+        TypedExpr::Loop(body, ty, _) => {
+            let val = compile_loop(builder, body, ty, cg, module);
+            if *ty != Type::Unit && *ty != Type::Void {
+                cg.register_temp(val, ty);
+            }
+            val
+        }
 
         TypedExpr::MacroCall(name, args, m_ty, span) => {
             let val = crate::codegen::intrinsics::compile_macro_call(builder, name, args, m_ty, span, cg, module);
@@ -383,8 +417,8 @@ pub fn compile_expr<M: Module>(
             )
         }
 
-        TypedExpr::Range(start_expr, end_expr, _, _) => {
-            crate::codegen::arrays::compile_range(builder, start_expr, end_expr, cg, module)
+        TypedExpr::Range(start_expr, end_expr, inclusive, _, _) => {
+            crate::codegen::arrays::compile_range(builder, start_expr, end_expr, *inclusive, cg, module)
         }
 
         TypedExpr::CoerceToDyn(inner_expr, trait_name, _) => {

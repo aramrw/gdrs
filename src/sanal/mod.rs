@@ -354,6 +354,126 @@ pub struct StructLayout {
     pub vis: crate::ast::Visibility,
     pub module_path: Vec<String>,
     pub field_vis: HashMap<String, crate::ast::Visibility>,
+    pub repr_align: u32,
+    pub repr_packed: Option<u32>,
+}
+
+/// Parses `#[repr(...)]` attributes on a struct and returns `(repr_align, repr_packed)`.
+pub fn parse_struct_repr(
+    attrs: &[crate::ast::Attribute],
+    errors: &mut Vec<SemanticError>,
+) -> (u32, Option<u32>) {
+    let mut repr_align = 1u32;
+    let mut has_align = false;
+    let mut repr_packed: Option<u32> = None;
+    let mut last_repr_span: Option<crate::ast::Span> = None;
+
+    let parse_pow2_align = |raw_val: &str, kind: &str, span: &crate::ast::Span, errors: &mut Vec<SemanticError>| -> Option<u32> {
+        let trimmed = raw_val.trim();
+        let valid = trimmed.parse::<u64>().ok().filter(|&n| n >= 1 && n.is_power_of_two() && n <= (1u64 << 29));
+        match valid {
+            Some(n) => Some(n as u32),
+            None => {
+                errors.push(SemanticError {
+                    code: "E0589",
+                    message: format!(
+                        "Invalid alignment `{}` in `#[repr({kind}(...))]`: must be a non-zero power of two (up to `2^29`)",
+                        trimmed
+                    ),
+                    label: "Expected a power-of-two byte alignment >= 1".to_string(),
+                    secondary_label: None,
+                    help: Some(format!("Use a power of two such as `{kind}(1)`, `{kind}(2)`, `{kind}(4)`, or `{kind}(8)`")),
+                    span: span.clone(),
+                });
+                None
+            }
+        }
+    };
+
+    for attr in attrs {
+        if attr.name != "repr" {
+            continue;
+        }
+        last_repr_span = Some(attr.span.clone());
+        if attr.args.is_empty() {
+            errors.push(SemanticError {
+                code: "E0552",
+                message: "Malformed `#[repr]` attribute: expected representation specifier".to_string(),
+                label: "Empty `#[repr]` attribute".to_string(),
+                secondary_label: None,
+                help: Some("Use `#[repr(C)]`, `#[repr(packed)]`, `#[repr(packed(N))]`, or `#[repr(align(N))]`".to_string()),
+                span: attr.span.clone(),
+            });
+            continue;
+        }
+        for raw_arg in &attr.args {
+            let arg = raw_arg.trim();
+            if arg == "C" {
+                // C field declaration order is already the layout default.
+            } else if arg == "packed" {
+                if let Some(prev) = repr_packed {
+                    if prev != 1 {
+                        errors.push(SemanticError {
+                            code: "E0634",
+                            message: format!(
+                                "Type has conflicting packed representation hints (`packed` vs `packed({prev})`)"
+                            ),
+                            label: "Conflicting `packed` hint".to_string(),
+                            secondary_label: None,
+                            help: Some("Keep a single `packed` or `packed(N)` alignment specifier".to_string()),
+                            span: attr.span.clone(),
+                        });
+                    }
+                }
+                repr_packed = Some(1);
+            } else if let Some(inner) = arg.strip_prefix("packed(").and_then(|s| s.strip_suffix(')')) {
+                if let Some(n) = parse_pow2_align(inner, "packed", &attr.span, errors) {
+                    if let Some(prev) = repr_packed {
+                        if prev != n {
+                            errors.push(SemanticError {
+                                code: "E0634",
+                                message: format!(
+                                    "Type has conflicting packed representation hints (`packed({prev})` vs `packed({n})`)"
+                                ),
+                                label: "Conflicting `packed` hint".to_string(),
+                                secondary_label: None,
+                                help: Some("Keep a single `packed` or `packed(N)` alignment specifier".to_string()),
+                                span: attr.span.clone(),
+                            });
+                        }
+                    }
+                    repr_packed = Some(n);
+                }
+            } else if let Some(inner) = arg.strip_prefix("align(").and_then(|s| s.strip_suffix(')')) {
+                if let Some(n) = parse_pow2_align(inner, "align", &attr.span, errors) {
+                    repr_align = repr_align.max(n);
+                    has_align = true;
+                }
+            } else {
+                errors.push(SemanticError {
+                    code: "E0552",
+                    message: format!("Unrecognized representation specifier `{arg}` in `#[repr(...)]`"),
+                    label: "Unsupported `#[repr]` specifier".to_string(),
+                    secondary_label: None,
+                    help: Some("Supported struct `#[repr]` specifiers are `C`, `packed`, `packed(N)`, and `align(N)`".to_string()),
+                    span: attr.span.clone(),
+                });
+            }
+        }
+    }
+
+    if repr_packed.is_some() && has_align {
+        errors.push(SemanticError {
+            code: "E0587",
+            message: "Type cannot have both `#[repr(packed)]` and `#[repr(align(...))]`".to_string(),
+            label: "Conflicting `packed` and `align` attributes".to_string(),
+            secondary_label: None,
+            help: Some("Use `packed` / `packed(N)` to cap field alignment or `align(N)` to raise type alignment, not both".to_string()),
+            span: last_repr_span.unwrap_or(0..0),
+        });
+    }
+
+    (repr_align, repr_packed)
 }
 
 pub fn check_semantics(
@@ -371,6 +491,7 @@ pub fn check_semantics(
     let mut struct_map = HashMap::new();
 
     for s in &program.structs {
+        let (repr_align, repr_packed) = parse_struct_repr(&s.attributes, &mut errors);
         for field in &s.fields {
             if type_contains_ref(&field.ty) {
                 errors.push(SemanticError {
@@ -413,6 +534,8 @@ pub fn check_semantics(
                     vis: s.vis,
                     module_path: s.module_path.clone(),
                     field_vis,
+                    repr_align,
+                    repr_packed,
                 },
             );
         }
@@ -421,6 +544,19 @@ pub fn check_semantics(
     let mut enum_map = HashMap::new();
     let mut enum_vis_map = HashMap::new();
     for e in &program.enums {
+        if let Some(repr_attr) = e.attributes.iter().find(|a| a.name == "repr") {
+            errors.push(SemanticError {
+                code: "E0517",
+                message: format!(
+                    "Attribute `#[repr(...)]` is not supported on enum `{}`",
+                    e.name
+                ),
+                label: "`#[repr(...)]` is only supported on `struct` definitions".to_string(),
+                secondary_label: None,
+                help: Some("Remove `#[repr(...)]` from this enum or wrap the C representation inside a `struct`".to_string()),
+                span: repr_attr.span.clone(),
+            });
+        }
         let has_derive_error = e
             .attributes
             .iter()
@@ -542,21 +678,44 @@ pub fn check_semantics(
         }
     }
 
+    fn resolve_impl_target_type(
+        target_type: &str,
+        enum_names: &std::collections::HashSet<String>,
+        span: crate::ast::Span,
+        errors: &mut Vec<SemanticError>,
+    ) -> Type {
+        if let Some(base) = target_type.strip_prefix("&mut ") {
+            let inner = resolve_type(Type::Obj(intern_str(base)), enum_names, span, errors);
+            Type::MutRef(crate::ast::intern_type(inner))
+        } else if let Some(base) = target_type.strip_prefix('&') {
+            let inner = resolve_type(Type::Obj(intern_str(base)), enum_names, span, errors);
+            Type::Ref(crate::ast::intern_type(inner))
+        } else {
+            resolve_type(Type::Obj(intern_str(target_type)), enum_names, span, errors)
+        }
+    }
+
     for impl_block in &program.impls {
+        let base_target_name = impl_block
+            .target_type
+            .strip_prefix("&mut ")
+            .or_else(|| impl_block.target_type.strip_prefix('&'))
+            .unwrap_or(&impl_block.target_type);
         let target_is_generic_type = {
             let mono = mono_cell.borrow();
-            let is_generic_struct = mono.struct_templates.get(&impl_block.target_type).map(|s| {
+            let is_generic_struct = mono.struct_templates.get(base_target_name).map(|s| {
                 s.where_clause.is_some() || s.fields.iter().any(|f| type_contains_generic_decl(&f.ty))
             }).unwrap_or(false);
-            let is_generic_enum = mono.enum_templates.contains_key(&impl_block.target_type);
+            let is_generic_enum = mono.enum_templates.contains_key(base_target_name);
             is_generic_struct || is_generic_enum
         };
         if target_is_generic_type {
             continue;
         }
-        let target_ty = resolve_type(Type::Obj(intern_str(&impl_block.target_type)), &enum_names, 0..1, &mut errors);
+        let target_ty = resolve_impl_target_type(&impl_block.target_type, &enum_names, 0..1, &mut errors);
+        let method_prefix = crate::ast::impl_method_prefix(&impl_block.target_type);
         for method in &impl_block.methods {
-            let mangled_name = format!("{}_{}", impl_block.target_type, method.name);
+            let mangled_name = format!("{}_{}", method_prefix, method.name);
             let mut params = Vec::new();
             for p in &method.params {
                 if p.name == "self" {
@@ -634,13 +793,15 @@ pub fn check_semantics(
             .or_else(|| func.body.first().map(|e| e.span()))
             .unwrap_or(0..1);
         func.return_type = resolve_type(func.return_type, &enum_names, f_span.clone(), &mut errors);
-        let is_index_ref_method = (func.name.ends_with("_index")
-            || func.name.ends_with("_index_mut"))
+        let is_index_or_deref_ref_method = (func.name.ends_with("_index")
+            || func.name.ends_with("_index_mut")
+            || func.name.ends_with("_deref")
+            || func.name.ends_with("_deref_mut"))
             && func
                 .params
                 .first()
                 .is_some_and(|p| p.name == "self" && matches!(p.ty, Type::Ref(_) | Type::MutRef(_)));
-        if type_contains_ref(&func.return_type) && !is_index_ref_method {
+        if type_contains_ref(&func.return_type) && !is_index_or_deref_ref_method {
             errors.push(SemanticError {
                 code: "E0106",
                 message: format!(
@@ -784,8 +945,8 @@ pub fn check_semantics(
                 || tr_name.ends_with(&format!("_{}", t.name))
         });
         if let Some(t_decl) = tr_decl {
-            let target_ty = resolve_type(
-                Type::Obj(intern_str(&impl_block.target_type)),
+            let target_ty = resolve_impl_target_type(
+                &impl_block.target_type,
                 &enum_names,
                 impl_block.span.clone(),
                 &mut errors,
@@ -911,6 +1072,7 @@ pub fn check_semantics(
         extern_vis: &extern_vis_map,
         is_unsafe: false,
         loop_depth: 0,
+        current_loop_breaks: None,
         current_return_type: None,
         current_expected_type: None,
         mono: &mono_cell,
@@ -1009,7 +1171,7 @@ pub fn check_semantics(
 
         if resolved_return_type != Type::Unit && !compat::definitely_returns(&typed_body) {
             if let Some(last) = typed_body.last() {
-                if !matches!(last, TypedExpr::Let(..) | TypedExpr::LetTuple(..)) && !compat::is_diverging_expr(last) {
+                if !matches!(last, TypedExpr::Let(..) | TypedExpr::LetTuple(..) | TypedExpr::LetStruct(..)) && !compat::is_diverging_expr(last) {
                     let _ = fn_infer_cell.borrow_mut().unify(resolved_return_type, last.ty());
                 }
             }
@@ -1031,7 +1193,7 @@ pub fn check_semantics(
                 }
             }
             let tail_ok = match typed_body.last() {
-                Some(TypedExpr::Let(..) | TypedExpr::LetTuple(..)) | None => false,
+                Some(TypedExpr::Let(..) | TypedExpr::LetTuple(..) | TypedExpr::LetStruct(..)) | None => false,
                 Some(last) => {
                     compat::is_diverging_expr(last)
                         || compat::is_type_compatible(&resolved_return_type, &last.ty())
@@ -1044,7 +1206,7 @@ pub fn check_semantics(
                     .or_else(|| func.body.last().map(|e| e.span()))
                     .unwrap_or(0..1);
                 let found_desc = match typed_body.last() {
-                    Some(TypedExpr::Let(..) | TypedExpr::LetTuple(..)) => "statement (`let`)".to_string(),
+                    Some(TypedExpr::Let(..) | TypedExpr::LetTuple(..) | TypedExpr::LetStruct(..)) => "statement (`let`)".to_string(),
                     Some(e) => format!("{:?}", e.ty()),
                     None => "()".to_string(),
                 };

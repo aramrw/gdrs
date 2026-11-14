@@ -12,6 +12,64 @@ use crate::{
 };
 
 /// Extracts a dotted projection path like `"p.x"` from nested `FieldAccess` / `Deref` expressions.
+fn resolve_struct_field_ty<'a>(
+    type_ctx: &TypeCtx<'a>,
+    struct_name: &str,
+    fty: &Type,
+) -> Type {
+    match fty {
+        Type::Generic(g) => {
+            if let Some((base_name, t_args)) = crate::sanal::mono::lookup_mangled(struct_name) {
+                let mono = type_ctx.mono.borrow();
+                if let Some(decl) = mono.struct_templates.get(&base_name) {
+                    let gp = crate::sanal::mono::extract_generic_params_struct(decl, type_ctx.mono);
+                    gp.iter()
+                        .position(|p| p == g.trim_start_matches('$'))
+                        .and_then(|idx| t_args.get(idx).copied())
+                        .unwrap_or(Type::Int)
+                } else {
+                    Type::Int
+                }
+            } else {
+                Type::Int
+            }
+        }
+        other => *other,
+    }
+}
+
+fn try_auto_deref_struct_field<'a>(
+    scopes: &mut ScopeStack,
+    errors: &mut Vec<SemanticError>,
+    type_ctx: &TypeCtx<'a>,
+    target: &TypedExpr,
+    field_name: &str,
+    is_mut: bool,
+    span: &Span,
+) -> Option<(TypedExpr, String, crate::sanal::StructLayout, Type)> {
+    let mut cur = target.clone();
+    for _ in 0..8 {
+        let mut probe_errs = Vec::new();
+        let (derefed, inner_ty) = crate::sanal::refs::try_lower_deref_target(
+            scopes,
+            &mut probe_errs,
+            type_ctx,
+            &cur,
+            is_mut,
+            span,
+        )?;
+        cur = derefed;
+        if let Some((sname, layout)) = lookup_struct_layout_for_type(type_ctx, inner_ty) {
+            if let Some((_, raw_fty)) = layout.field_offsets.get(field_name) {
+                errors.extend(probe_errs);
+                let fty = resolve_struct_field_ty(type_ctx, &sname, raw_fty);
+                return Some((cur, sname, layout, fty));
+            }
+        }
+    }
+    None
+}
+
 pub fn expr_projection_path(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Ident(name, _) => Some(name.clone()),
@@ -130,25 +188,36 @@ pub fn type_check_field_access<'a>(
             }
         }
         if let Some((_, fty)) = layout.field_offsets.get(field_name) {
-            field_ty = match fty {
-                Type::Generic(g) => {
-                    if let Some((base_name, t_args)) = crate::sanal::mono::lookup_mangled(&struct_name) {
-                        let mono = type_ctx.mono.borrow();
-                        if let Some(decl) = mono.struct_templates.get(&base_name) {
-                            let gp = crate::sanal::mono::extract_generic_params_struct(decl, type_ctx.mono);
-                            gp.iter()
-                                .position(|p| p == g.trim_start_matches('$'))
-                                .and_then(|idx| t_args.get(idx).copied())
-                                .unwrap_or(Type::Int)
-                        } else {
-                            Type::Int
-                        }
-                    } else {
-                        Type::Int
-                    }
+            field_ty = resolve_struct_field_ty(type_ctx, &struct_name, fty);
+        } else if let Some((derefed_target, d_sname, d_layout, d_fty)) = try_auto_deref_struct_field(
+            scopes,
+            errors,
+            type_ctx,
+            &t_target,
+            field_name,
+            false,
+            span,
+        ) {
+            if let Some(&f_vis) = d_layout.field_vis.get(field_name) {
+                if !crate::ast::is_visible(f_vis, &d_layout.module_path, &type_ctx.current_module) {
+                    errors.push(SemanticError {
+                        code: "E0616",
+                        message: format!("Field `{field_name}` of struct `{d_sname}` is private"),
+                        label: "Private field".to_string(),
+                        secondary_label: None,
+                        help: Some(format!(
+                            "Mark `{field_name}` with `pub` if it should be accessible outside its module"
+                        )),
+                        span: span.clone(),
+                    });
                 }
-                other => *other,
-            };
+            }
+            return Some(TypedExpr::FieldAccess(
+                Box::new(derefed_target),
+                field_name.to_string(),
+                d_fty,
+                span.clone(),
+            ));
         } else {
             errors.push(SemanticError {
                 code: "E0599",
@@ -355,6 +424,31 @@ pub fn type_check_field_assign<'a>(
                     span: t_val.span(),
                 });
             }
+        } else if let Some((derefed_target, d_sname, _, expected_ty)) =
+            try_auto_deref_struct_field(scopes, errors, type_ctx, &t_target, field_name, true, span)
+        {
+            let unify_res = type_ctx.infer.borrow_mut().unify(expected_ty, t_val.ty());
+            let resolved_expected = type_ctx.infer.borrow_mut().resolve(expected_ty);
+            let resolved_found = type_ctx.infer.borrow_mut().resolve(t_val.ty());
+            if unify_res.is_err() && !is_type_compatible(&resolved_expected, &resolved_found) {
+                errors.push(SemanticError {
+                    code: "E0308",
+                    message: format!(
+                        "Mismatched type assigning to field `{d_sname}.{field_name}`: expected `{:?}`, found `{:?}`",
+                        resolved_expected, resolved_found
+                    ),
+                    label: format!("Expected `{:?}`", resolved_expected),
+                    secondary_label: None,
+                    help: None,
+                    span: t_val.span(),
+                });
+            }
+            return Some(TypedExpr::FieldAssign(
+                Box::new(derefed_target),
+                field_name.to_string(),
+                Box::new(t_val),
+                span.clone(),
+            ));
         } else {
             errors.push(SemanticError {
                 code: "E0599",

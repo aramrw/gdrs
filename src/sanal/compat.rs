@@ -187,6 +187,7 @@ pub fn is_type_compatible(expected: &Type, found: &Type) -> bool {
 pub fn is_diverging_expr(expr: &TypedExpr) -> bool {
     match expr {
         TypedExpr::Return(..) | TypedExpr::Break(..) | TypedExpr::Continue(..) => true,
+        TypedExpr::Loop(_, ty, _) => *ty == Type::Void,
         TypedExpr::MacroCall(name, ..) => name.trim_end_matches('!') == "panic",
         TypedExpr::Block(stmts, ..) | TypedExpr::Unsafe(stmts, ..) => definitely_returns(stmts),
         TypedExpr::IfElse(_, then_b, else_b, _, _) => {
@@ -204,33 +205,44 @@ pub fn definitely_returns(stmts: &[TypedExpr]) -> bool {
     stmts.iter().any(is_diverging_expr)
 }
 
+fn unwrap_lvalue_step(expr: &TypedExpr) -> Option<&TypedExpr> {
+    match expr {
+        TypedExpr::FieldAccess(inner, _, _, _)
+        | TypedExpr::IndexAccess(inner, _, _, _)
+        | TypedExpr::Deref(inner, _, _) => Some(inner.as_ref()),
+        TypedExpr::Call(fn_name, args, _, _)
+            if (fn_name.ends_with("_deref")
+                || fn_name.ends_with("_deref_mut")
+                || fn_name.ends_with("_index")
+                || fn_name.ends_with("_index_mut"))
+                && !args.is_empty() =>
+        {
+            match &args[0] {
+                TypedExpr::Ref(inner, _, _, _) => Some(inner.as_ref()),
+                other => Some(other),
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Extracts the underlying variable name from an lvalue expression (`x`, `x.field`, `*x`, etc.).
 pub fn extract_root_var(mut expr: &TypedExpr) -> Option<&str> {
     loop {
-        match expr {
-            TypedExpr::Ident(name, _, _) => return Some(name.as_str()),
-            TypedExpr::FieldAccess(inner, _, _, _)
-            | TypedExpr::IndexAccess(inner, _, _, _)
-            | TypedExpr::Deref(inner, _, _) => {
-                expr = inner.as_ref();
-            }
-            _ => return None,
+        if let TypedExpr::Ident(name, _, _) = expr {
+            return Some(name.as_str());
         }
+        expr = unwrap_lvalue_step(expr)?;
     }
 }
 
 /// Extracts both the underlying root variable name and its recorded AST type from an lvalue expression.
 pub fn extract_root_ident_with_ty(mut expr: &TypedExpr) -> Option<(&str, Type)> {
     loop {
-        match expr {
-            TypedExpr::Ident(name, ty, _) => return Some((name.as_str(), *ty)),
-            TypedExpr::FieldAccess(inner, _, _, _)
-            | TypedExpr::IndexAccess(inner, _, _, _)
-            | TypedExpr::Deref(inner, _, _) => {
-                expr = inner.as_ref();
-            }
-            _ => return None,
+        if let TypedExpr::Ident(name, ty, _) = expr {
+            return Some((name.as_str(), *ty));
         }
+        expr = unwrap_lvalue_step(expr)?;
     }
 }
 
@@ -243,7 +255,7 @@ pub fn consume_tail_expr<'a>(
     expr: &TypedExpr,
 ) {
     if expr.ty() != Type::Unit
-        && !matches!(expr, TypedExpr::Let(..) | TypedExpr::LetTuple(..))
+        && !matches!(expr, TypedExpr::Let(..) | TypedExpr::LetTuple(..) | TypedExpr::LetStruct(..))
         && !is_diverging_expr(expr)
     {
         type_ctx.check_not_moved_from_projection(expr, errors);

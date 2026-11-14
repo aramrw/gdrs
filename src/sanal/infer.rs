@@ -479,7 +479,6 @@ fn finalize_typed_expr(
         | TypedExpr::Float(..)
         | TypedExpr::Bool(..)
         | TypedExpr::String(..)
-        | TypedExpr::Break(..)
         | TypedExpr::Continue(..) => {}
 
         TypedExpr::Ident(_, ty, _) => {
@@ -496,7 +495,7 @@ fn finalize_typed_expr(
         | TypedExpr::Caret(l, r, ty, _)
         | TypedExpr::Shl(l, r, ty, _)
         | TypedExpr::Shr(l, r, ty, _)
-        | TypedExpr::Range(l, r, ty, _) => {
+        | TypedExpr::Range(l, r, _, ty, _) => {
             finalize_typed_expr(l, infer, type_ctx, reported_infers, errors);
             finalize_typed_expr(r, infer, type_ctx, reported_infers, errors);
             resolve_and_record_type(ty, infer, type_ctx, reported_infers, errors, &span);
@@ -559,6 +558,18 @@ fn finalize_typed_expr(
             resolve_pattern(pat, infer, type_ctx, reported_infers, errors);
         }
 
+        TypedExpr::LetStruct(pat, ty, val, _) => {
+            finalize_typed_expr(val, infer, type_ctx, reported_infers, errors);
+            resolve_and_record_type(ty, infer, type_ctx, reported_infers, errors, &span);
+            for field in &mut pat.bindings {
+                let fspan = field.span.clone();
+                resolve_and_record_type(&mut field.ty, infer, type_ctx, reported_infers, errors, &fspan);
+            }
+            for (_, fty, _) in &mut pat.dropped_fields {
+                resolve_and_record_type(fty, infer, type_ctx, reported_infers, errors, &span);
+            }
+        }
+
         TypedExpr::Block(stmts, ty, _) | TypedExpr::Unsafe(stmts, ty, _) => {
             for s in stmts {
                 finalize_typed_expr(s, infer, type_ctx, reported_infers, errors);
@@ -575,6 +586,12 @@ fn finalize_typed_expr(
             finalize_typed_expr(b, infer, type_ctx, reported_infers, errors);
         }
 
+        TypedExpr::Loop(b, ty, s) => {
+            let span = s.clone();
+            finalize_typed_expr(b, infer, type_ctx, reported_infers, errors);
+            resolve_and_record_type(ty, infer, type_ctx, reported_infers, errors, &span);
+        }
+
         TypedExpr::IfElse(c, t, e, ty, _) => {
             finalize_typed_expr(c, infer, type_ctx, reported_infers, errors);
             finalize_typed_expr(t, infer, type_ctx, reported_infers, errors);
@@ -582,7 +599,7 @@ fn finalize_typed_expr(
             resolve_and_record_type(ty, infer, type_ctx, reported_infers, errors, &span);
         }
 
-        TypedExpr::Return(opt_e, _) => {
+        TypedExpr::Return(opt_e, _) | TypedExpr::Break(opt_e, _) => {
             if let Some(e) = opt_e {
                 finalize_typed_expr(e, infer, type_ctx, reported_infers, errors);
             }
@@ -748,6 +765,9 @@ fn finalize_typed_expr(
                         errors,
                         &arm.span,
                     );
+                }
+                if let Some(g) = &mut arm.guard {
+                    finalize_typed_expr(g, infer, type_ctx, reported_infers, errors);
                 }
                 for stmt in &mut arm.body {
                     finalize_typed_expr(stmt, infer, type_ctx, reported_infers, errors);

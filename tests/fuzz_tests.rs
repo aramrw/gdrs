@@ -153,8 +153,11 @@ fn expr_eq(a: &Expr, b: &Expr) -> bool {
         | (Expr::Caret(l1, r1, _), Expr::Caret(l2, r2, _))
         | (Expr::Shl(l1, r1, _), Expr::Shl(l2, r2, _))
         | (Expr::Shr(l1, r1, _), Expr::Shr(l2, r2, _))
-        | (Expr::DerefAssign(l1, r1, _), Expr::DerefAssign(l2, r2, _))
-        | (Expr::Range(l1, r1, _), Expr::Range(l2, r2, _)) => expr_eq(l1, l2) && expr_eq(r1, r2),
+        | (Expr::DerefAssign(l1, r1, _), Expr::DerefAssign(l2, r2, _)) => expr_eq(l1, l2) && expr_eq(r1, r2),
+        (Expr::Range(l1, r1, inc1, _), Expr::Range(l2, r2, inc2, _)) => {
+            inc1 == inc2 && expr_eq(l1, l2) && expr_eq(r1, r2)
+        }
+        (Expr::Loop(l1, _), Expr::Loop(l2, _)) => expr_eq(l1, l2),
         (Expr::Neg(x, _), Expr::Neg(y, _))
         | (Expr::Not(x, _), Expr::Not(y, _))
         | (Expr::Try(x, _), Expr::Try(y, _))
@@ -167,6 +170,18 @@ fn expr_eq(a: &Expr, b: &Expr) -> bool {
         (Expr::LetTuple(p1, t1, e1, _), Expr::LetTuple(p2, t2, e2, _)) => {
             tuple_pat_eq(p1, p2) && t1 == t2 && expr_eq(e1, e2)
         }
+        (Expr::LetStruct(p1, t1, e1, _), Expr::LetStruct(p2, t2, e2, _)) => {
+            p1.struct_path == p2.struct_path
+                && p1.has_rest == p2.has_rest
+                && p1.fields.len() == p2.fields.len()
+                && p1.fields.iter().zip(p2.fields.iter()).all(|(a, b)| {
+                    a.field_name == b.field_name
+                        && a.binding_name == b.binding_name
+                        && a.is_mutable == b.is_mutable
+                })
+                && t1 == t2
+                && expr_eq(e1, e2)
+        }
         (Expr::Assign(n1, e1, _), Expr::Assign(n2, e2, _)) => n1 == n2 && expr_eq(e1, e2),
         (Expr::CompoundAssign(op1, t1, v1, _), Expr::CompoundAssign(op2, t2, v2, _)) => {
             op1 == op2 && expr_eq(t1, t2) && expr_eq(v1, v2)
@@ -175,12 +190,13 @@ fn expr_eq(a: &Expr, b: &Expr) -> bool {
         | (Expr::IndexAssign(c1, t1, f1, _), Expr::IndexAssign(c2, t2, f2, _)) => {
             expr_eq(c1, c2) && expr_eq(t1, t2) && expr_eq(f1, f2)
         }
-        (Expr::Return(o1, _), Expr::Return(o2, _)) => match (o1, o2) {
+        (Expr::Return(o1, _), Expr::Return(o2, _))
+        | (Expr::Break(o1, _), Expr::Break(o2, _)) => match (o1, o2) {
             (Some(x), Some(y)) => expr_eq(x, y),
             (None, None) => true,
             _ => false,
         },
-        (Expr::Break(_), Expr::Break(_)) | (Expr::Continue(_), Expr::Continue(_)) => true,
+        (Expr::Continue(_), Expr::Continue(_)) => true,
         (Expr::Block(v1, _), Expr::Block(v2, _))
         | (Expr::Unsafe(v1, _), Expr::Unsafe(v2, _))
         | (Expr::ArrayInit(v1, _), Expr::ArrayInit(v2, _))
@@ -213,9 +229,31 @@ fn expr_eq(a: &Expr, b: &Expr) -> bool {
                 && arms1.iter().zip(arms2.iter()).all(|(x, y)| {
                     x.variant_name == y.variant_name
                         && x.bindings == y.bindings
+                        && x.alt_patterns == y.alt_patterns
+                        && match (&x.guard, &y.guard) {
+                            (Some(g1), Some(g2)) => expr_eq(g1, g2),
+                            (None, None) => true,
+                            _ => false,
+                        }
                         && exprs_eq(&x.body, &y.body)
                 })
         }
+        (
+            Expr::LetElse {
+                variant_name: v1,
+                bindings: b1,
+                target: t1,
+                else_body: e1,
+                ..
+            },
+            Expr::LetElse {
+                variant_name: v2,
+                bindings: b2,
+                target: t2,
+                else_body: e2,
+                ..
+            },
+        ) => v1 == v2 && b1 == b2 && expr_eq(t1, t2) && exprs_eq(e1, e2),
         _ => false,
     }
 }

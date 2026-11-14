@@ -2011,3 +2011,1489 @@ fn main():
         "Operator overloading (Index/IndexMut/Bitwise/CompoundAssign) failed:\n{combined}"
     );
 }
+
+#[test]
+fn std_ops_not_bitwise_assign_and_deref() {
+    let out = run_gdrs_source(
+        "std_ops_not_bitassign_deref",
+        r#"
+use std::ops::{Not, RemAssign, BitAndAssign, BitOrAssign, BitXorAssign, ShlAssign, ShrAssign, Deref, DerefMut}
+use std::string::String
+
+obj Mask:
+	pub v: i64
+
+impl Not for Mask:
+	fn not(self) -> Mask:
+		return Mask{ v: self.v ^ 255 }
+
+impl RemAssign for Mask:
+	fn rem_assign(&mut self, rhs: i64):
+		self.v = self.v % rhs
+
+impl BitAndAssign for Mask:
+	fn bitand_assign(&mut self, rhs: Mask):
+		self.v = self.v & rhs.v
+
+impl BitOrAssign for Mask:
+	fn bitor_assign(&mut self, rhs: Mask):
+		self.v = self.v | rhs.v
+
+impl BitXorAssign for Mask:
+	fn bitxor_assign(&mut self, rhs: Mask):
+		self.v = self.v ^ rhs.v
+
+impl ShlAssign for Mask:
+	fn shl_assign(&mut self, shift: i64):
+		self.v = self.v << shift
+
+impl ShrAssign for Mask:
+	fn shr_assign(&mut self, shift: i64):
+		self.v = self.v >> shift
+
+obj Inner:
+	pub x: i64
+	pub label: String
+
+impl Inner:
+	pub fn sum(&self) -> i64:
+		return self.x + (self.label.len() as i64)
+
+	pub fn bump(&mut self, delta: i64):
+		self.x = self.x + delta
+
+obj WrapScalar:
+	val: i64
+
+impl Deref for WrapScalar:
+	fn deref(&self) -> &i64:
+		return &self.val
+
+impl DerefMut for WrapScalar:
+	fn deref_mut(&mut self) -> &mut i64:
+		return &mut self.val
+
+obj WrapInner:
+	inner: Inner
+
+impl Deref for WrapInner:
+	fn deref(&self) -> &Inner:
+		return &self.inner
+
+impl DerefMut for WrapInner:
+	fn deref_mut(&mut self) -> &mut Inner:
+		return &mut self.inner
+
+fn main():
+	let inv = !Mask{ v: 15 }
+	let mut m = Mask{ v: 10 }
+	m |= Mask{ v: 5 }
+	m &= Mask{ v: 7 }
+	m ^= Mask{ v: 2 }
+	m <<= 3
+	m >>= 1
+	m %= 9
+	log!("mask_not={},mask_acc={}", inv.v, m.v)
+
+	let mut p = 29
+	p %= 10
+	p |= 4
+	p &= 7
+	p ^= 2
+	p <<= 2
+	p >>= 1
+	log!("prim_bits={}", p)
+
+	let mut ws = WrapScalar{ val: 10 }
+	*ws = 25
+	*ws += 5
+	log!("ws={}", *ws)
+
+	let mut wi = WrapInner{ inner: Inner{ x: 10, label: String::from("abc") } }
+	let mut wi_rx = 0
+	if true:
+		let r = &*wi
+		wi_rx = r.x
+	let s0 = wi.sum()
+	wi.x = 40
+	wi.x += 2
+	wi.bump(8)
+	log!("wi_r={},s0={},x={}", wi_rx, s0, wi.x)
+"#,
+    );
+    let combined = combined_output(&out);
+    assert!(
+        out.status.success()
+            && combined.contains("mask_not=240,mask_acc=2")
+            && combined.contains("prim_bits=14")
+            && combined.contains("ws=30")
+            && combined.contains("wi_r=10,s0=13,x=50"),
+        "Not / bitwise-assign / Deref / DerefMut failed:\n{combined}"
+    );
+
+    // Negative: moving non-Copy *wrapper out of Deref triggers E0507; *immut = v triggers E0596
+    let neg_move = run_gdrs_source(
+        "std_ops_deref_non_copy_e0507",
+        r#"
+use std::ops::{Deref, DerefMut}
+use std::string::String
+
+obj WrapStr:
+	s: String
+
+impl Deref for WrapStr:
+	fn deref(&self) -> &String:
+		return &self.s
+
+impl DerefMut for WrapStr:
+	fn deref_mut(&mut self) -> &mut String:
+		return &mut self.s
+
+fn main():
+	let w = WrapStr{ s: String::from("hi") }
+	let moved = *w
+	log!("{}", moved.as_str())
+"#,
+    );
+    let neg_move_str = combined_output(&neg_move);
+    assert!(
+        !neg_move.status.success() && neg_move_str.contains("E0507"),
+        "Expected E0507 moving non-Copy *Deref, got:\n{neg_move_str}"
+    );
+
+    let neg_immut = run_gdrs_source(
+        "std_ops_deref_mut_immut_e0596",
+        r#"
+use std::ops::{Deref, DerefMut}
+
+obj BoxInt:
+	v: i64
+
+impl Deref for BoxInt:
+	fn deref(&self) -> &i64:
+		return &self.v
+
+impl DerefMut for BoxInt:
+	fn deref_mut(&mut self) -> &mut i64:
+		return &mut self.v
+
+fn main():
+	let w = BoxInt{ v: 1 }
+	*w = 2
+"#,
+    );
+    let neg_immut_str = combined_output(&neg_immut);
+    assert!(
+        !neg_immut.status.success() && neg_immut_str.contains("E0596"),
+        "Expected E0596 on *immut_wrapper = val, got:\n{neg_immut_str}"
+    );
+}
+
+#[test]
+fn std_ops_reference_and_heterogeneous_binops() {
+    let out = run_gdrs_source(
+        "std_ops_ref_hetero_binops",
+        r#"
+use std::ops::{Add, Mul}
+use std::core::Drop
+
+obj Mat:
+	pub a: f64
+	pub b: f64
+	pub id: i64
+
+impl Drop for Mat:
+	fn drop(mut self):
+		log!("drop_mat={}", self.id)
+
+impl Add for Mat:
+	fn add(self, rhs: Mat) -> Mat:
+		return Mat{ a: self.a + rhs.a, b: self.b + rhs.b, id: self.id + rhs.id }
+
+impl Add for &Mat:
+	fn add(self, rhs: &Mat) -> Mat:
+		return Mat{ a: self.a + rhs.a, b: self.b + rhs.b, id: 99 }
+
+impl Mul for Mat:
+	fn mul(&self, scale: f64) -> Mat:
+		return Mat{ a: self.a * scale, b: self.b * scale, id: 77 }
+
+fn main():
+	let m1 = Mat{ a: 1.5, b: 2.0, id: 1 }
+	let m2 = Mat{ a: 2.5, b: 3.0, id: 2 }
+	let ref_sum = &m1 + &m2
+	let scaled = m1 * 2.0
+	let ref_scaled = &m2 * 3.0
+	let owned_sum = m1 + m2
+	log!("ref_sum={},{};scaled={},{};ref_scaled={},{};owned={},{}", ref_sum.a, ref_sum.b, scaled.a, scaled.b, ref_scaled.a, ref_scaled.b, owned_sum.a, owned_sum.b)
+"#,
+    );
+    let combined = combined_output(&out);
+    assert!(
+        out.status.success()
+            && combined.contains("ref_sum=4")
+            && combined.contains("scaled=3")
+            && combined.contains("ref_scaled=7.5,9")
+            && combined.contains("owned=4")
+            && combined.contains("drop_mat=99")
+            && combined.contains("drop_mat=77")
+            && combined.contains("drop_mat=3"),
+        "Reference & heterogeneous std::ops failed:\n{combined}"
+    );
+}
+
+#[test]
+fn repr_packed_and_align_layouts_and_abi() {
+    let out = run_gdrs_source(
+        "repr_packed_align_layouts",
+        r#"
+use std::mem::{size_of, align_of}
+
+#[repr(packed)]
+obj Packed:
+	pub a: u8
+	pub b: i64
+	pub c: u16
+
+#[repr(packed(2))]
+obj Packed2:
+	pub a: u8
+	pub b: i64
+	pub c: u8
+
+#[repr(align(64))]
+obj CacheLine:
+	pub a: u8
+	pub b: i32
+
+#[repr(C, align(16))]
+obj Vec2:
+	pub x: f32
+	pub y: f32
+
+#[repr(C)]
+obj WithPacked:
+	pub tag: u8
+	pub inner: Packed
+
+#[repr(C)]
+obj WithAligned:
+	pub tag: u8
+	pub buf: CacheLine
+
+#[repr(packed)]
+obj GenPacked:
+	pub tag: u8
+	pub val: $T
+
+#[repr(packed)]
+obj PackedF32:
+	pub c: u8
+	pub a: f32
+	pub b: f32
+
+#[repr(align(16))]
+obj AlignedF32:
+	pub a: f32
+	pub b: f32
+
+#[repr(align(32))]
+obj EmptyAligned {}
+
+fn pass_packed(p: Packed) -> Packed:
+	return Packed{ a: p.a + 1, b: p.b + 2, c: p.c + 3 }
+
+fn pass_packed_f32(p: PackedF32) -> f32:
+	return p.a + p.b + (p.c as f32)
+
+fn pass_aligned_f32(v: AlignedF32) -> AlignedF32:
+	return AlignedF32{ a: v.a * 2.0, b: v.b * 3.0 }
+
+fn main():
+	let p = Packed{ a: 17 as u8, b: 0x0102030405060708, c: 0x0A0B as u16 }
+	let raw_p = (&p as *Packed) as *u8
+	let mut byte_sum: i64 = 0
+	unsafe:
+		let b0 = *raw_p as i64
+		let b1 = *(raw_p + 1) as i64
+		let b8 = *(raw_p + 8) as i64
+		let b9 = *(raw_p + 9) as i64
+		let b10 = *(raw_p + 10) as i64
+		byte_sum = b0 + b1 + b8 + b9 + b10
+
+	// Taking reference to a 1-byte aligned field inside #[repr(packed)] must be allowed
+	let pa_val = *(&p.a) as i64
+	let p2 = pass_packed(p)
+	let p2a_val = *(&p2.a) as i64
+
+	let cl = CacheLine{ a: 9 as u8, b: 123 }
+	let cl_addr = (&cl as *CacheLine) as i64
+	let cl_aligned = (cl_addr % 64) == 0
+
+	let arr = [CacheLine{ a: 1 as u8, b: 10 }, CacheLine{ a: 2 as u8, b: 20 }]
+	let arr_step = ((&arr[1] as *CacheLine) as i64) - ((&arr[0] as *CacheLine) as i64)
+
+	let pf_sum = pass_packed_f32(PackedF32{ c: 2 as u8, a: 1.5, b: 2.5 })
+	let af = pass_aligned_f32(AlignedF32{ a: 2.0, b: 4.0 })
+	let gp: GenPacked<i64> = GenPacked{ tag: 3 as u8, val: 99 }
+
+	log!(
+		"packed={},{};p2={},{};cl={},{},{};vec2={},{};wp={},{};wa={},{};gp={},{};empty={},{};val={},{},{};bytes={};step={};f={},{},{};refs={}",
+		size_of::<Packed>(),
+		align_of::<Packed>(),
+		size_of::<Packed2>(),
+		align_of::<Packed2>(),
+		size_of::<CacheLine>(),
+		align_of::<CacheLine>(),
+		cl_aligned,
+		size_of::<Vec2>(),
+		align_of::<Vec2>(),
+		size_of::<WithPacked>(),
+		align_of::<WithPacked>(),
+		size_of::<WithAligned>(),
+		align_of::<WithAligned>(),
+		size_of::<GenPacked<i64> >(),
+		align_of::<GenPacked<i64> >(),
+		size_of::<EmptyAligned>(),
+		align_of::<EmptyAligned>(),
+		p2.a,
+		p2.b,
+		p2.c,
+		byte_sum,
+		arr_step,
+		pf_sum,
+		af.a,
+		af.b,
+		pa_val + p2a_val + gp.val
+	)
+"#,
+    );
+    let combined = combined_output(&out);
+    // byte_sum = 17 + 0x08 (8) + 0x01 (1) + 0x0B (11) + 0x0A (10) = 47
+    // p2.a = 18, p2.b = 0x010203040506070A = 72623859790382858, p2.c = 0x0A0E = 2574
+    assert!(
+        out.status.success()
+            && combined.contains("packed=11,1;p2=12,2;cl=64,64,true;")
+            && combined.contains("vec2=16,16;wp=12,1;wa=128,64;gp=9,1;empty=0,32;")
+            && combined.contains("val=18,72623859790382858,2574;bytes=47;step=64;f=6.0,4.0,12.0;refs=134"),
+        "#[repr(packed)] / #[repr(align)] runtime/layout failed:\n{combined}"
+    );
+}
+
+#[test]
+fn repr_packed_and_align_negative_errors() {
+    let cases = [
+        (
+            "unaligned_imm_ref",
+            r#"
+#[repr(packed)]
+obj P:
+	pub a: u8
+	pub b: i32
+fn main():
+	let p = P{ a: 1 as u8, b: 2 }
+	let _r = &p.b
+"#,
+            "E0793",
+        ),
+        (
+            "unaligned_mut_ref",
+            r#"
+#[repr(packed)]
+obj P:
+	pub a: u8
+	pub b: i32
+fn main():
+	let mut p = P{ a: 1 as u8, b: 2 }
+	let _r = &mut p.b
+"#,
+            "E0793",
+        ),
+        (
+            "unaligned_packed2_i32_ref",
+            r#"
+#[repr(packed(2))]
+obj P2:
+	pub a: u8
+	pub b: i16
+	pub c: i32
+fn main():
+	let p = P2{ a: 1 as u8, b: 2 as i16, c: 3 }
+	let _ok = &p.b
+	let _bad = &p.c
+"#,
+            "E0793",
+        ),
+        (
+            "unaligned_nested_struct_field_ref",
+            r#"
+obj Inner:
+	pub x: u8
+	pub y: i32
+#[repr(packed)]
+obj Outer:
+	pub flag: u8
+	pub inner: Inner
+fn main():
+	let o = Outer{ flag: 1 as u8, inner: Inner{ x: 2 as u8, y: 3 } }
+	let _bad = &o.inner.y
+"#,
+            "E0793",
+        ),
+        (
+            "unaligned_autoref_method",
+            r#"
+obj Inner:
+	pub y: i32
+impl Inner:
+	fn get(&self) -> i32:
+		return self.y
+#[repr(packed)]
+obj Outer:
+	pub flag: u8
+	pub inner: Inner
+fn main():
+	let o = Outer{ flag: 1 as u8, inner: Inner{ y: 7 } }
+	let _bad = o.inner.get()
+"#,
+            "E0793",
+        ),
+        (
+            "conflict_packed_align",
+            r#"
+#[repr(packed, align(8))]
+obj Bad:
+	pub a: i32
+fn main():
+	return
+"#,
+            "E0587",
+        ),
+        (
+            "invalid_align_non_pow2",
+            r#"
+#[repr(align(3))]
+obj Bad:
+	pub a: i32
+fn main():
+	return
+"#,
+            "E0589",
+        ),
+        (
+            "invalid_align_zero",
+            r#"
+#[repr(align(0))]
+obj Bad:
+	pub a: i32
+fn main():
+	return
+"#,
+            "E0589",
+        ),
+        (
+            "invalid_align_negative",
+            r#"
+#[repr(align(-4))]
+obj Bad:
+	pub a: i32
+fn main():
+	return
+"#,
+            "E0589",
+        ),
+        (
+            "conflicting_packed_hints",
+            r#"
+#[repr(packed(2), packed(4))]
+obj Bad:
+	pub a: i32
+fn main():
+	return
+"#,
+            "E0634",
+        ),
+        (
+            "unknown_repr_specifier",
+            r#"
+#[repr(unknown_spec)]
+obj Bad:
+	pub a: i32
+fn main():
+	return
+"#,
+            "E0552",
+        ),
+        (
+            "repr_on_enum",
+            r#"
+#[repr(packed)]
+enum BadEnum:
+	A(i32)
+fn main():
+	return
+"#,
+            "E0517",
+        ),
+    ];
+
+    for (name, src, expected_code) in cases {
+        let out = run_gdrs_source(&format!("repr_neg_{name}"), src);
+        let combined = combined_output(&out);
+        assert!(
+            !out.status.success() && combined.contains(expected_code),
+            "Case `{name}` expected error `{expected_code}`, got status={:?}\n{combined}",
+            out.status.code()
+        );
+    }
+}
+
+#[test]
+fn repr_packed_and_align_randomized_c_parity() {
+    let mut seed: u64 = 0x5EED_C0DE_1234_5678;
+    let mut next_u32 = || -> u32 {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 16) as u32
+    };
+
+    let field_types = [
+        ("u8", "uint8_t"),
+        ("i16", "int16_t"),
+        ("i32", "int32_t"),
+        ("i64", "int64_t"),
+        ("f32", "float"),
+        ("f64", "double"),
+    ];
+    let repr_modes = [
+        ("", ""),
+        ("#[repr(C)]", ""),
+        ("#[repr(packed)]", "__attribute__((packed))"),
+        ("#[repr(packed(2))]", "__attribute__((packed, aligned(2)))"),
+        ("#[repr(align(16))]", "__attribute__((aligned(16)))"),
+        ("#[repr(align(64))]", "__attribute__((aligned(64)))"),
+    ];
+
+    let mut gdrs_defs = String::from("use std::mem::{size_of, align_of}\n\n");
+    let mut gdrs_prints = String::new();
+    let mut c_defs = String::from("#include <stdio.h>\n#include <stdint.h>\n\n");
+    let mut c_prints = String::new();
+
+    for i in 0..16 {
+        let mode_idx = (next_u32() as usize) % repr_modes.len();
+        let (g_repr, c_attr) = repr_modes[mode_idx];
+        let num_fields = 2 + ((next_u32() as usize) % 5);
+
+        if !g_repr.is_empty() {
+            gdrs_defs.push_str(g_repr);
+            gdrs_defs.push('\n');
+        }
+        gdrs_defs.push_str(&format!("obj RandStruct{i}:\n"));
+        c_defs.push_str(&format!("struct {c_attr} RandStruct{i} {{\n"));
+
+        for f in 0..num_fields {
+            let (g_ty, c_ty) = if i > 2 && f == num_fields - 1 && (next_u32() % 3 == 0) {
+                // Occasionally nest an earlier generated struct
+                let prev = (next_u32() as usize) % i;
+                (format!("RandStruct{prev}"), format!("struct RandStruct{prev}"))
+            } else {
+                let (gt, ct) = field_types[(next_u32() as usize) % field_types.len()];
+                (gt.to_string(), ct.to_string())
+            };
+            gdrs_defs.push_str(&format!("\tpub f{f}: {g_ty}\n"));
+            c_defs.push_str(&format!("    {c_ty} f{f};\n"));
+        }
+        gdrs_defs.push('\n');
+        c_defs.push_str("};\n\n");
+
+        gdrs_prints.push_str(&format!(
+            "\tlog!(\"S{i}={{}},{{}}\", size_of::<RandStruct{i}>(), align_of::<RandStruct{i}>())\n"
+        ));
+        c_prints.push_str(&format!(
+            "    printf(\"S{i}=%zu,%zu\\n\", sizeof(struct RandStruct{i}), _Alignof(struct RandStruct{i}));\n"
+        ));
+    }
+
+    let gdrs_src = format!("{gdrs_defs}fn main():\n{gdrs_prints}");
+    let c_src = format!("{c_defs}int main(void) {{\n{c_prints}    return 0;\n}}\n");
+
+    let g_out = run_gdrs_source("repr_rand_parity", &gdrs_src);
+    let g_stdout = String::from_utf8_lossy(&g_out.stdout).to_string();
+    assert!(
+        g_out.status.success(),
+        "GDRS randomized repr program failed:\n{}\n{}",
+        g_stdout,
+        String::from_utf8_lossy(&g_out.stderr)
+    );
+
+    let dir = make_temp_dir("repr_rand_c");
+    let c_path = dir.join("parity.c");
+    let bin_path = dir.join("parity_c");
+    fs::write(&c_path, &c_src).unwrap();
+    let cc_out = Command::new("clang")
+        .arg("-std=c11")
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("failed to invoke clang");
+    assert!(
+        cc_out.status.success(),
+        "clang failed:\n{}",
+        String::from_utf8_lossy(&cc_out.stderr)
+    );
+    let c_run = Command::new(&bin_path).output().expect("failed to run C parity bin");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(c_run.status.success());
+
+    let c_lines: Vec<String> = String::from_utf8_lossy(&c_run.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| l.starts_with('S'))
+        .collect();
+    let g_lines: Vec<String> = g_stdout
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| l.starts_with('S'))
+        .collect();
+    assert_eq!(g_lines, c_lines, "GDRS vs clang C layout mismatch!\nGDRS:\n{g_stdout}\nC:\n{c_src}");
+}
+
+#[test]
+fn let_else_runtime_drops_and_control_flow() {
+    let src_fn = |n: usize| -> String {
+        format!(
+            r#"
+use std::core::{{Option, Result, Drop}}
+use std::string::String
+
+enum Multi:
+	Pair(i64, String, i64)
+	Empty
+
+obj Canary:
+	pub id: i64
+
+impl Drop for Canary:
+	fn drop(mut self):
+		if self.id < 0:
+			log!("canary={{}}", self.id)
+
+fn make_res(ok: bool) -> Result<String, String>:
+	if ok:
+		return Result::Ok(String::from("hello_payload_value"))
+	return Result::Err(String::from("err_payload_should_drop_cleanly"))
+
+fn unwrap_or_neg(ok: bool) -> i64:
+	let c = Canary{{ id: 1 }}
+	let outer = String::from("outer_still_alive_if_ok")
+	let Result::Ok(mut s) = make_res(ok) else:
+		// Move `outer` ONLY in the diverging else branch!
+		let _consumed = outer
+		return -2
+	// `outer` must still be valid here when `Result::Ok` succeeded!
+	s.append("_tail")
+	let ok_len = (s.len() as i64) + (outer.len() as i64) + c.id
+	return ok_len
+
+fn make_multi(flag: bool) -> Multi:
+	if flag:
+		return Multi::Pair(10, String::from("mid"), 999)
+	return Multi::Empty
+
+fn make_opt(is_none: bool) -> Option<i64>:
+	if is_none:
+		return Option::None
+	return Option::Some(42)
+
+fn make_loop_opt(i: i64) -> Option<i64>:
+	if i == 2 || i == 5:
+		return Option::None
+	return Option::Some(i * 10)
+
+fn test_multi(flag: bool) -> i64:
+	let m = make_multi(flag)
+	let Multi::Pair(a, mut msg, _) = m else:
+		return -4
+	msg.append("!")
+	return a + (msg.len() as i64)
+
+fn test_zero_binding(is_none: bool) -> i64:
+	let opt = make_opt(is_none)
+	let Option::None = opt else:
+		return -3
+	return 7
+
+fn test_loop_syntax_variants() -> i64:
+	let mut acc: i64 = 0
+	for i in 0..6:
+		let opt = make_loop_opt(i)
+		// Test indented else, braced else, inline else, and Rust-style else
+		if i == 2:
+			let Option::Some(v) = opt else:
+				continue
+			acc += v
+		else if i == 5:
+			let Option::Some(v) = opt else {{ break }}
+			acc += v
+		else:
+			let Option::Some(v) = opt else: continue
+			acc += v
+	return acc
+
+fn main():
+	let mut total: i64 = 0
+	for _k in 0..{n}:
+		total += unwrap_or_neg(true)
+		total += unwrap_or_neg(false)
+		total += test_multi(true)
+		total += test_multi(false)
+		total += test_zero_binding(true)
+		total += test_zero_binding(false)
+	let loops = test_loop_syntax_variants()
+	let cl = |x: i64|:
+		let opt = make_opt(x <= 0)
+		let Option::Some(y) = opt else: {{ return -9 }}
+		y * 2
+	log!("res={{}},{{}},{{}},{{}}", total, loops, cl(4), cl(0))
+"#
+        )
+    };
+
+    let out = run_gdrs_source("let_else_runtime", &src_fn(1));
+    let combined = combined_output(&out);
+    // unwrap_or_neg(true) = 24 ("hello_payload_value_tail") + 23 ("outer_still_alive_if_ok") + 1 = 48
+    // unwrap_or_neg(false) = -2
+    // test_multi(true) = 10 + 4 ("mid!") = 14; test_multi(false) = -4
+    // test_zero_binding(true) = 7; test_zero_binding(false) = -3
+    // total(1) = 48 - 2 + 14 - 4 + 7 - 3 = 60
+    // loops = 0 + 10 + 30 + 40 = 80
+	// cl(4) = 84, cl(0) = -9
+    assert!(
+        out.status.success() && combined.contains("res=60,80,84,-9"),
+        "let...else runtime/control-flow failed:\n{combined}"
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        let net_small = measure_net_allocs_macos(&src_fn, 10, &[]);
+        let net_large = measure_net_allocs_macos(&src_fn, 260, &[]);
+        assert_eq!(
+            net_large - net_small,
+            0,
+            "let...else leaked memory across 250 extra iterations (net_small={net_small}, net_large={net_large})"
+        );
+    }
+}
+
+#[test]
+fn let_else_negative_errors() {
+    let cases = [
+        (
+            "non_diverging_else",
+            r#"
+use std::core::Option
+fn main():
+	let opt = Option::Some(1)
+	let Option::Some(x) = opt else:
+		log!("oops")
+	log!("{}", x)
+"#,
+            "E0308",
+        ),
+        (
+            "non_diverging_zero_binding",
+            r#"
+use std::core::Option
+fn main():
+	let opt = Option::None
+	let Option::None = opt else:
+		let _z = 1
+"#,
+            "E0308",
+        ),
+        (
+            "conditional_non_diverging_else",
+            r#"
+use std::core::Option
+fn f(b: bool) -> i64:
+	let opt = Option::Some(5)
+	let Option::Some(x) = opt else:
+		if b:
+			return 0
+	return x
+fn main():
+	let _ = f(true)
+"#,
+            "E0308",
+        ),
+        (
+            "unknown_variant",
+            r#"
+use std::core::Option
+fn main():
+	let opt = Option::Some(1)
+	let Option::Missing(x) = opt else:
+		return
+	log!("{}", x)
+"#,
+            "E0004",
+        ),
+        (
+            "non_enum_target",
+            r#"
+use std::core::Option
+fn main():
+	let Option::Some(x) = 42 else:
+		return
+	log!("{}", x)
+"#,
+            "E0308",
+        ),
+        (
+            "immutable_binding_mutation",
+            r#"
+use std::core::Option
+fn main():
+	let opt = Option::Some(1)
+	let Option::Some(x) = opt else:
+		return
+	x = 2
+"#,
+            "E0382",
+        ),
+    ];
+
+    for (name, src, expected_code) in cases {
+        let out = run_gdrs_source(&format!("let_else_neg_{name}"), src);
+        let combined = combined_output(&out);
+        assert!(
+            !out.status.success() && combined.contains(expected_code),
+            "Case `{name}` expected error `{expected_code}`, got status={:?}\n{combined}",
+            out.status.code()
+        );
+    }
+}
+
+#[test]
+fn stage1_and_stage2_sugars_runtime_and_leaks() {
+    let src_fn = |n: usize| {
+        format!(
+            r#"
+use std::core::Option
+use std::string::String
+use std::vec::Vec
+
+obj Pt:
+	x: i64
+	y: i64
+
+obj Labeled:
+	label: String
+	pt: Pt
+
+enum Packet:
+	Alpha(String, String)
+	Beta(String)
+	Gamma(i64)
+	Empty
+
+fn next_opt(step: i64) -> Option<String>:
+	if step >= 4:
+		return Option::None
+	if step == 1:
+		return Option::Some(String::from("hi"))
+	return Option::Some(String::from("hello_world"))
+
+fn take_val(a: i64, s: String) -> i64:
+	return a + (s.len() as i64)
+
+fn classify_int(v: i64) -> i64:
+	match v:
+		-1 => return 100
+		0 => return 200
+		1 | 2 | 3 => return 300
+		_ => return 400
+
+fn classify_bool(b: bool) -> i64:
+	return match b:
+		true => 11
+		false => 22
+
+fn make_packet(kind: i64) -> Packet:
+	if kind == 0:
+		return Packet::Alpha(String::from("kept_payload_1"), String::from("dropped_second"))
+	if kind == 1:
+		return Packet::Beta(String::from("kept_payload_2"))
+	if kind == 2:
+		return Packet::Gamma(7)
+	return Packet::Empty
+
+fn check_packet_guards(p: Packet) -> i64:
+	return match p:
+		Packet::Alpha(s, _) | Packet::Beta(s) if s.len() > 20 =>
+			999
+		Packet::Alpha(s, _) | Packet::Beta(s) if s.len() == 14 =>
+			(s.len() as i64) + 100
+		Packet::Alpha(_, _) | Packet::Beta(_) =>
+			55
+		Packet::Gamma(v) if v < 0 =>
+			-10
+		Packet::Gamma(v) =>
+			v * 2
+		Packet::Empty =>
+			1
+
+fn main():
+	let mut acc: i64 = 0
+	for _k in 0..{n}:
+		// 1. while let with mut binding, continue, break, and braced variant
+		let mut i: i64 = 0
+		while let Option::Some(mut item) = next_opt(i):
+			i += 1
+			if item.len() < 4:
+				continue
+			item.append("!")
+			acc += item.len() as i64
+			if i == 3:
+				break
+		let mut j: i64 = 0
+		while let Option::Some(s) = next_opt(j): {{
+			j += 1
+			if j == 2: {{
+				acc += s.len() as i64
+			}}
+		}}
+
+		// 2. Expression-position if/else, if let, match
+		let x: i64 = 10
+		let y: i64 = 20
+		let p = Pt {{ x, y }}
+		let label = String::from("pt_shorthand")
+		let labeled = Labeled {{ label, pt: Pt {{ x: 1, y }} }}
+		acc += labeled.pt.x + labeled.pt.y + (labeled.label.len() as i64)
+
+		let expr_res = take_val(
+			if p.x < p.y: 5 else: 9,
+			if let Option::Some(msg) = next_opt(0):
+				msg
+			else:
+				String::from("fallback")
+		)
+		acc += expr_res
+
+		let braced_match_val = match p.x: {{
+			10 => String::from("ten_ok"),
+			_ => String::from("other"),
+		}}
+		acc += braced_match_val.len() as i64
+
+		// 3. Literal matching (int incl negative, or-patterns, bool) & guarded enum or-patterns
+		acc += classify_int(-1) + classify_int(0) + classify_int(2) + classify_int(99)
+		acc += classify_bool(true) + classify_bool(false)
+
+		let b1 = true
+		let small_u8: u8 = 2
+		acc += match b1:
+			true => 3
+			_ => 4
+		acc += match small_u8:
+			1 | 2 => 7
+			_ => 0
+
+		acc += check_packet_guards(make_packet(0))
+		acc += check_packet_guards(make_packet(1))
+		acc += check_packet_guards(make_packet(2))
+		acc += check_packet_guards(make_packet(3))
+
+	log!("stage12={{}}", acc)
+"#
+        )
+    };
+
+    let out = run_gdrs_source("stage12_runtime", &src_fn(1));
+    let combined = combined_output(&out);
+    // Per iteration expectation:
+    // while let 1: step=0 ("hello_world",11 -> "hello_world!",12), step=1 ("hi", len<4 continue), step=2 ("hello_world!",12 -> break) => 24
+    // while let 2 (braced): j=2 hits "hi" (len 2) => 2
+    // labeled: pt.x(1) + pt.y(20) + label("pt_shorthand",12) = 33
+    // expr_res: take_val(5, "hello_world"(11)) = 16
+    // braced_match_val: "ten_ok" = 6
+    // classify_int: 100 + 200 + 300 + 400 = 1000
+    // classify_bool: 11 + 22 = 33
+    // bool/u8 inline match: 3 + 7 = 10
+    // check_packet_guards:
+    //   kind 0 -> Alpha("dropped_first", "kept_payload_1"(len 14)) -> falls through arm0, matches arm1 -> 114
+    //   kind 1 -> Beta("kept_payload_2"(len 14)) -> matches arm1 -> 114
+    //   kind 2 -> Gamma(7) -> falls through <0 guard -> 14
+    //   kind 3 -> Empty -> 1
+    // Total per iteration = 24 + 2 + 33 + 16 + 6 + 1000 + 33 + 10 + 114 + 114 + 14 + 1 = 1367
+    assert!(
+        out.status.success() && combined.contains("stage12=1367"),
+        "stage1/stage2 sugar runtime failed:\n{combined}"
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        let net_small = measure_net_allocs_macos(&src_fn, 10, &[]);
+        let net_large = measure_net_allocs_macos(&src_fn, 260, &[]);
+        assert_eq!(
+            net_large - net_small,
+            0,
+            "stage1/stage2 sugars leaked memory across 250 extra iterations (net_small={net_small}, net_large={net_large})"
+        );
+    }
+}
+
+#[test]
+fn stage2_match_negative_errors() {
+    let cases = [
+        (
+            "non_exhaustive_int",
+            r#"
+fn main():
+	let x: i64 = 0
+	let _ = match x:
+		-1 => 1
+		0 => 2
+"#,
+            "E0004",
+        ),
+        (
+            "non_exhaustive_bool",
+            r#"
+fn main():
+	let b: bool = true
+	let _ = match b:
+		true => 1
+"#,
+            "E0004",
+        ),
+        (
+            "non_exhaustive_guarded_only",
+            r#"
+use std::core::Option
+fn main():
+	let opt = Option::Some(5)
+	let _ = match opt:
+		Option::Some(v) if v > 0 => v
+		Option::None => 0
+"#,
+            "E0004",
+        ),
+        (
+            "or_pattern_binding_mismatch",
+            r#"
+enum E:
+	A(i64)
+	B(i64)
+fn main():
+	let e = E::A(1)
+	let _ = match e:
+		E::A(x) | E::B(y) => 1
+"#,
+            "E0408",
+        ),
+        (
+            "non_bool_guard",
+            r#"
+fn main():
+	let x: i64 = 1
+	let _ = match x:
+		1 if 42 => 10
+		_ => 20
+"#,
+            "E0308",
+        ),
+        (
+            "int_pattern_on_enum",
+            r#"
+use std::core::Option
+fn main():
+	let opt = Option::Some(1)
+	let _ = match opt:
+		1 => 10
+		_ => 20
+"#,
+            "E0308",
+        ),
+        (
+            "enum_pattern_on_int",
+            r#"
+use std::core::Option
+fn main():
+	let x: i64 = 5
+	let _ = match x:
+		Option::Some(v) => v
+		_ => 0
+"#,
+            "E0308",
+        ),
+    ];
+
+    for (name, src, expected_code) in cases {
+        let out = run_gdrs_source(&format!("stage2_neg_{name}"), src);
+        let combined = combined_output(&out);
+        assert!(
+            !out.status.success() && combined.contains(expected_code),
+            "Case `{name}` expected error `{expected_code}`, got status={:?}\n{combined}",
+            out.status.code()
+        );
+    }
+}
+
+#[test]
+fn sugars_loop_inclusive_struct_destructure_and_matrix_iter_runtime_and_leaks() {
+    let runtime_src = r#"
+use std::vec::Vec
+use std::string::String
+
+obj Pair:
+	name: String
+	count: i64
+
+#[repr(C)]
+obj MixedC:
+	flag: u8
+	big: i64
+	label: String
+	tag: u8
+
+obj Matrix:
+	data: Vec<i64>
+	rows: i64
+	cols: i64
+
+fn pick_or_loop(flag: bool) -> i64:
+	if flag:
+		42
+	else:
+		loop:
+			break 99
+
+fn main():
+	// 1. loop returning scalar & owned aggregate + nested loop with continue/break + diverging loop
+	let mut i: i64 = 0
+	let mut sum_even: i64 = 0
+	let res: i64 = loop:
+		i += 1
+		if i == 2:
+			continue
+		if i > 4:
+			break sum_even
+		sum_even += i
+	if res != 8:
+		log!("FAIL loop_scalar")
+		return
+
+	let mut step: i64 = 0
+	let s_res: String = loop:
+		step += 1
+		if step < 3:
+			continue
+		let tmp = String::from("ok_loop")
+		break tmp
+	if s_res != "ok_loop":
+		log!("FAIL loop_string")
+		return
+
+	let mut outer: i64 = 0
+	let mut total_nested: i64 = 0
+	loop:
+		outer += 1
+		if outer > 3:
+			break
+		let mut inner: i64 = 0
+		loop:
+			inner += 1
+			if inner == 2:
+				continue
+			if inner > 3:
+				break
+			total_nested += 1
+	if total_nested != 6:
+		log!("FAIL loop_nested")
+		return
+
+	if pick_or_loop(true) != 42:
+		log!("FAIL pick_true")
+		return
+
+	// 2. Inclusive ranges ..=
+	let mut r_sum: i64 = 0
+	for x in 0..=4:
+		if x == 2:
+			continue
+		r_sum += x
+	if r_sum != 8:
+		log!("FAIL range_inc_continue")
+		return
+
+	let mut zero_iters: i64 = 0
+	for _x in 5..=3:
+		zero_iters += 1
+	if zero_iters != 0:
+		log!("FAIL range_inc_empty")
+		return
+
+	let mut one_iter: i64 = 0
+	for x in 3..=3:
+		one_iter += x
+	if one_iter != 3:
+		log!("FAIL range_inc_single")
+		return
+
+	let arr: [i64; 5] = [10, 20, 30, 40, 50]
+	let sl1 = arr[1..=3]
+	if sl1.len() != 3 || sl1[0] != 20 || sl1[2] != 40:
+		log!("FAIL arr_range_inc")
+		return
+	let sl2 = arr[..=2]
+	if sl2.len() != 3 || sl2[0] != 10 || sl2[2] != 30:
+		log!("FAIL arr_range_open_inc")
+		return
+
+	let txt = String::from("abcdef")
+	let ts1 = txt[1..=3]
+	if ts1 != "bcd":
+		log!("FAIL str_range_inc")
+		return
+	let ts2 = txt[..=2]
+	if ts2 != "abc":
+		log!("FAIL str_range_open_inc")
+		return
+
+	// 3. Struct destructuring (owned String, mut, alias, .., repr(C), closure)
+	let p = Pair { name: String::from("alpha"), count: 10 }
+	let Pair { name, mut count } = p
+	count += 5
+	if name != "alpha" || count != 15:
+		log!("FAIL destructure_basic")
+		return
+
+	let mc = MixedC { flag: 7, big: 1234567, label: String::from("dropped_label"), tag: 9 }
+	let MixedC { flag: f, big, .. } = mc
+	if f != 7 || big != 1234567:
+		log!("FAIL destructure_repr_c")
+		return
+
+	let p2 = Pair { name: String::from("closure_ignored"), count: 21 }
+	let add_ten = |item: Pair|:
+		let Pair { name: _, count: c } = item
+		c + 10
+	if add_ten(p2) != 31:
+		log!("FAIL destructure_closure")
+		return
+
+	// 4. `for x in matrix.data` iterating twice (non-consuming &self)
+	let mut d: Vec<i64> = Vec::new()
+	d.push(1)
+	d.push(2)
+	d.push(3)
+	d.push(4)
+	let mat = Matrix { data: d, rows: 2, cols: 2 }
+	let mut pass1: i64 = 0
+	for v in mat.data:
+		pass1 += v
+	let mut pass2: i64 = 0
+	for v in mat.data:
+		if v == 2:
+			continue
+		pass2 += v
+	if pass1 != 10 || pass2 != 8:
+		log!("FAIL matrix_data_iter")
+		return
+
+	log!("ALL_OK")
+"#;
+
+    let out = run_gdrs_source("sugars_stage3_runtime", runtime_src);
+    let combined = combined_output(&out);
+    assert!(
+        out.status.success() && combined.contains("ALL_OK"),
+        "sugars runtime test failed: status={:?}\n{combined}",
+        out.status.code()
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        let leak_src = |n: usize| -> String {
+            format!(
+                r#"
+use std::string::String
+use std::vec::Vec
+
+obj Item:
+	a: String
+	b: String
+	num: i64
+
+fn make_loop_str(k: i64) -> String:
+	let mut c: i64 = 0
+	loop:
+		c += 1
+		if c == 1:
+			let _discard = String::from("discarded")
+			continue
+		let s = String::from("kept")
+		if k >= 0:
+			break s
+
+fn main():
+	let mut iter: i64 = 0
+	for _i in 0..={iters}:
+		let it = Item {{ a: String::from("hello_a"), b: String::from("hello_b"), num: iter }}
+		let Item {{ a, .. }} = it
+		let ls = make_loop_str(iter)
+		let mut v: Vec<i64> = Vec::new()
+		v.push(a.len() as i64)
+		v.push(ls.len() as i64)
+		for x in v:
+			iter += x
+	log!("{{}}", iter)
+"#,
+                iters = n
+            )
+        };
+        let net_small = measure_net_allocs_macos(&leak_src, 5, &[]);
+        let net_large = measure_net_allocs_macos(&leak_src, 200, &[]);
+        assert_eq!(
+            net_large - net_small,
+            0,
+            "Memory leak in stage 3 sugars (loop/..=/struct destructure/vec iter): net_small={net_small}, net_large={net_large}"
+        );
+    }
+}
+
+#[test]
+fn sugars_stage3_negative_errors() {
+    let cases = [
+        (
+            "break_val_in_while",
+            r#"
+fn main():
+	while true:
+		break 1
+"#,
+            "E0571",
+        ),
+        (
+            "break_val_in_for",
+            r#"
+fn main():
+	for i in 0..3:
+		break i
+"#,
+            "E0571",
+        ),
+        (
+            "loop_mismatched_break_types",
+            r#"
+fn main():
+	let _ = loop:
+		if true:
+			break 1
+		break "bad"
+"#,
+            "E0308",
+        ),
+        (
+            "loop_break_empty_vs_val",
+            r#"
+fn main():
+	let _ = loop:
+		if true:
+			break 1
+		break
+"#,
+            "E0308",
+        ),
+        (
+            "struct_destructure_use_after_move",
+            r#"
+use std::string::String
+obj Pair:
+	name: String
+	count: i64
+fn main():
+	let p = Pair { name: String::from("x"), count: 1 }
+	let Pair { name, count: _ } = p
+	log!("{}", p.name)
+"#,
+            "E0382",
+        ),
+        (
+            "struct_destructure_duplicate_field",
+            r#"
+obj Pair:
+	a: i64
+	b: i64
+fn main():
+	let p = Pair { a: 1, b: 2 }
+	let Pair { a, a: c, b: _ } = p
+"#,
+            "E0025",
+        ),
+        (
+            "struct_destructure_unknown_field",
+            r#"
+obj Pair:
+	a: i64
+fn main():
+	let p = Pair { a: 1 }
+	let Pair { a, z } = p
+"#,
+            "E0026",
+        ),
+        (
+            "struct_destructure_missing_field",
+            r#"
+obj Pair:
+	a: i64
+	b: i64
+fn main():
+	let p = Pair { a: 1, b: 2 }
+	let Pair { a } = p
+"#,
+            "E0027",
+        ),
+        (
+            "struct_destructure_impl_drop",
+            r#"
+use std::core::Drop
+obj Guard:
+	x: i64
+impl Drop for Guard:
+	fn drop(&mut self):
+		pass
+fn main():
+	let g = Guard { x: 1 }
+	let Guard { x } = g
+"#,
+            "E0509",
+        ),
+        (
+            "struct_destructure_private_field",
+            r#"
+use std::vec::Vec
+fn main():
+	let mut v: Vec<i64> = Vec::new()
+	v.push(1)
+	let Vec { ptr, len, cap } = v
+"#,
+            "E0616",
+        ),
+    ];
+
+    for (name, src, expected_code) in cases {
+        let out = run_gdrs_source(&format!("stage3_neg_{name}"), src);
+        let combined = combined_output(&out);
+        assert!(
+            !out.status.success() && combined.contains(expected_code),
+            "Case `{name}` expected error `{expected_code}`, got status={:?}\n{combined}",
+            out.status.code()
+        );
+    }
+}
+

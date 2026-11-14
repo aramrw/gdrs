@@ -87,9 +87,28 @@ pub fn type_satisfies_bound(
             }
             return !matches!(ty, Type::Rc(_) | Type::Ref(_) | Type::MutRef(_) | Type::Ptr(_));
         }
-        "Add" | "Sub" | "Mul" | "Div" | "Rem" | "Neg" | "BitAnd" | "BitOr" | "BitXor" | "Shl"
-        | "Shr" | "AddAssign" | "SubAssign" | "MulAssign" | "DivAssign" => {
-            if ty.is_numeric() && !matches!(clean_bound, "AddAssign" | "SubAssign" | "MulAssign" | "DivAssign") {
+        "Add" | "Sub" | "Mul" | "Div" | "Rem" | "Neg" | "Not" | "BitAnd" | "BitOr" | "BitXor"
+        | "Shl" | "Shr" | "AddAssign" | "SubAssign" | "MulAssign" | "DivAssign" | "RemAssign"
+        | "BitAndAssign" | "BitOrAssign" | "BitXorAssign" | "ShlAssign" | "ShrAssign" => {
+            if ty.is_numeric()
+                && !matches!(
+                    clean_bound,
+                    "Not"
+                        | "AddAssign"
+                        | "SubAssign"
+                        | "MulAssign"
+                        | "DivAssign"
+                        | "RemAssign"
+                        | "BitAndAssign"
+                        | "BitOrAssign"
+                        | "BitXorAssign"
+                        | "ShlAssign"
+                        | "ShrAssign"
+                )
+            {
+                return true;
+            }
+            if clean_bound == "Not" && (ty == Type::Bool || ty.is_integer()) {
                 return true;
             }
             if let Some(tname) = type_name_opt {
@@ -98,6 +117,12 @@ pub fn type_satisfies_bound(
                     "SubAssign" => "sub_assign".to_string(),
                     "MulAssign" => "mul_assign".to_string(),
                     "DivAssign" => "div_assign".to_string(),
+                    "RemAssign" => "rem_assign".to_string(),
+                    "BitAndAssign" => "bitand_assign".to_string(),
+                    "BitOrAssign" => "bitor_assign".to_string(),
+                    "BitXorAssign" => "bitxor_assign".to_string(),
+                    "ShlAssign" => "shl_assign".to_string(),
+                    "ShrAssign" => "shr_assign".to_string(),
                     other => other.to_lowercase(),
                 };
                 if fn_map.contains_key(&format!("{tname}_{m}")) {
@@ -121,6 +146,26 @@ pub fn type_satisfies_bound(
             }
             if let Some(tname) = type_name_opt {
                 if fn_map.contains_key(&format!("{tname}_index_mut")) {
+                    return true;
+                }
+            }
+        }
+        "Deref" => {
+            if matches!(ty, Type::Box(_) | Type::Rc(_) | Type::Arc(_) | Type::Ref(_) | Type::MutRef(_)) {
+                return true;
+            }
+            if let Some(tname) = type_name_opt {
+                if fn_map.contains_key(&format!("{tname}_deref")) {
+                    return true;
+                }
+            }
+        }
+        "DerefMut" => {
+            if matches!(ty, Type::Box(_) | Type::MutRef(_)) {
+                return true;
+            }
+            if let Some(tname) = type_name_opt {
+                if fn_map.contains_key(&format!("{tname}_deref_mut")) {
                     return true;
                 }
             }
