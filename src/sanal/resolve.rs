@@ -12,6 +12,18 @@ pub(crate) fn substitute_self_type(ty: Type, target_ty: Type) -> Type {
         Type::Ref(inner) => Type::Ref(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),
         Type::MutRef(inner) => Type::MutRef(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),
         Type::Ptr(inner) => Type::Ptr(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),
+        Type::Box(inner) => Type::Box(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),
+        Type::Rc(inner) => Type::Rc(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),
+        Type::Arc(inner) => Type::Arc(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),
+        Type::FnPtr(params, ret) => Type::FnPtr(
+            crate::ast::intern_tuple(
+                &params
+                    .iter()
+                    .map(|p| substitute_self_type(*p, target_ty))
+                    .collect::<Vec<_>>(),
+            ),
+            crate::ast::intern_type(substitute_self_type(*ret, target_ty)),
+        ),
         Type::Tuple(tys) => Type::Tuple(Box::leak(
             tys.iter()
                 .map(|t| substitute_self_type(*t, target_ty))
@@ -85,12 +97,26 @@ pub(crate) fn resolve_type(
         Type::MutRef(elem_ty) => Type::MutRef(
             crate::ast::intern_type(resolve_type(*elem_ty, enum_names, span, errors)),
         ),
+        Type::Box(elem_ty) => Type::Box(
+            crate::ast::intern_type(resolve_type(*elem_ty, enum_names, span, errors)),
+        ),
         Type::Rc(elem_ty) => Type::Rc(
             crate::ast::intern_type(resolve_type(*elem_ty, enum_names, span, errors)),
         ),
         Type::Arc(elem_ty) => Type::Arc(
             crate::ast::intern_type(resolve_type(*elem_ty, enum_names, span, errors)),
         ),
+        Type::FnPtr(params, ret) => {
+            let resolved_params: Vec<Type> = params
+                .iter()
+                .map(|p| resolve_type(*p, enum_names, span.clone(), errors))
+                .collect();
+            let resolved_ret = resolve_type(*ret, enum_names, span, errors);
+            Type::FnPtr(
+                crate::ast::intern_tuple(&resolved_params),
+                crate::ast::intern_type(resolved_ret),
+            )
+        }
         other => other,
     }
 }

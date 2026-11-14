@@ -1817,7 +1817,7 @@ fn main():
     );
     assert_err_code(
         "round15_fmt_debug_unsupported",
-        "fn main():\n\tlog!(\"hello {:?}\", 42)\n",
+        "obj NoDebug:\n\tx: i64\nfn main():\n\tlet nd = NoDebug{ x: 1 }\n\tlog!(\"hello {:?}\", nd)\n",
         "E0277",
     );
     assert_err_code(
@@ -2445,4 +2445,540 @@ fn main():
     );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn round22_debug_trait_spec() {
+    // 1. Primitive and String Debug escaping, quoting, and positional specifiers
+    assert_ok_output(
+        "debug_primitives_and_positional",
+        r#"
+fn main():
+	log!("{:?}", "hello\nworld")
+	log!("{0:?} and {0}", "test")
+	log!("pos: {1:?} {0}", 10, "val")
+	log!("unit: {:?}", ())
+	log!("tuple: {:?}", (42, "inner"))
+	log!("bool: {:?}", true)
+"#,
+        &[
+            "\"hello\\nworld\"",
+            "\"test\" and test",
+            "pos: \"val\" 10",
+            "unit: ()",
+            "tuple: (42, \"inner\")",
+            "bool: true",
+        ],
+    );
+
+    // 2. Struct and Enum Debug derives with single-line {:?} and pretty-printed {:#?}
+    assert_ok_output(
+        "debug_struct_and_enum",
+        r#"
+#[derive(Debug)]
+obj Point:
+	x: i64
+	y: i64
+
+#[derive(Debug)]
+enum Status:
+	Idle
+	Active(str, i64)
+
+fn main():
+	let p = Point{ x: 10, y: 20 }
+	log!("{:?}", p)
+	log!("{:#?}", p)
+
+	let s1 = Status::Idle
+	let s2 = Status::Active("run", 1)
+	log!("{:?}", s1)
+	log!("{:?}", s2)
+"#,
+        &[
+            "Point { x: 10, y: 20 }",
+            "Point {\n    x: 10,\n    y: 20,\n}",
+            "Idle",
+            "Active(\"run\", 1)",
+        ],
+    );
+
+    // 3. Option, Result, and collections (Vec)
+    assert_ok_output(
+        "debug_option_result_collections",
+        r#"
+fn main():
+	let opt_some = Option::Some("found")
+	let opt_none: Option<i64> = Option::None
+	log!("{:?}", opt_some)
+	log!("{:?}", opt_none)
+
+	let res_ok: Result<i64, str> = Result::Ok(100)
+	let res_err: Result<i64, str> = Result::Err("bad")
+	log!("{:?}", res_ok)
+	log!("{:?}", res_err)
+
+	let v = vec![1, 2, 3]
+	log!("{:?}", v)
+"#,
+        &[
+            "Some(\"found\")",
+            "None",
+            "Ok(100)",
+            "Err(\"bad\")",
+            "[1, 2, 3]",
+        ],
+    );
+
+    // 4. dbg!(expr) macro prints to stderr and returns value
+    let dbg_run = run_gdrs_source(
+        "debug_macro_dbg",
+        r#"
+#[derive(Debug)]
+obj Counter:
+	val: i64
+
+fn main():
+	let a = dbg!(5 * 2)
+	assert_eq!(a, 10)
+	let c = dbg!(Counter{ val: 42 })
+	assert_eq!(c.val, 42)
+"#,
+    );
+    assert!(dbg_run.status.success(), "dbg! failed: {:?}", dbg_run);
+    let dbg_stderr = String::from_utf8_lossy(&dbg_run.stderr);
+    assert!(
+        dbg_stderr.contains("5 * 2 = 10") && dbg_stderr.contains("Counter"),
+        "Unexpected dbg! stderr:\n{dbg_stderr}"
+    );
+
+    // 5. assert_eq! failure formatting with Debug quotes
+    let assert_eq_run = run_gdrs_source(
+        "debug_assert_eq_quoted",
+        r#"
+fn main():
+	assert_eq!("foo", "bar")
+"#,
+    );
+    assert_eq!(assert_eq_run.status.code(), Some(101));
+    let assert_eq_stderr = String::from_utf8_lossy(&assert_eq_run.stderr);
+    assert!(
+        assert_eq_stderr.contains("left: \"foo\"") && assert_eq_stderr.contains("right: \"bar\""),
+        "Expected quoted strings in assert_eq! failure, got:\n{assert_eq_stderr}"
+    );
+
+    // 6. Result::unwrap() and Result::expect() panic with Debug formatted error
+    let unwrap_run = run_gdrs_source(
+        "debug_result_unwrap_panic",
+        r#"
+fn main():
+	let r: Result<i64, str> = Result::Err("file not found")
+	r.unwrap()
+"#,
+    );
+    assert_eq!(unwrap_run.status.code(), Some(101));
+    let unwrap_stderr = String::from_utf8_lossy(&unwrap_run.stderr);
+    assert!(
+        unwrap_stderr.contains("called `Result::unwrap()` on an `Err` value: \"file not found\""),
+        "Expected Debug-formatted Err in unwrap panic, got:\n{unwrap_stderr}"
+    );
+
+    let expect_run = run_gdrs_source(
+        "debug_result_expect_panic",
+        r#"
+fn main():
+	let r: Result<i64, i64> = Result::Err(404)
+	r.expect("network request failed")
+"#,
+    );
+    assert_eq!(expect_run.status.code(), Some(101));
+    let expect_stderr = String::from_utf8_lossy(&expect_run.stderr);
+    assert!(
+        expect_stderr.contains("network request failed: 404"),
+        "Expected expect message with Debug error, got:\n{expect_stderr}"
+    );
+
+    // 7. Negative checks: {:?} and dbg! on types without Debug fail with E0277
+    assert_err_code(
+        "debug_missing_derive_format",
+        r#"
+obj Opaque:
+	x: i64
+
+fn main():
+	let o = Opaque{ x: 1 }
+	log!("{:?}", o)
+"#,
+        "E0277",
+    );
+
+    assert_err_code(
+        "debug_missing_derive_dbg",
+        r#"
+obj Opaque:
+	x: i64
+
+fn main():
+	let o = Opaque{ x: 1 }
+	dbg!(o)
+"#,
+        "E0277",
+    );
+
+    assert_err_code(
+        "debug_missing_derive_assert_eq",
+        r#"
+obj Opaque:
+	x: i64
+
+fn main():
+	let a = Opaque{ x: 1 }
+	let b = Opaque{ x: 2 }
+	assert_eq!(a, b)
+"#,
+        "E0277",
+    );
+}
+
+#[test]
+fn round23_range_slicing_and_slices() {
+    // 1. Vec slicing, array slicing, sub-slicing, open-ended ranges, mutable slices, and string slicing
+    assert_ok_output(
+        "slice_ranges_comprehensive",
+        r#"
+fn sum_slice(s: &[i64]) -> i64 {
+	let mut total = 0
+	for x in s:
+		total += x
+	return total
+}
+
+fn scale_slice(s: &mut [i64], factor: i64) {
+	for i in 0..s.len():
+		s[i] = s[i] * factor
+}
+
+fn main() {
+	let mut v = vec![10, 20, 30, 40, 50]
+	{
+		let mid = &v[1..4]
+		log!("{:?} len={} empty={}", mid, mid.len(), mid.is_empty())
+		log!("{}", sum_slice(mid))
+
+		let head = &v[..2]
+		let tail = &v[3..]
+		let all = &v[..]
+		log!("{:?} {:?} {:?}", head, tail, all)
+
+		let sub = &mid[1..3]
+		log!("{:?}", sub)
+	}
+
+	// Mutable slice mutation
+	{
+		let ms = &mut v[1..4]
+		ms[0] = 200
+		scale_slice(ms, 2)
+	}
+	log!("{:?}", v)
+
+	// Fixed-size array [T; N] slicing and coercion to &[T]
+	let arr: [i64; 4] = [1, 2, 3, 4]
+	log!("{}", sum_slice(&arr))
+	log!("{:?}", &arr[1..3])
+
+	// String and str range slicing
+	let lit = "hello world"
+	log!("{} | {} | {}", &lit[0..5], &lit[6..], &lit[..5])
+	let owned = String::from("rustacean")
+	log!("{} | {}", &owned[0..4], &owned[4..])
+}
+"#,
+        &[
+            "[20, 30, 40] len=3 empty=false",
+            "90",
+            "[10, 20] [40, 50] [10, 20, 30, 40, 50]",
+            "[30, 40]",
+            "[10, 400, 60, 80, 50]",
+            "10",
+            "[2, 3]",
+            "hello | world | hello",
+            "rust | acean",
+        ],
+    );
+
+    // 2. Out-of-bounds range slice panics cleanly
+    let oob_run = run_gdrs_source(
+        "slice_oob_panic",
+        r#"
+fn main() {
+	let v = vec![1, 2, 3]
+	let _s = &v[1..5]
+}
+"#,
+    );
+    assert_eq!(oob_run.status.code(), Some(101));
+    let oob_stderr = String::from_utf8_lossy(&oob_run.stderr);
+    assert!(
+        oob_stderr.contains("out of range for slice of length 3"),
+        "Unexpected slice OOB panic stderr:\n{oob_stderr}"
+    );
+
+    // 3. Borrow checker prevents mutating Vec while a slice borrow is active
+    assert_err_code(
+        "slice_borrow_conflict_vec_push",
+        r#"
+fn main() {
+	let mut v = vec![1, 2, 3, 4]
+	let s = &v[0..2]
+	v.push(5)
+	log!("{:?}", s)
+}
+"#,
+        "E0502",
+    );
+}
+
+#[test]
+fn round24_fn_pointers_and_matrix_map() {
+    assert_ok_output(
+        "fn_ptrs_and_matrix_map",
+        r#"
+use std::math::matrix::Matrix
+
+fn triple(x: i64) -> i64 {
+	return x * 3
+}
+
+fn add_pair(a: i64, b: i64) -> i64 {
+	return a + b
+}
+
+fn apply_unary(f: fn(i64) -> i64, val: i64) -> i64 {
+	return f(val)
+}
+
+fn choose_op(mult: bool) -> fn(i64, i64) -> i64 {
+	if mult:
+		return |a: i64, b: i64| a * b
+	return add_pair
+}
+
+obj Pipeline:
+	step: fn(i64) -> i64
+
+fn square_f64(x: f64) -> f64 {
+	return x * x
+}
+
+fn main() {
+	// Named function and closure coercion to fn(i64) -> i64
+	log!("{}", apply_unary(triple, 7))
+	log!("{}", apply_unary(|x| x + 100, 7))
+
+	// Returning fn pointer and indirect call
+	let op1 = choose_op(true)
+	let op2 = choose_op(false)
+	log!("{} {}", op1(6, 7), op2(6, 7))
+
+	// Struct field holding fn pointer + both (p.step)(x) and p.step(x)
+	let p = Pipeline{ step: |n: i64| n * 2 + 1 }
+	log!("{} {}", (p.step)(10), p.step(20))
+
+	// Direct invocation of closure literal
+	let direct = (|a: i64, b: i64| a - b)(50, 8)
+	log!("{}", direct)
+
+	// Matrix::map with both named fn and inline closure
+	let mut m = Matrix::zeros(2, 2)
+	m.set(0, 0, 1.0)
+	m.set(0, 1, 2.0)
+	m.set(1, 0, 3.0)
+	m.set(1, 1, 4.0)
+
+	let sq = m.map(square_f64)
+	let shifted = sq.map(|x| x + 0.5)
+	log!("{} {} {} {}", shifted.get(0, 0), shifted.get(0, 1), shifted.get(1, 0), shifted.get(1, 1))
+}
+"#,
+        &[
+            "21",
+            "107",
+            "42 13",
+            "21 41",
+            "42",
+            "1.5 4.5 9.5 16.5",
+        ],
+    );
+
+    // Capturing outer environment in a thin closure is rejected with E0434
+    assert_err_code(
+        "fn_ptr_closure_capture_rejected",
+        r#"
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 {
+	return f(x)
+}
+
+fn main() {
+	let factor = 10
+	let _res = apply(|x| x * factor, 5)
+}
+"#,
+        "E0434",
+    );
+}
+
+#[test]
+fn round25_box_rc_arc_rust_parity() {
+    assert_ok_output(
+        "box_rc_arc_comprehensive",
+        r#"
+use std::boxed::Box
+use std::rc::Rc
+use std::sync::Arc
+
+#[derive(Debug)]
+obj Tracked:
+	id: i64
+
+impl Drop for Tracked:
+	fn drop(mut self):
+		log!("drop Tracked({})", self.id)
+
+#[derive(Debug)]
+obj CounterBox:
+	val: i64
+
+impl CounterBox:
+	fn get(&self) -> i64:
+		return self.val
+
+	fn add(&mut self, d: i64):
+		self.val += d
+
+#[derive(Debug)]
+enum List {
+	Cons(i64, Tracked, Box<List>),
+	Nil,
+}
+
+fn read_counter(c: &CounterBox) -> i64 {
+	return c.val
+}
+
+fn sum_list(l: List) -> i64 {
+	match l:
+		List::Cons(v, _, next) => return v + sum_list(*next)
+		List::Nil => return 0
+}
+
+fn main() {
+	// 1. Box<T> scalar, mutation, clone, Display & Debug
+	let mut b: Box<i64> = Box::new(42)
+	log!("b={} dbg={:?}", b, b)
+	*b = 99
+	let b2 = b.clone()
+	log!("b={} b2={}", *b, *b2)
+
+	// 2. Box<T> auto-deref on field access, field mutation, &self / &mut self methods, and &Box<T> -> &T coercion
+	let mut cb = Box::new(CounterBox{ val: 10 })
+	cb.val += 5
+	cb.add(25)
+	log!("cb={} {} {}", cb.get(), cb.val, read_counter(&cb))
+
+	// 3. Moving a non-Copy struct out of *Box<T>
+	let boxed_t = Box::new(Tracked{ id: 100 })
+	let unboxed_t = *boxed_t
+	log!("unboxed={:?}", unboxed_t)
+
+	// 4. Recursive enum with Box<List>, Debug formatting, and recursive drop glue
+	{
+		let list = List::Cons(
+			10,
+			Tracked{ id: 1 },
+			Box::new(List::Cons(
+				20,
+				Tracked{ id: 2 },
+				Box::new(List::Nil)
+			))
+		)
+		log!("list={:?}", list)
+		let s = sum_list(list)
+		log!("sum={}", s)
+	}
+	log!("after list scope")
+
+	// 5. Rc<T> and Arc<T> Rust-style API
+	{
+		let r1: Rc<Tracked> = Rc::new(Tracked{ id: 200 })
+		let r2 = Rc::clone(&r1)
+		let r3 = r2.clone()
+		log!("rc count={} id={}", Rc::strong_count(&r1), r1.id)
+		std::mem::drop(r2)
+		std::mem::drop(r3)
+		log!("rc count after drops={}", Rc::strong_count(&r1))
+	}
+	{
+		let a1: Arc<Tracked> = Arc::new(Tracked{ id: 300 })
+		let a2 = Arc::clone(&a1)
+		log!("arc count={} id={}", Arc::strong_count(&a1), a2.id)
+	}
+	log!("done")
+}
+"#,
+        &[
+            "b=42 dbg=42",
+            "b=99 b2=99",
+            "cb=40 40 40",
+            "unboxed=Tracked { id: 100 }",
+            "list=Cons(10, Tracked { id: 1 }, Cons(20, Tracked { id: 2 }, Nil))",
+            "drop Tracked(1)",
+            "drop Tracked(2)",
+            "sum=30",
+            "after list scope",
+            "rc count=3 id=200",
+            "rc count after drops=1",
+            "drop Tracked(200)",
+            "arc count=2 id=300",
+            "drop Tracked(300)",
+            "done",
+            "drop Tracked(100)",
+        ],
+    );
+
+    // Negative check 1: Using Box<T> after moving non-Copy value out via *b fails with E0382
+    assert_err_code(
+        "box_move_out_use_after_move",
+        r#"
+use std::boxed::Box
+
+obj Resource:
+	id: i64
+
+fn main() {
+	let b = Box::new(Resource{ id: 1 })
+	let _r = *b
+	log!("{}", b.id)
+}
+"#,
+        "E0382",
+    );
+
+    // Negative check 2: Sending Rc<T> across thread! fails with E0277
+    assert_err_code(
+        "rc_not_send_across_threads",
+        r#"
+use std::rc::Rc
+
+fn worker(r: Rc<i64>) {
+	log!("{}", *r)
+}
+
+fn main() {
+	let r = Rc::new(42)
+	thread!(worker, r)
+}
+"#,
+        "E0277",
+    );
 }

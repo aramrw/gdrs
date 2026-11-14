@@ -17,7 +17,7 @@ use crate::codegen::layout::{
 };
 use crate::sanal::StructLayout;
 
-fn emit_malloc<M: Module>(builder: &mut FunctionBuilder, module: &mut M, bytes_val: Value) -> Value {
+pub(crate) fn emit_malloc<M: Module>(builder: &mut FunctionBuilder, module: &mut M, bytes_val: Value) -> Value {
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
     sig.returns.push(AbiParam::new(types::I64));
@@ -127,7 +127,11 @@ pub fn compile_array_init<M: Module>(
 fn get_element_type(target_ty: &Type, fallback: &Type) -> Type {
     let resolved = match target_ty {
         Type::Vec(inner) | Type::Slice(inner) | Type::Array(inner, _) => **inner,
-        Type::Ref(inner) | Type::MutRef(inner) => return get_element_type(inner, fallback),
+        Type::Ref(inner)
+        | Type::MutRef(inner)
+        | Type::Box(inner)
+        | Type::Rc(inner)
+        | Type::Arc(inner) => return get_element_type(inner, fallback),
         Type::Obj(s) => {
             if let Some((_, t_args)) = crate::sanal::mono::lookup_mangled(s) {
                 if let Some(first) = t_args.first() {
@@ -202,13 +206,73 @@ fn emit_bounds_check<M: Module>(
     builder.seal_block(ok_blk);
 }
 
-fn load_indexable_buffer_and_len(
+fn emit_slice_bounds_check<M: Module>(
+    builder: &mut FunctionBuilder,
+    start_val: Value,
+    end_val: Value,
+    len_val: Value,
+    span: &Span,
+    cg: &CodegenCtx,
+    module: &mut M,
+) {
+    let start_le_end = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThanOrEqual, start_val, end_val);
+    let end_le_len = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThanOrEqual, end_val, len_val);
+    let in_bounds = builder.ins().band(start_le_end, end_le_len);
+    let ok_blk = builder.create_block();
+    let panic_blk = builder.create_block();
+    builder.ins().brif(in_bounds, ok_blk, &[], panic_blk, &[]);
+
+    builder.switch_to_block(panic_blk);
+    builder.seal_block(panic_blk);
+    let (file_ptr, line_val, col_val) = if let Some(loc) = cg.current_caller_loc {
+        loc
+    } else {
+        let (file, line, col) = cg.meta.source_map.get_location(span);
+        (
+            crate::codegen::expr::compile_string_constant(builder, &file, module),
+            builder.ins().iconst(types::I64, line as i64),
+            builder.ins().iconst(types::I64, col as i64),
+        )
+    };
+
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
+    let callee = module
+        .declare_function("intrinsic_slice_bounds_panic_loc", Linkage::Import, &sig)
+        .unwrap();
+    let local_callee = module.declare_func_in_func(callee, builder.func);
+    builder.ins().call(
+        local_callee,
+        &[start_val, end_val, len_val, file_ptr, line_val, col_val],
+    );
+    builder
+        .ins()
+        .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+
+    builder.switch_to_block(ok_blk);
+    builder.seal_block(ok_blk);
+}
+
+pub(crate) fn load_indexable_buffer_and_len(
     builder: &mut FunctionBuilder,
     base_ptr: Value,
     raw_target_ty: &Type,
 ) -> (Value, Option<Value>) {
     let target_ty = match raw_target_ty {
-        Type::Ref(inner) | Type::MutRef(inner) => **inner,
+        Type::Ref(inner)
+        | Type::MutRef(inner)
+        | Type::Box(inner)
+        | Type::Rc(inner)
+        | Type::Arc(inner) => return load_indexable_buffer_and_len(builder, base_ptr, inner),
         other => *other,
     };
     match target_ty {
@@ -235,6 +299,19 @@ fn load_indexable_buffer_and_len(
     }
 }
 
+fn eval_index_target_ptr_and_ty<M: Module>(
+    builder: &mut FunctionBuilder,
+    target: &TypedExpr,
+    cg: &mut CodegenCtx,
+    module: &mut M,
+) -> (Value, Type) {
+    if matches!(target.ty(), Type::Ptr(_)) {
+        (compile_expr(builder, target, cg, module), target.ty())
+    } else {
+        crate::codegen::objects::unwrap_struct_base_ptr(builder, target, cg, module)
+    }
+}
+
 pub fn compile_index_addr<M: Module>(
     builder: &mut FunctionBuilder,
     target: &TypedExpr,
@@ -243,15 +320,15 @@ pub fn compile_index_addr<M: Module>(
     cg: &mut CodegenCtx,
     module: &mut M,
 ) -> (Value, Type) {
-    let base_ptr = compile_expr(builder, target, cg, module);
-    let (buffer_ptr, opt_len) = load_indexable_buffer_and_len(builder, base_ptr, &target.ty());
+    let (base_ptr, unwrapped_target_ty) = eval_index_target_ptr_and_ty(builder, target, cg, module);
+    let (buffer_ptr, opt_len) = load_indexable_buffer_and_len(builder, base_ptr, &unwrapped_target_ty);
     let raw_idx_val = compile_expr(builder, idx, cg, module);
     let idx_val = coerce_val(builder, raw_idx_val, types::I64);
     if let Some(len_val) = opt_len {
         emit_bounds_check(builder, idx_val, len_val, &idx.span(), cg, module);
     }
 
-    let actual_elem_ty = get_element_type(&target.ty(), elem_ty);
+    let actual_elem_ty = get_element_type(&unwrapped_target_ty, elem_ty);
     let stride = array_stride(&actual_elem_ty, &cg.meta.struct_layouts, cg.meta.enum_layouts) as i64;
     let elem_size = builder.ins().iconst(types::I64, stride);
     let offset = builder.ins().imul(idx_val, elem_size);
@@ -266,6 +343,80 @@ pub fn compile_index_access<M: Module>(
     cg: &mut CodegenCtx,
     module: &mut M,
 ) -> Value {
+    if let TypedExpr::Range(start_expr, end_expr, _, range_span) = idx {
+        let (base_ptr, unwrapped_target_ty) =
+            eval_index_target_ptr_and_ty(builder, target, cg, module);
+        if matches!(
+            unwrapped_target_ty,
+            Type::Str | Type::String | Type::Obj("String") | Type::Obj("std_string_String")
+        ) {
+            let raw_start = compile_expr(builder, start_expr, cg, module);
+            let start_val = coerce_val(builder, raw_start, types::I64);
+            let end_val = if matches!(end_expr.as_ref(), TypedExpr::Ident(n, _, _) if n == "__slice_len__") {
+                builder.ins().iconst(types::I64, -1)
+            } else {
+                let raw_end = compile_expr(builder, end_expr, cg, module);
+                coerce_val(builder, raw_end, types::I64)
+            };
+            let is_obj_val = builder.ins().iconst(
+                types::I64,
+                if unwrapped_target_ty == Type::Str { 0 } else { 1 },
+            );
+            let (file_ptr, line_val, col_val) = if let Some(loc) = cg.current_caller_loc {
+                loc
+            } else {
+                let (file, line, col) = cg.meta.source_map.get_location(range_span);
+                (
+                    crate::codegen::expr::compile_string_constant(builder, &file, module),
+                    builder.ins().iconst(types::I64, line as i64),
+                    builder.ins().iconst(types::I64, col as i64),
+                )
+            };
+            let mut sig = module.make_signature();
+            for _ in 0..7 {
+                sig.params.push(AbiParam::new(types::I64));
+            }
+            sig.returns.push(AbiParam::new(types::I64));
+            let callee = module
+                .declare_function("intrinsic_str_slice_loc", Linkage::Import, &sig)
+                .unwrap();
+            let local_callee = module.declare_func_in_func(callee, builder.func);
+            let call_inst = builder.ins().call(
+                local_callee,
+                &[
+                    base_ptr, is_obj_val, start_val, end_val, file_ptr, line_val, col_val,
+                ],
+            );
+            return builder.inst_results(call_inst)[0];
+        }
+
+        let (buffer_ptr, opt_len) =
+            load_indexable_buffer_and_len(builder, base_ptr, &unwrapped_target_ty);
+        let len_val = opt_len.unwrap_or_else(|| builder.ins().iconst(types::I64, 0));
+        let raw_start = compile_expr(builder, start_expr, cg, module);
+        let start_val = coerce_val(builder, raw_start, types::I64);
+        let end_val = if matches!(end_expr.as_ref(), TypedExpr::Ident(n, _, _) if n == "__slice_len__") {
+            len_val
+        } else {
+            let raw_end = compile_expr(builder, end_expr, cg, module);
+            coerce_val(builder, raw_end, types::I64)
+        };
+        emit_slice_bounds_check(builder, start_val, end_val, len_val, range_span, cg, module);
+
+        let elem_fallback = match elem_ty {
+            Type::Slice(inner) => **inner,
+            other => *other,
+        };
+        let actual_elem_ty = get_element_type(&unwrapped_target_ty, &elem_fallback);
+        let stride =
+            array_stride(&actual_elem_ty, &cg.meta.struct_layouts, cg.meta.enum_layouts) as i64;
+        let stride_val = builder.ins().iconst(types::I64, stride);
+        let byte_off = builder.ins().imul(start_val, stride_val);
+        let new_ptr = builder.ins().iadd(buffer_ptr, byte_off);
+        let new_len = builder.ins().isub(end_val, start_val);
+        return alloc_stack_slice_header_dyn(builder, new_ptr, new_len);
+    }
+
     let (elem_addr, actual_elem_ty) =
         compile_index_addr(builder, target, idx, elem_ty, cg, module);
 
@@ -285,8 +436,8 @@ pub fn compile_index_assign<M: Module>(
     cg: &mut CodegenCtx,
     module: &mut M,
 ) -> Value {
-    let base_ptr = compile_expr(builder, target, cg, module);
-    let (buffer_ptr, opt_len) = load_indexable_buffer_and_len(builder, base_ptr, &target.ty());
+    let (base_ptr, unwrapped_target_ty) = eval_index_target_ptr_and_ty(builder, target, cg, module);
+    let (buffer_ptr, opt_len) = load_indexable_buffer_and_len(builder, base_ptr, &unwrapped_target_ty);
     let raw_idx_val = compile_expr(builder, idx, cg, module);
     let idx_val = coerce_val(builder, raw_idx_val, types::I64);
     if let Some(len_val) = opt_len {
@@ -373,11 +524,11 @@ pub fn compile_index_assign<M: Module>(
     }
 }
 
-/// Allocates a 16-byte stack-backed slice fat pointer `{ ptr, len }` without heap allocation.
-pub fn alloc_stack_slice_header(
+/// Allocates a 16-byte stack-backed slice fat pointer `{ ptr, len }` with a runtime `len_val`.
+pub fn alloc_stack_slice_header_dyn(
     builder: &mut FunctionBuilder,
     data_ptr: Value,
-    arr_len: usize,
+    len_val: Value,
 ) -> Value {
     let slot = builder.create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
@@ -386,9 +537,18 @@ pub fn alloc_stack_slice_header(
     ));
     let ptr_addr = builder.ins().stack_addr(types::I64, slot, 0);
     builder.ins().store(MemFlags::new(), data_ptr, ptr_addr, 0);
-    let len_val = builder.ins().iconst(types::I64, arr_len as i64);
     builder.ins().store(MemFlags::new(), len_val, ptr_addr, 8);
     ptr_addr
+}
+
+/// Allocates a 16-byte stack-backed slice fat pointer `{ ptr, len }` without heap allocation.
+pub fn alloc_stack_slice_header(
+    builder: &mut FunctionBuilder,
+    data_ptr: Value,
+    arr_len: usize,
+) -> Value {
+    let len_val = builder.ins().iconst(types::I64, arr_len as i64);
+    alloc_stack_slice_header_dyn(builder, data_ptr, len_val)
 }
 
 /// Allocates a 24-byte stack-backed `Vec` header `{ data_ptr, len, cap }`, copying `arr_len`

@@ -101,7 +101,7 @@ pub fn type_check_return<'a>(
                 });
             }
             Some(ret_expr) => {
-                if matches!(expected_ret, Type::Ref(_) | Type::MutRef(_)) {
+                if super::lifetimes::type_may_borrow(&expected_ret) {
                     check_return_ref_lifetime(scopes, ret_expr, errors);
                 }
                 let unify_res = type_ctx.infer.borrow_mut().unify(expected_ret, ret_expr.ty());

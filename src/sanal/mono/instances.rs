@@ -8,11 +8,78 @@ use crate::{
         mono::{
             check_where_clause_bounds, collect_generics_from_type, extract_generic_params_enum,
             extract_generic_params_struct, find_enum_template, find_struct_template, lookup_mangled,
-            mangle_name, substitute_expr, substitute_type, GenericKey, Monomorphizer,
+            mangle_name, substitute_expr, substitute_type, type_satisfies_bound, GenericKey, Monomorphizer,
         },
         StructLayout,
     },
 };
+
+/// Resolves nested `Obj` enum aliases into `Type::Enum` and ensures monomorphization of field/payload types.
+fn normalize_instantiated_type(
+    ty: Type,
+    mono: &RefCell<Monomorphizer>,
+    struct_map: Option<&RefCell<HashMap<String, StructLayout>>>,
+    enum_map: &RefCell<HashMap<String, (&'static str, HashMap<String, (i64, Vec<Type>)>)>>,
+    fn_map: &RefCell<HashMap<String, FuncDecl>>,
+    worklist: &RefCell<Vec<FuncDecl>>,
+) -> Type {
+    match ty {
+        Type::Ptr(inner) => Type::Ptr(intern_type(normalize_instantiated_type(*inner, mono, struct_map, enum_map, fn_map, worklist))),
+        Type::Ref(inner) => Type::Ref(intern_type(normalize_instantiated_type(*inner, mono, struct_map, enum_map, fn_map, worklist))),
+        Type::MutRef(inner) => Type::MutRef(intern_type(normalize_instantiated_type(*inner, mono, struct_map, enum_map, fn_map, worklist))),
+        Type::Box(inner) => Type::Box(intern_type(normalize_instantiated_type(*inner, mono, struct_map, enum_map, fn_map, worklist))),
+        Type::Rc(inner) => Type::Rc(intern_type(normalize_instantiated_type(*inner, mono, struct_map, enum_map, fn_map, worklist))),
+        Type::Arc(inner) => Type::Arc(intern_type(normalize_instantiated_type(*inner, mono, struct_map, enum_map, fn_map, worklist))),
+        Type::Vec(inner) => Type::Vec(intern_type(normalize_instantiated_type(*inner, mono, struct_map, enum_map, fn_map, worklist))),
+        Type::Slice(inner) => Type::Slice(intern_type(normalize_instantiated_type(*inner, mono, struct_map, enum_map, fn_map, worklist))),
+        Type::Array(inner, len) => Type::Array(intern_type(normalize_instantiated_type(*inner, mono, struct_map, enum_map, fn_map, worklist)), len),
+        Type::FnPtr(params, ret) => {
+            let norm_params: Vec<Type> = params
+                .iter()
+                .map(|p| normalize_instantiated_type(*p, mono, struct_map, enum_map, fn_map, worklist))
+                .collect();
+            let norm_ret = normalize_instantiated_type(*ret, mono, struct_map, enum_map, fn_map, worklist);
+            Type::FnPtr(crate::ast::intern_tuple(&norm_params), intern_type(norm_ret))
+        }
+        Type::Tuple(elems) => {
+            let norm: Vec<Type> = elems
+                .iter()
+                .map(|e| normalize_instantiated_type(*e, mono, struct_map, enum_map, fn_map, worklist))
+                .collect();
+            Type::Tuple(crate::ast::intern_tuple(&norm))
+        }
+        Type::Obj(name) | Type::Enum(name) => {
+            let is_enum = matches!(ty, Type::Enum(_))
+                || enum_map.borrow().contains_key(name)
+                || find_enum_template(&mono.borrow(), name).is_some()
+                || name.contains("Option")
+                || name.contains("Result")
+                || lookup_mangled(name).is_some_and(|(b, _)| find_enum_template(&mono.borrow(), &b).is_some());
+            if let Some((base, args)) = lookup_mangled(name) {
+                let norm_args: Vec<Type> = args
+                    .iter()
+                    .map(|a| normalize_instantiated_type(*a, mono, struct_map, enum_map, fn_map, worklist))
+                    .collect();
+                if is_enum {
+                    if let Some(mangled) = monomorphize_enum(mono, &base, &norm_args, enum_map, fn_map, worklist) {
+                        return Type::Enum(intern_str(&mangled));
+                    }
+                    return Type::Enum(name);
+                } else if let Some(s_map) = struct_map {
+                    if let Some(mangled) = monomorphize_struct(mono, &base, &norm_args, s_map, enum_map, fn_map, worklist) {
+                        return Type::Obj(intern_str(&mangled));
+                    }
+                }
+            }
+            if is_enum {
+                Type::Enum(name)
+            } else {
+                Type::Obj(name)
+            }
+        }
+        other => other,
+    }
+}
 
 pub fn monomorphize_struct(
     mono: &RefCell<Monomorphizer>,
@@ -67,7 +134,14 @@ pub fn monomorphize_struct(
     let mut field_offsets = HashMap::new();
     let mut field_vis = HashMap::new();
     for field in &decl.fields {
-        let field_ty = substitute_type(field.ty, &env);
+        let field_ty = normalize_instantiated_type(
+            substitute_type(field.ty, &env),
+            mono,
+            Some(struct_map),
+            enum_map,
+            fn_map,
+            worklist,
+        );
         field_offsets.insert(field.name.clone(), (total_size, field_ty));
         field_vis.insert(field.name.clone(), field.vis);
         total_size += 8;
@@ -106,6 +180,19 @@ pub fn monomorphize_struct(
                     && type_args.first().is_some_and(|t| !t.is_copy())
                 {
                     continue;
+                }
+                if let Some(w) = &method.where_clause {
+                    let clean = w.target_param.trim_start_matches('$');
+                    if let Some(&concrete_ty) = env.get(clean).or_else(|| env.get(&w.target_param)) {
+                        let m = mono.borrow();
+                        let fns = fn_map.borrow();
+                        let satisfied = w.bounds.iter().all(|b| {
+                            type_satisfies_bound(concrete_ty, b, &m.trait_methods, &m.trait_impls, &fns)
+                        });
+                        if !satisfied {
+                            continue;
+                        }
+                    }
                 }
                 let method_mangled = format!("{}_{}", mangled_name, method.name);
                 let target_ty = Type::Obj(intern_str(&mangled_name));
@@ -388,7 +475,16 @@ pub fn monomorphize_enum(
         let payload_types = variant
             .payload_types
             .iter()
-            .map(|t| substitute_type(*t, &env))
+            .map(|t| {
+                normalize_instantiated_type(
+                    substitute_type(*t, &env),
+                    mono,
+                    None,
+                    enum_map,
+                    fn_map,
+                    worklist,
+                )
+            })
             .collect();
         variant_map.insert(variant.name.clone(), (i as i64, payload_types));
     }
@@ -418,6 +514,19 @@ pub fn monomorphize_enum(
                     && type_args.first().is_some_and(|t| !t.is_copy())
                 {
                     continue;
+                }
+                if let Some(w) = &method.where_clause {
+                    let clean = w.target_param.trim_start_matches('$');
+                    if let Some(&concrete_ty) = env.get(clean).or_else(|| env.get(&w.target_param)) {
+                        let m = mono.borrow();
+                        let fns = fn_map.borrow();
+                        let satisfied = w.bounds.iter().all(|b| {
+                            type_satisfies_bound(concrete_ty, b, &m.trait_methods, &m.trait_impls, &fns)
+                        });
+                        if !satisfied {
+                            continue;
+                        }
+                    }
                 }
                 let method_mangled = format!("{}_{}", mangled_name, method.name);
                 let target_ty = Type::Enum(static_mangled_name);
@@ -503,10 +612,22 @@ fn unify_generic_types(param_ty: Type, arg_ty: Type, env: &mut HashMap<String, T
         (Type::Ptr(p), Type::Ptr(a))
         | (Type::Ref(p), Type::Ref(a))
         | (Type::MutRef(p), Type::MutRef(a))
+        | (Type::Box(p), Type::Box(a))
         | (Type::Rc(p), Type::Rc(a))
         | (Type::Arc(p), Type::Arc(a))
         | (Type::Vec(p), Type::Vec(a))
         | (Type::Slice(p), Type::Slice(a)) => unify_generic_types(*p, *a, env),
+        (Type::Slice(p), Type::Ref(inner)) | (Type::Slice(p), Type::MutRef(inner)) => {
+            if let Type::Array(a, _) | Type::Vec(a) | Type::Slice(a) = *inner {
+                unify_generic_types(*p, *a, env);
+            }
+        }
+        (Type::FnPtr(ps, pr), Type::FnPtr(as_, ar)) if ps.len() == as_.len() => {
+            for (p, a) in ps.iter().zip(as_.iter()) {
+                unify_generic_types(*p, *a, env);
+            }
+            unify_generic_types(*pr, *ar, env);
+        }
         (Type::Ref(p), actual) | (Type::MutRef(p), actual) => {
             unify_generic_types(*p, actual, env);
         }

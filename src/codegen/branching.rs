@@ -294,7 +294,18 @@ pub fn compile_match<M: Module>(
         builder.switch_to_block(exit_block);
         builder.seal_block(exit_block);
 
-        return if let Some(out_addr) = out_addr_opt {
+        return if builder.is_unreachable() {
+            let dummy = match res_repr {
+                ReprKind::Scalar(types::F32) => builder.ins().f32const(0.0),
+                ReprKind::Scalar(types::F64) => builder.ins().f64const(0.0),
+                ReprKind::Scalar(cl_ty) => builder.ins().iconst(cl_ty, 0),
+                ReprKind::Aggregate { .. } | ReprKind::Zst => builder.ins().iconst(types::I64, 0),
+            };
+            builder
+                .ins()
+                .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+            dummy
+        } else if let Some(out_addr) = out_addr_opt {
             out_addr
         } else if matches!(res_repr, ReprKind::Zst) {
             dummy_zero
@@ -493,7 +504,18 @@ pub fn compile_match<M: Module>(
     builder.switch_to_block(exit_block);
     builder.seal_block(exit_block);
 
-    if let Some(out_addr) = out_addr_opt {
+    if builder.is_unreachable() {
+        let dummy = match res_repr {
+            ReprKind::Scalar(types::F32) => builder.ins().f32const(0.0),
+            ReprKind::Scalar(types::F64) => builder.ins().f64const(0.0),
+            ReprKind::Scalar(cl_ty) => builder.ins().iconst(cl_ty, 0),
+            ReprKind::Aggregate { .. } | ReprKind::Zst => builder.ins().iconst(types::I64, 0),
+        };
+        builder
+            .ins()
+            .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+        dummy
+    } else if let Some(out_addr) = out_addr_opt {
         out_addr
     } else if matches!(res_repr, ReprKind::Zst) {
         builder.ins().iconst(types::I64, 0)

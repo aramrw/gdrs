@@ -131,11 +131,20 @@ impl InferCtx {
             Type::Ptr(inner) => Type::Ptr(intern_type(self.resolve(*inner))),
             Type::Ref(inner) => Type::Ref(intern_type(self.resolve(*inner))),
             Type::MutRef(inner) => Type::MutRef(intern_type(self.resolve(*inner))),
+            Type::Box(inner) => Type::Box(intern_type(self.resolve(*inner))),
             Type::Rc(inner) => Type::Rc(intern_type(self.resolve(*inner))),
             Type::Arc(inner) => Type::Arc(intern_type(self.resolve(*inner))),
             Type::Vec(inner) => Type::Vec(intern_type(self.resolve(*inner))),
             Type::Slice(inner) => Type::Slice(intern_type(self.resolve(*inner))),
             Type::Array(inner, len) => Type::Array(intern_type(self.resolve(*inner)), len),
+            Type::FnPtr(params, ret) => {
+                let resolved_params: Vec<Type> = params.iter().map(|t| self.resolve(*t)).collect();
+                let resolved_ret = self.resolve(*ret);
+                Type::FnPtr(
+                    crate::ast::intern_tuple(&resolved_params),
+                    intern_type(resolved_ret),
+                )
+            }
             Type::Tuple(elems) => {
                 let resolved: Vec<Type> = elems.iter().map(|t| self.resolve(*t)).collect();
                 Type::Tuple(crate::ast::intern_tuple(&resolved))
@@ -166,11 +175,16 @@ impl InferCtx {
             Type::Ptr(inner)
             | Type::Ref(inner)
             | Type::MutRef(inner)
+            | Type::Box(inner)
             | Type::Rc(inner)
             | Type::Arc(inner)
             | Type::Vec(inner)
             | Type::Slice(inner)
             | Type::Array(inner, _) => self.occurs_in(root_id, *inner),
+            Type::FnPtr(params, ret) => {
+                params.iter().any(|p| self.occurs_in(root_id, *p))
+                    || self.occurs_in(root_id, *ret)
+            }
             Type::Tuple(elems) => elems.iter().any(|e| self.occurs_in(root_id, *e)),
             Type::Obj(name) | Type::Enum(name) => mono::lookup_mangled(name)
                 .is_some_and(|(_, args)| args.iter().any(|a| self.occurs_in(root_id, *a))),
@@ -237,7 +251,24 @@ impl InferCtx {
             (Type::Ref(e1), Type::Ref(e2))
             | (Type::MutRef(e1), Type::MutRef(e2))
             | (Type::Ref(e1), Type::MutRef(e2)) => self.unify(*e1, *e2),
-            (Type::Rc(e1), Type::Rc(e2)) | (Type::Arc(e1), Type::Arc(e2)) => self.unify(*e1, *e2),
+            (Type::Slice(e1), Type::Ref(inner)) | (Type::Slice(e1), Type::MutRef(inner)) => {
+                match *inner {
+                    Type::Array(e2, _) | Type::Vec(e2) | Type::Slice(e2) => self.unify(*e1, *e2),
+                    _ => Err((a, b)),
+                }
+            }
+            (Type::Box(e1), Type::Box(e2))
+            | (Type::Rc(e1), Type::Rc(e2))
+            | (Type::Arc(e1), Type::Arc(e2)) => self.unify(*e1, *e2),
+            (Type::FnPtr(p1, r1), Type::FnPtr(p2, r2)) => {
+                if p1.len() != p2.len() {
+                    return Err((a, b));
+                }
+                for (a_p, b_p) in p1.iter().zip(p2.iter()) {
+                    self.unify(*a_p, *b_p)?;
+                }
+                self.unify(*r1, *r2)
+            }
             (Type::Vec(_), Type::Obj(s)) | (Type::Obj(s), Type::Vec(_)) if s.contains("Vec") => {
                 Ok(())
             }
@@ -307,11 +338,18 @@ fn collect_unresolved_infers(infer: &mut InferCtx, ty: Type, out: &mut Vec<u32>)
         Type::Ptr(inner)
         | Type::Ref(inner)
         | Type::MutRef(inner)
+        | Type::Box(inner)
         | Type::Rc(inner)
         | Type::Arc(inner)
         | Type::Vec(inner)
         | Type::Slice(inner)
         | Type::Array(inner, _) => collect_unresolved_infers(infer, *inner, out),
+        Type::FnPtr(params, ret) => {
+            for p in params {
+                collect_unresolved_infers(infer, *p, out);
+            }
+            collect_unresolved_infers(infer, *ret, out);
+        }
         Type::Tuple(elems) => {
             for e in elems {
                 collect_unresolved_infers(infer, *e, out);
@@ -328,16 +366,23 @@ fn collect_unresolved_infers(infer: &mut InferCtx, ty: Type, out: &mut Vec<u32>)
     }
 }
 
-fn ensure_concrete_monomorphized(ty: Type, type_ctx: &TypeCtx<'_>) {
+pub(crate) fn ensure_concrete_monomorphized(ty: Type, type_ctx: &TypeCtx<'_>) {
     match ty {
         Type::Ptr(inner)
         | Type::Ref(inner)
         | Type::MutRef(inner)
+        | Type::Box(inner)
         | Type::Rc(inner)
         | Type::Arc(inner)
         | Type::Vec(inner)
         | Type::Slice(inner)
         | Type::Array(inner, _) => ensure_concrete_monomorphized(*inner, type_ctx),
+        Type::FnPtr(params, ret) => {
+            for p in params {
+                ensure_concrete_monomorphized(*p, type_ctx);
+            }
+            ensure_concrete_monomorphized(*ret, type_ctx);
+        }
         Type::Tuple(elems) => {
             for e in elems {
                 ensure_concrete_monomorphized(*e, type_ctx);

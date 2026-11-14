@@ -169,10 +169,6 @@ pub enum Token {
     TypeString,
     #[token("str")]
     TypeStr,
-    #[token("rc")]
-    TypeRc,
-    #[token("arc")]
-    TypeArc,
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*!", |lex| lex.slice()[..lex.slice().len() - 1].to_string())]
     MacroIdent(String),
 
@@ -254,8 +250,10 @@ pub enum Type {
     Tuple(&'static [Type]),
     Slice(&'static Type),
     Vec(&'static Type),
+    Box(&'static Type),
     Rc(&'static Type),
     Arc(&'static Type),
+    FnPtr(&'static [Type], &'static Type),
     Void,
     Ptr(&'static Type),
     Ref(&'static Type),
@@ -301,7 +299,9 @@ impl Type {
             | Type::Void
             | Type::Ptr(_)
             | Type::Ref(_)
-            | Type::MutRef(_) => true,
+            | Type::MutRef(_)
+            | Type::Slice(_)
+            | Type::FnPtr(_, _) => true,
             Type::Tuple(tys) => tys.iter().all(|t| t.is_copy()),
             _ => false,
         }
@@ -733,10 +733,13 @@ impl TypedExpr {
             | TypedExpr::Match(_, _, ty, _)
             | TypedExpr::Ref(_, _, ty, _)
             | TypedExpr::Deref(_, ty, _)
-            | TypedExpr::Closure(_, _, _, ty, _)
             | TypedExpr::Cast(_, ty, _)
             | TypedExpr::Range(_, _, ty, _)
             | TypedExpr::DynCall(_, _, _, ty, _) => *ty,
+            TypedExpr::Closure(_, params, _, ret_ty, _) => {
+                let p_tys: Vec<Type> = params.iter().map(|(_, t)| *t).collect();
+                Type::FnPtr(intern_tuple(&p_tys), intern_type(*ret_ty))
+            }
             TypedExpr::CoerceToDyn(_, trait_name, _) => Type::DynTrait(trait_name),
             TypedExpr::CastF32(..) => Type::F32,
             TypedExpr::CastI32(..) => Type::I32,

@@ -2,7 +2,7 @@ use std::vec::Vec
 use std::fmt::Display
 use std::rand::Rng
 
-#[derive(Error)]
+#[derive(Error, Debug)]
 pub enum MatrixError:
 	#[err("Cannot perform `add` or `sub` on matrices of different dimensions `{0}` and `{1}`")]
 	ShapeMismatch((i32, i32), (i32, i32))
@@ -176,11 +176,11 @@ impl Matrix:
 		return Ok(rm)
 	}
 
-	// fn map(&self, f: fn(f64) -> f64) -> Matrix {
-	// 	let len = self.len()
-	// 	let mut rv: Vec<f64> = Vec::with_capacity(len)
-	// 	for i in 0..len:
-	// 		rv.push(f(self.data[i]))
-	// 	return Matrix{ rows: self.rows, cols: self.cols, data: rv }
-	// }
+	pub fn map(&self, f: fn(f64) -> f64) -> Matrix {
+		let len = self.len()
+		let mut rv: Vec<f64> = Vec::with_capacity(len)
+		for i in 0..len:
+			rv.push(f(self.data[i]))
+		return Matrix{ rows: self.rows, cols: self.cols, data: rv }
+	}
 

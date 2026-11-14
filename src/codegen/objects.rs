@@ -20,9 +20,71 @@ fn target_struct_name(target_ty: &Type) -> Option<&'static str> {
         Type::Obj(struct_name) => Some(struct_name),
         Type::Vec(_) => Some("std_vec_Vec"),
         Type::String => Some("std_string_String"),
-        Type::Ref(inner) | Type::MutRef(inner) => target_struct_name(inner),
+        Type::Ref(inner)
+        | Type::MutRef(inner)
+        | Type::Box(inner)
+        | Type::Rc(inner)
+        | Type::Arc(inner)
+        | Type::Ptr(inner) => target_struct_name(inner),
         _ => None,
     }
+}
+
+/// Evaluates `target` down to `(base_ptr, unwrapped_value_ty)` through any chain of
+/// `&`, `&mut`, `Box`, `Rc`, `Arc`, or explicit `*target` deref without moving out of `Box`.
+pub fn unwrap_struct_base_ptr<M: Module>(
+    builder: &mut FunctionBuilder,
+    target: &TypedExpr,
+    cg: &mut CodegenCtx,
+    module: &mut M,
+) -> (Value, Type) {
+    let (mut cur_ptr, mut cur_ty) = match target {
+        TypedExpr::Deref(inner_ptr_expr, _, _) => (
+            compile_expr(builder, inner_ptr_expr, cg, module),
+            inner_ptr_expr.ty(),
+        ),
+        _ => (compile_expr(builder, target, cg, module), target.ty()),
+    };
+
+    loop {
+        match cur_ty {
+            Type::Ref(inner) | Type::MutRef(inner) | Type::Box(inner) | Type::Ptr(inner) => {
+                if matches!(
+                    *inner,
+                    Type::Ref(_)
+                        | Type::MutRef(_)
+                        | Type::Box(_)
+                        | Type::Rc(_)
+                        | Type::Arc(_)
+                        | Type::Ptr(_)
+                ) {
+                    cur_ptr = builder.ins().load(types::I64, MemFlags::new(), cur_ptr, 0);
+                }
+                cur_ty = *inner;
+            }
+            Type::Rc(inner) | Type::Arc(inner) => {
+                if is_aggregate_type(inner, &cg.meta.struct_layouts, cg.meta.enum_layouts)
+                    || matches!(
+                        *inner,
+                        Type::Ref(_)
+                            | Type::MutRef(_)
+                            | Type::Box(_)
+                            | Type::Rc(_)
+                            | Type::Arc(_)
+                            | Type::Ptr(_)
+                    )
+                {
+                    cur_ptr = builder.ins().load(types::I64, MemFlags::new(), cur_ptr, 8);
+                } else {
+                    cur_ptr = builder.ins().iadd_imm(cur_ptr, 8);
+                }
+                cur_ty = *inner;
+            }
+            _ => break,
+        }
+    }
+
+    (cur_ptr, cur_ty)
 }
 
 pub fn compile_obj_init<M: Module>(
@@ -167,20 +229,26 @@ pub fn compile_field_access<M: Module>(
     cg: &mut CodegenCtx,
     module: &mut M,
 ) -> Value {
-    let base_ptr = compile_expr(builder, target, cg, module);
-    let mut offset = 0i32;
+    let (base_ptr, unwrapped_target) = unwrap_struct_base_ptr(builder, target, cg, module);
+    if let Type::Array(_, arr_len) = unwrapped_target {
+        if field_name == "len" {
+            return builder.ins().iconst(types::I64, arr_len as i64);
+        }
+    }
+    if let Type::Slice(_) = unwrapped_target {
+        if field_name == "len" {
+            return builder.ins().load(types::I64, MemFlags::new(), base_ptr, 8);
+        }
+    }
 
-    let unwrapped_target = match target.ty() {
-        Type::Ref(inner) | Type::MutRef(inner) => *inner,
-        other => other,
-    };
+    let mut offset = 0i32;
     if let Type::Tuple(elems) = unwrapped_target {
         if let Ok(idx) = field_name.parse::<usize>() {
             let (_, _, offsets) =
                 tuple_field_offsets(elems, &cg.meta.struct_layouts, cg.meta.enum_layouts);
             offset = offsets.get(idx).copied().unwrap_or(0) as i32;
         }
-    } else if let Some(struct_name) = target_struct_name(&target.ty()) {
+    } else if let Some(struct_name) = target_struct_name(&unwrapped_target) {
         if let Some(layout) = find_struct_layout(&cg.meta.struct_layouts, struct_name) {
             if let Some((f_offset, _)) = layout.field_offsets.get(field_name) {
                 offset = *f_offset as i32;
@@ -209,7 +277,7 @@ pub fn compile_field_assign<M: Module>(
     cg: &mut CodegenCtx,
     module: &mut M,
 ) -> Value {
-    let base_ptr = compile_expr(builder, target, cg, module);
+    let (base_ptr, unwrapped_target) = unwrap_struct_base_ptr(builder, target, cg, module);
     let mut new_val = compile_expr(builder, val, cg, module);
     cg.cancel_temp(new_val);
     if let TypedExpr::Ident(v_name, v_ty, _) = val {
@@ -220,10 +288,6 @@ pub fn compile_field_assign<M: Module>(
     let mut offset = 0i32;
     let mut field_ty = val.ty();
 
-    let unwrapped_target = match target.ty() {
-        Type::Ref(inner) | Type::MutRef(inner) => *inner,
-        other => other,
-    };
     if let Type::Tuple(elems) = unwrapped_target {
         if let Ok(idx) = field_name.parse::<usize>() {
             let (_, _, offsets) =
@@ -233,7 +297,7 @@ pub fn compile_field_assign<M: Module>(
                 field_ty = fty;
             }
         }
-    } else if let Some(struct_name) = target_struct_name(&target.ty()) {
+    } else if let Some(struct_name) = target_struct_name(&unwrapped_target) {
         if let Some(layout) = find_struct_layout(&cg.meta.struct_layouts, struct_name) {
             if let Some((f_offset, f_ty)) = layout.field_offsets.get(field_name) {
                 offset = *f_offset as i32;

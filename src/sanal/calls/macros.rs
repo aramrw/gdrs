@@ -10,7 +10,7 @@ use crate::{
     },
 };
 
-fn check_send_type(ty: &Type, is_unsafe: bool) -> Option<(&'static str, String)> {
+pub(crate) fn check_send_type(ty: &Type, is_unsafe: bool) -> Option<(&'static str, String)> {
     match ty {
         Type::Rc(_) => Some((
             "Non-atomic `rc<T>` is not `Send` and cannot cross thread boundaries",
@@ -24,9 +24,11 @@ fn check_send_type(ty: &Type, is_unsafe: bool) -> Option<(&'static str, String)>
             "Raw pointers (`*T`) are not `Send` outside an `unsafe:` block",
             "Wrap in `arc.new(...)` or move the spawn into an `unsafe:` block".to_string(),
         )),
-        Type::Arc(inner) | Type::Vec(inner) | Type::Slice(inner) | Type::Array(inner, _) => {
-            check_send_type(inner, is_unsafe)
-        }
+        Type::Box(inner)
+        | Type::Arc(inner)
+        | Type::Vec(inner)
+        | Type::Slice(inner)
+        | Type::Array(inner, _) => check_send_type(inner, is_unsafe),
         Type::Tuple(elems) => elems.iter().find_map(|e| check_send_type(e, is_unsafe)),
         _ => None,
     }

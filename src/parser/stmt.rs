@@ -182,12 +182,26 @@ pub fn stmt_parser<'a>(
             })
             .then_ignore(just(Token::Newline).or_not());
 
-        let block = stmt
+        let layout_junk = just(Token::Newline)
+            .or(just(Token::Indent))
+            .or(just(Token::Dedent))
+            .repeated();
+
+        let indented_block = stmt
+            .clone()
             .repeated()
             .at_least(1)
             .delimited_by(just(Token::Indent), just(Token::Dedent))
-            .map_with_span(|stmts, span| Expr::Block(stmts, span))
-            .boxed();
+            .map_with_span(|stmts, span| Expr::Block(stmts, span));
+
+        let braced_block = just(Token::LBrace)
+            .ignore_then(layout_junk.clone())
+            .ignore_then(stmt.padded_by(layout_junk.clone()).repeated())
+            .then_ignore(layout_junk)
+            .then_ignore(just(Token::RBrace))
+            .map_with_span(|stmts, span| Expr::Block(stmts, span));
+
+        let block = indented_block.or(braced_block).boxed();
 
         let while_stmt = just(Token::While)
             .ignore_then(math.clone())
@@ -339,7 +353,14 @@ pub fn stmt_parser<'a>(
         let match_arm = arm_pattern
             .then_ignore(just(Token::FatArrow))
             .then_ignore(just(Token::Newline).or_not())
-            .then(math.clone().or(block.clone()))
+            .then(
+                return_stmt
+                    .clone()
+                    .or(break_stmt.clone())
+                    .or(continue_stmt.clone())
+                    .or(math.clone())
+                    .or(block.clone()),
+            )
             .map_with_span(|((variant_name, bindings), body_expr), span| {
                 let body = match body_expr {
                     Expr::Block(stmts, _) => stmts,

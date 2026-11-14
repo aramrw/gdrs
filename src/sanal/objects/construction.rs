@@ -14,16 +14,19 @@ pub(crate) fn lookup_struct_layout_for_type<'a>(
     type_ctx: &TypeCtx<'a>,
     target_ty: Type,
 ) -> Option<(String, StructLayout)> {
-    let struct_name = match target_ty {
+    let mut unwrapped = target_ty;
+    while let Type::Ref(inner)
+    | Type::MutRef(inner)
+    | Type::Box(inner)
+    | Type::Rc(inner)
+    | Type::Arc(inner) = unwrapped
+    {
+        unwrapped = *inner;
+    }
+    let struct_name = match unwrapped {
         Type::Obj(s) => Some(s),
         Type::Vec(_) => Some(crate::ast::intern_str("std_vec_Vec")),
         Type::String => Some(crate::ast::intern_str("std_string_String")),
-        Type::Ref(inner) | Type::MutRef(inner) => match *inner {
-            Type::Obj(s) => Some(s),
-            Type::Vec(_) => Some(crate::ast::intern_str("std_vec_Vec")),
-            Type::String => Some(crate::ast::intern_str("std_string_String")),
-            _ => None,
-        },
         _ => None,
     }?;
 

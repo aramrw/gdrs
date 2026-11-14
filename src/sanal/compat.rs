@@ -17,9 +17,14 @@ fn type_matches_predicate(ty: &Type, pred: fn(&Type) -> bool) -> bool {
         | Type::MutRef(t)
         | Type::Slice(t)
         | Type::Vec(t)
+        | Type::Box(t)
         | Type::Rc(t)
         | Type::Arc(t)
         | Type::Array(t, _) => type_matches_predicate(t, pred),
+        Type::FnPtr(params, ret) => {
+            params.iter().any(|t| type_matches_predicate(t, pred))
+                || type_matches_predicate(ret, pred)
+        }
         Type::Tuple(tys) => tys.iter().any(|t| type_matches_predicate(t, pred)),
         Type::Enum(name) | Type::Obj(name) => crate::sanal::mono::lookup_mangled(name)
             .is_some_and(|(_, t_args)| t_args.iter().any(|t| type_matches_predicate(t, pred))),
@@ -68,8 +73,17 @@ pub fn format_type(ty: &Type) -> String {
         }
         Type::Slice(inner) => format!("[{}]", format_type(inner)),
         Type::Vec(inner) => format!("Vec<{}>", format_type(inner)),
-        Type::Rc(inner) => format!("rc<{}>", format_type(inner)),
-        Type::Arc(inner) => format!("arc<{}>", format_type(inner)),
+        Type::Box(inner) => format!("Box<{}>", format_type(inner)),
+        Type::Rc(inner) => format!("Rc<{}>", format_type(inner)),
+        Type::Arc(inner) => format!("Arc<{}>", format_type(inner)),
+        Type::FnPtr(params, ret) => {
+            let ps: Vec<String> = params.iter().map(format_type).collect();
+            if **ret == Type::Unit {
+                format!("fn({})", ps.join(", "))
+            } else {
+                format!("fn({}) -> {}", ps.join(", "), format_type(ret))
+            }
+        }
         Type::Ref(inner) => format!("&{}", format_type(inner)),
         Type::MutRef(inner) => format!("&mut {}", format_type(inner)),
         Type::Ptr(inner) => format!("*{}", format_type(inner)),
@@ -102,6 +116,33 @@ pub fn is_type_compatible(expected: &Type, found: &Type) -> bool {
         | (Type::Slice(e1), Type::Vec(e2))
         | (Type::Vec(e1), Type::Array(e2, _))
         | (Type::Slice(e1), Type::Array(e2, _)) => is_type_compatible(e1, e2),
+        (Type::Slice(e1), Type::Ref(inner)) | (Type::Slice(e1), Type::MutRef(inner)) => {
+            match *inner {
+                Type::Array(e2, _) | Type::Vec(e2) | Type::Slice(e2) => is_type_compatible(e1, e2),
+                _ => false,
+            }
+        }
+        (Type::MutRef(s_inner), Type::MutRef(other_inner))
+            if matches!(*s_inner, Type::Slice(_)) =>
+        {
+            if let Type::Slice(e1) = *s_inner {
+                match *other_inner {
+                    Type::Array(e2, _) | Type::Vec(e2) | Type::Slice(e2) => {
+                        is_type_compatible(e1, e2)
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        }
+        (Type::MutRef(s_inner), Type::Slice(e2)) if matches!(*s_inner, Type::Slice(_)) => {
+            if let Type::Slice(e1) = *s_inner {
+                is_type_compatible(e1, e2)
+            } else {
+                false
+            }
+        }
         (Type::Vec(_), Type::Obj(s)) | (Type::Obj(s), Type::Vec(_)) => s.contains("Vec"),
         (Type::Array(e1, n1), Type::Array(e2, n2)) => n1 == n2 && is_type_compatible(e1, e2),
         (Type::Tuple(t1), Type::Tuple(t2)) => {
@@ -114,7 +155,17 @@ pub fn is_type_compatible(expected: &Type, found: &Type) -> bool {
         (Type::Ref(a), Type::Ref(b))
         | (Type::MutRef(a), Type::MutRef(b))
         | (Type::Ref(a), Type::MutRef(b)) => is_type_compatible(a, b),
-        (Type::Rc(a), Type::Rc(b)) | (Type::Arc(a), Type::Arc(b)) => is_type_compatible(a, b),
+        (Type::Box(a), Type::Box(b))
+        | (Type::Rc(a), Type::Rc(b))
+        | (Type::Arc(a), Type::Arc(b)) => is_type_compatible(a, b),
+        (Type::FnPtr(p1, r1), Type::FnPtr(p2, r2)) => {
+            p1.len() == p2.len()
+                && p1
+                    .iter()
+                    .zip(p2.iter())
+                    .all(|(a, b)| is_type_compatible(a, b))
+                && is_type_compatible(r1, r2)
+        }
         (Type::Ptr(a), Type::Ptr(b)) => {
             **a == Type::Void || **b == Type::Void || is_type_compatible(a, b)
         }
@@ -200,13 +251,23 @@ pub fn consume_tail_expr<'a>(
     }
 }
 
-/// Emits `E0505` if `name` is currently borrowed when attempting to move out of it.
+/// Emits `E0505` if `name` is currently borrowed, or `E0507` if attempting to move a non-consuming `self`.
 pub fn check_not_borrowed_on_move(
     scopes: &ScopeStack,
     errors: &mut Vec<SemanticError>,
     name: &str,
     span: &Span,
 ) {
+    if scopes.lookup(name).is_some_and(|i| i.is_borrowed_self) {
+        errors.push(SemanticError {
+            code: "E0507",
+            message: format!("Cannot move out of borrowed `{name}` inside a non-consuming method"),
+            label: format!("Move of `{name}` occurs here"),
+            secondary_label: None,
+            help: Some("Operate on `&self` or fields, or change the method to return a non-Copy owned value".to_string()),
+            span: span.clone(),
+        });
+    }
     if let Some((_, holder)) = scopes.active_borrow(name) {
         errors.push(SemanticError {
             code: "E0505",
@@ -219,17 +280,41 @@ pub fn check_not_borrowed_on_move(
     }
 }
 
-/// Marks a local variable binding as moved if `expr` is an identifier of a non-`Copy` type.
+/// Marks a local variable binding as moved if `expr` is an identifier of a non-`Copy` type
+/// or a dereference `*b` of an owned `Box<T>` where `T` is non-`Copy`.
 #[inline]
 pub fn mark_expr_moved_if_ident(
     scopes: &mut ScopeStack,
     errors: &mut Vec<SemanticError>,
     expr: &TypedExpr,
 ) {
-    if let TypedExpr::Ident(name, ty, span) = expr {
-        if !ty.is_copy() {
-            check_not_borrowed_on_move(scopes, errors, name, span);
-            scopes.mark_moved(name);
+    match expr {
+        TypedExpr::Ident(name, ty, span) => {
+            if !ty.is_copy() {
+                check_not_borrowed_on_move(scopes, errors, name, span);
+                scopes.mark_moved(name);
+            }
         }
+        TypedExpr::Deref(inner, ty, span) if matches!(inner.ty(), Type::Box(_)) => {
+            if !ty.is_copy() {
+                if let TypedExpr::Ident(name, _, _) = inner.as_ref() {
+                    check_not_borrowed_on_move(scopes, errors, name, span);
+                    scopes.mark_moved(name);
+                } else {
+                    errors.push(SemanticError {
+                        code: "E0507",
+                        message: format!(
+                            "Cannot move out of `{:?}` which is behind a reference or projection",
+                            inner.ty()
+                        ),
+                        label: "Cannot move out of non-local `Box`".to_string(),
+                        secondary_label: None,
+                        help: None,
+                        span: span.clone(),
+                    });
+                }
+            }
+        }
+        _ => {}
     }
 }

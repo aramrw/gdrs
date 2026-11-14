@@ -23,13 +23,23 @@ pub fn resolve_call_target<'a>(
 
     if !is_direct_concrete_fn && (resolved_name == name || !type_ctx.contains_fn(&resolved_name) || is_generic_fn) {
         let target_type = if !typed_args.is_empty() {
-            let t0 = match typed_args[0].ty() {
-                Type::Ref(inner) | Type::MutRef(inner) => *inner,
-                other => other,
-            };
+            let mut t0 = type_ctx.infer.borrow_mut().resolve(typed_args[0].ty());
+            while let Type::Ref(inner)
+            | Type::MutRef(inner)
+            | Type::Box(inner)
+            | Type::Rc(inner)
+            | Type::Arc(inner) = t0
+            {
+                t0 = *inner;
+            }
             match t0 {
                 Type::Obj(s) | Type::Enum(s) => Some(s.to_string()),
                 Type::Vec(_) => Some("Vec".to_string()),
+                Type::Slice(_) | Type::Array(_, _)
+                    if name.ends_with("into_iter") || name.ends_with("iter") =>
+                {
+                    Some("Vec".to_string())
+                }
                 Type::String => Some("String".to_string()),
                 _ => None,
             }
@@ -134,10 +144,15 @@ pub fn resolve_call_target<'a>(
         if !base_struct.is_empty() && is_struct_or_enum {
             let mut resolved_mangled = false;
             if !typed_args.is_empty() {
-                let arg_ty = match typed_args[0].ty() {
-                    Type::Ref(inner) | Type::MutRef(inner) => *inner,
-                    other => other,
-                };
+                let mut arg_ty = type_ctx.infer.borrow_mut().resolve(typed_args[0].ty());
+                while let Type::Ref(inner)
+                | Type::MutRef(inner)
+                | Type::Box(inner)
+                | Type::Rc(inner)
+                | Type::Arc(inner) = arg_ty
+                {
+                    arg_ty = *inner;
+                }
                 if let Type::Enum(mangled_enum) | Type::Obj(mangled_enum) = arg_ty {
                     let mangled_fn = format!("{mangled_enum}_{method_name}");
                     if type_ctx.contains_fn(&mangled_fn) {
@@ -226,19 +241,29 @@ pub fn resolve_call_target<'a>(
             if !resolved_mangled {
                 let mut type_args = Vec::new();
                 if !typed_args.is_empty() {
-                    let recv_ty = match typed_args[0].ty() {
-                        Type::Ref(inner) | Type::MutRef(inner) => *inner,
-                        other => other,
-                    };
-                    if let Type::Vec(inner) = recv_ty {
+                    let mut recv_ty = type_ctx.infer.borrow_mut().resolve(typed_args[0].ty());
+                    while let Type::Ref(inner)
+                    | Type::MutRef(inner)
+                    | Type::Box(inner)
+                    | Type::Rc(inner)
+                    | Type::Arc(inner) = recv_ty
+                    {
+                        recv_ty = *inner;
+                    }
+                    if let Type::Vec(inner) | Type::Slice(inner) | Type::Array(inner, _) = recv_ty {
                         type_args.push(*inner);
                     }
                 }
                 if type_args.is_empty() && !typed_args.is_empty() {
-                    let recv_ty = match typed_args[0].ty() {
-                        Type::Ref(inner) | Type::MutRef(inner) => *inner,
-                        other => other,
-                    };
+                    let mut recv_ty = type_ctx.infer.borrow_mut().resolve(typed_args[0].ty());
+                    while let Type::Ref(inner)
+                    | Type::MutRef(inner)
+                    | Type::Box(inner)
+                    | Type::Rc(inner)
+                    | Type::Arc(inner) = recv_ty
+                    {
+                        recv_ty = *inner;
+                    }
                     if let Type::Obj(obj_name) = recv_ty {
                         let name_str = obj_name.to_string();
                         if name_str.contains("Vec") && typed_args.len() >= 2 {

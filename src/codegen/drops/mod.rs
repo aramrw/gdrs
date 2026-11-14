@@ -83,7 +83,7 @@ pub(crate) fn has_drop_glue_inner(
     if explicit_drop_fn_name(ty, known_drop_fns).is_some() {
         return true;
     }
-    if matches!(ty, Type::DynTrait(_)) {
+    if matches!(ty, Type::DynTrait(_) | Type::Box(_)) {
         return true;
     }
     if let Type::Array(elem, len) = ty {

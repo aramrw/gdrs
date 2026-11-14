@@ -22,6 +22,7 @@ pub enum MacroKind {
     Line,
     Column,
     Stringify,
+    Dbg,
 }
 
 pub struct MacroDefinition {
@@ -145,6 +146,13 @@ pub static MACRO_REGISTRY: &[MacroDefinition] = &[
         max_args: None,
         returns: Type::Unit, // Refined dynamically per element type
     },
+    MacroDefinition {
+        name: "dbg",
+        kind: MacroKind::Dbg,
+        min_args: 1,
+        max_args: Some(1),
+        returns: Type::Unit, // Refined dynamically to match arg type
+    },
 ];
 
 pub fn lookup_macro(name: &str) -> Option<&'static MacroDefinition> {
@@ -152,10 +160,19 @@ pub fn lookup_macro(name: &str) -> Option<&'static MacroDefinition> {
     MACRO_REGISTRY.iter().find(|m| m.name == clean)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatSpec {
+    Display,
+    Debug { alternate: bool },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FormatChunk {
     Literal(String),
-    Hole(usize),
+    Hole {
+        arg_idx: usize,
+        spec: FormatSpec,
+    },
 }
 
 /// Parses an unescaped or raw string literal into `FormatChunk`s.
@@ -178,33 +195,58 @@ pub fn parse_format_string(raw_or_unescaped: &str, is_raw: bool, span: &Span) ->
                 if i + 1 < chars.len() && chars[i + 1] == '{' {
                     current_lit.push('{');
                     i += 2;
-                } else if i + 1 < chars.len() && chars[i + 1] == '}' {
+                } else if let Some(close_rel) = chars[i + 1..].iter().position(|&c| c == '}') {
+                    let inner_str: String = chars[i + 1..i + 1 + close_rel].iter().collect();
+                    let (pos_str, spec_opt) = match inner_str.split_once(':') {
+                        Some((p, s)) => (p.trim(), Some(s.trim())),
+                        None => (inner_str.trim(), None),
+                    };
+
+                    let spec = match spec_opt {
+                        None => FormatSpec::Display,
+                        Some("?") => FormatSpec::Debug { alternate: false },
+                        Some("#?") => FormatSpec::Debug { alternate: true },
+                        Some(_) => {
+                            return Err(SemanticError {
+                                code: "E0001",
+                                message: format!("Invalid format specifier `{inner_str}` in format string"),
+                                label: "Invalid format placeholder".to_string(),
+                                secondary_label: None,
+                                help: Some("Supported format specifiers are `{}`, `{:?}`, and `{:#?}`".to_string()),
+                                span: span.clone(),
+                            });
+                        }
+                    };
+
+                    let arg_idx = if pos_str.is_empty() {
+                        let idx = hole_idx;
+                        hole_idx += 1;
+                        idx
+                    } else if let Ok(num) = pos_str.parse::<usize>() {
+                        num
+                    } else {
+                        return Err(SemanticError {
+                            code: "E0001",
+                            message: format!("Invalid positional argument `{pos_str}` in format string"),
+                            label: "Invalid format placeholder".to_string(),
+                            secondary_label: None,
+                            help: Some("Positional indices must be non-negative integers (e.g. `{0}`, `{1:?}`)".to_string()),
+                            span: span.clone(),
+                        });
+                    };
+
                     if !current_lit.is_empty() {
                         chunks.push(FormatChunk::Literal(std::mem::take(&mut current_lit)));
                     }
-                    chunks.push(FormatChunk::Hole(hole_idx));
-                    hole_idx += 1;
-                    i += 2;
-                } else if i + 3 < chars.len()
-                    && chars[i + 1] == ':'
-                    && chars[i + 2] == '?'
-                    && chars[i + 3] == '}'
-                {
-                    return Err(SemanticError {
-                        code: "E0277",
-                        message: "The trait `Debug` is not yet supported in format strings; use `{}` (`Display`) instead".to_string(),
-                        label: "Debug format specifier `{:?}` is unsupported".to_string(),
-                        secondary_label: None,
-                        help: Some("Replace `{:?}` with `{}` and ensure the type implements `Display`".to_string()),
-                        span: span.clone(),
-                    });
+                    chunks.push(FormatChunk::Hole { arg_idx, spec });
+                    i += 1 + close_rel + 1;
                 } else {
                     return Err(SemanticError {
                         code: "E0001",
                         message: "Invalid or unmatched `{` in format string".to_string(),
                         label: "Invalid format placeholder".to_string(),
                         secondary_label: None,
-                        help: Some("Use `{}` for placeholders or `{{` for a literal `{`".to_string()),
+                        help: Some("Use `{}` or `{:?}` for placeholders or `{{` for a literal `{`".to_string()),
                         span: span.clone(),
                     });
                 }
@@ -244,10 +286,10 @@ pub fn is_displayable_type(ty: Type, type_ctx: &TypeCtx<'_>) -> bool {
     let resolved = infer.resolve(ty);
     drop(infer);
 
-    let inner = match resolved {
-        Type::Ref(inner) | Type::MutRef(inner) => *inner,
-        other => other,
-    };
+    let mut inner = resolved;
+    while let Type::Ref(i) | Type::MutRef(i) | Type::Box(i) | Type::Rc(i) | Type::Arc(i) = inner {
+        inner = *i;
+    }
 
     if inner.is_numeric() {
         return true;
@@ -266,6 +308,8 @@ pub fn is_displayable_type(ty: Type, type_ctx: &TypeCtx<'_>) -> bool {
         | Type::Obj("f64")
         | Type::Obj("Float")
         | Type::Obj("F64") => true,
+        Type::Tuple(elems) => elems.iter().all(|e| is_displayable_type(*e, type_ctx)),
+        Type::DynTrait(tr) => tr == "Display" || tr.ends_with("_Display") || tr.ends_with("::Display"),
         Type::Obj(tn) | Type::Enum(tn) => {
             let fn_map = type_ctx.fn_map.borrow();
             type_satisfies_bound(
@@ -277,7 +321,63 @@ pub fn is_displayable_type(ty: Type, type_ctx: &TypeCtx<'_>) -> bool {
             ) || fn_map.contains_key(&format!("{tn}_fmt"))
                 || fn_map.contains_key(&format!("{tn}_to_string"))
         }
-        Type::Tuple(elems) => elems.iter().all(|e| is_displayable_type(*e, type_ctx)),
+        _ => false,
+    }
+}
+
+/// Checks if `ty` can be formatted with `{:?}` / `{:#?}` (`Debug` or built-in primitive).
+pub fn is_debuggable_type(ty: Type, type_ctx: &TypeCtx<'_>) -> bool {
+    let mut infer = type_ctx.infer.borrow_mut();
+    let resolved = infer.resolve(ty);
+    drop(infer);
+
+    let mut inner = resolved;
+    while let Type::Ref(i) | Type::MutRef(i) | Type::Box(i) | Type::Rc(i) | Type::Arc(i) = inner {
+        inner = *i;
+    }
+
+    if inner.is_numeric() {
+        return true;
+    }
+
+    match inner {
+        Type::Error
+        | Type::Bool
+        | Type::Str
+        | Type::String
+        | Type::Unit
+        | Type::Ptr(_)
+        | Type::FnPtr(..)
+        | Type::Infer(_) => true,
+        Type::Obj("String")
+        | Type::Obj("std_string_String")
+        | Type::Obj("f32")
+        | Type::Obj("F32")
+        | Type::Obj("f64")
+        | Type::Obj("Float")
+        | Type::Obj("F64") => true,
+        Type::Tuple(elems) => elems.iter().all(|e| is_debuggable_type(*e, type_ctx)),
+        Type::Array(elem, _)
+        | Type::Slice(elem)
+        | Type::Vec(elem)
+        | Type::Box(elem)
+        | Type::Rc(elem)
+        | Type::Arc(elem) => {
+            is_debuggable_type(*elem, type_ctx)
+        }
+        Type::DynTrait(tr) => tr == "Debug" || tr.ends_with("_Debug") || tr.ends_with("::Debug"),
+        Type::Generic(_) => true,
+        Type::Obj(tn) | Type::Enum(tn) => {
+            let fn_map = type_ctx.fn_map.borrow();
+            type_satisfies_bound(
+                inner,
+                "Debug",
+                type_ctx.trait_methods,
+                type_ctx.trait_impls,
+                &fn_map,
+            ) || fn_map.contains_key(&format!("{tn}__Debug_fmt"))
+                || fn_map.contains_key(&format!("{tn}_Debug_fmt"))
+        }
         _ => false,
     }
 }
@@ -310,36 +410,62 @@ fn validate_format_args(
         }
     };
 
-    let hole_count = chunks
-        .iter()
-        .filter(|c| matches!(c, FormatChunk::Hole(_)))
-        .count();
+    let mut max_idx = 0usize;
+    let mut has_holes = false;
+    for chunk in &chunks {
+        if let FormatChunk::Hole { arg_idx, .. } = chunk {
+            has_holes = true;
+            if *arg_idx >= max_idx {
+                max_idx = *arg_idx + 1;
+            }
+        }
+    }
     let supplied_count = args.len() - 1;
 
-    if hole_count != supplied_count {
+    if has_holes && max_idx != supplied_count {
         errors.push(SemanticError {
             code: "E0061",
             message: format!(
-                "Invalid format string: expected {hole_count} positional argument(s), found {supplied_count}"
+                "Invalid format string: expected {max_idx} positional argument(s), found {supplied_count}"
             ),
-            label: format!("Expected {hole_count} argument(s), found {supplied_count}"),
+            label: format!("Expected {max_idx} argument(s), found {supplied_count}"),
             secondary_label: None,
             help: None,
             span: fmt_span.clone(),
         });
     }
 
-    for arg in &args[1..] {
-        let arg_ty = arg.ty();
-        if !is_displayable_type(arg_ty, type_ctx) {
-            errors.push(SemanticError {
-                code: "E0277",
-                message: format!("The trait `Display` is not implemented for `{arg_ty:?}`"),
-                label: format!("`{arg_ty:?}` cannot be formatted with `{{}}`"),
-                secondary_label: None,
-                help: Some("Implement `Display` for this type or convert it to a string".to_string()),
-                span: arg.span(),
-            });
+    for chunk in &chunks {
+        if let FormatChunk::Hole { arg_idx, spec } = chunk {
+            if let Some(arg) = args.get(1 + arg_idx) {
+                let arg_ty = arg.ty();
+                match spec {
+                    FormatSpec::Display => {
+                        if !is_displayable_type(arg_ty, type_ctx) {
+                            errors.push(SemanticError {
+                                code: "E0277",
+                                message: format!("The trait `Display` is not implemented for `{arg_ty:?}`"),
+                                label: format!("`{arg_ty:?}` cannot be formatted with `{{}}`"),
+                                secondary_label: None,
+                                help: Some("Implement `Display` for this type or convert it to a string".to_string()),
+                                span: arg.span(),
+                            });
+                        }
+                    }
+                    FormatSpec::Debug { .. } => {
+                        if !is_debuggable_type(arg_ty, type_ctx) {
+                            errors.push(SemanticError {
+                                code: "E0277",
+                                message: format!("The trait `Debug` is not implemented for `{arg_ty:?}`"),
+                                label: format!("`{arg_ty:?}` cannot be formatted using `{{:?}}` because it doesn't implement `Debug`"),
+                                secondary_label: None,
+                                help: Some("Add `#[derive(Debug)]` or implement `Debug` for this type".to_string()),
+                                span: arg.span(),
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -426,6 +552,23 @@ pub fn validate_and_finalize_macro(
             }
         }
         MacroKind::Thread => {
+            if let Some(payload_arg) = typed_args.get(1) {
+                let arg_ty = type_ctx.infer.borrow_mut().resolve(payload_arg.ty());
+                if let Some((reason, help)) =
+                    crate::sanal::calls::macros::check_send_type(&arg_ty, type_ctx.is_unsafe)
+                {
+                    errors.push(SemanticError {
+                        code: "E0277",
+                        message: format!(
+                            "Type `{arg_ty:?}` cannot be sent between threads safely: {reason}"
+                        ),
+                        label: "Not `Send`".to_string(),
+                        secondary_label: None,
+                        help: Some(help),
+                        span: payload_arg.span(),
+                    });
+                }
+            }
             for arg in &typed_args {
                 mark_expr_moved_if_ident(scopes, errors, arg);
             }
@@ -479,9 +622,45 @@ pub fn validate_and_finalize_macro(
                         span: typed_args[1].span(),
                     });
                 }
+                if !is_debuggable_type(t0, type_ctx) {
+                    errors.push(SemanticError {
+                        code: "E0277",
+                        message: format!("The trait `Debug` is not implemented for `{t0:?}`"),
+                        label: format!("`{t0:?}` doesn't implement `Debug` so it cannot be formatted in `{}!`", def.name),
+                        secondary_label: None,
+                        help: Some("Add `#[derive(Debug)]` or implement `Debug` for this type".to_string()),
+                        span: typed_args[0].span(),
+                    });
+                }
+                if !is_debuggable_type(t1, type_ctx) {
+                    errors.push(SemanticError {
+                        code: "E0277",
+                        message: format!("The trait `Debug` is not implemented for `{t1:?}`"),
+                        label: format!("`{t1:?}` doesn't implement `Debug` so it cannot be formatted in `{}!`", def.name),
+                        secondary_label: None,
+                        help: Some("Add `#[derive(Debug)]` or implement `Debug` for this type".to_string()),
+                        span: typed_args[1].span(),
+                    });
+                }
             }
             if typed_args.len() > 2 {
                 validate_format_args(&typed_args[2..], type_ctx, errors);
+            }
+        }
+        MacroKind::Dbg => {
+            if let Some(arg) = typed_args.first() {
+                let arg_ty = arg.ty();
+                if !is_debuggable_type(arg_ty, type_ctx) {
+                    errors.push(SemanticError {
+                        code: "E0277",
+                        message: format!("The trait `Debug` is not implemented for `{arg_ty:?}`"),
+                        label: format!("`{arg_ty:?}` doesn't implement `Debug` so it cannot be formatted with `dbg!`"),
+                        secondary_label: None,
+                        help: Some("Add `#[derive(Debug)]` or implement `Debug` for this type".to_string()),
+                        span: arg.span(),
+                    });
+                }
+                mark_expr_moved_if_ident(scopes, errors, arg);
             }
         }
         MacroKind::Format | MacroKind::Print { .. } | MacroKind::Panic => {
@@ -525,6 +704,9 @@ pub fn validate_and_finalize_macro(
                     .fresh(span.clone(), "element type of `vec!`")
             };
             Type::Vec(crate::ast::intern_type(elem_ty))
+        }
+        MacroKind::Dbg => {
+            typed_args.first().map(|a| a.ty()).unwrap_or(Type::Unit)
         }
         _ => def.returns,
     };

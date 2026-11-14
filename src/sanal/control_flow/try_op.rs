@@ -90,6 +90,9 @@ pub fn type_check_try<'a>(
     let variant_info = type_ctx.get_enum(&enum_name);
     let ret_variant_info = type_ctx.get_enum(&ret_enum_name);
 
+    crate::sanal::compat::mark_expr_moved_if_ident(scopes, errors, &t_inner);
+    type_ctx.check_not_moved_from_projection(&t_inner, errors);
+
     if is_option {
         let (some_tag, payload_ty) = variant_info
             .as_ref()

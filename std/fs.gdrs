@@ -10,7 +10,7 @@ use std::string::String
 fn buffer_to_string(ptr: *void, size: i64) -> String:
 	return String::from_raw_parts(ptr as *i64, size, size + 1)
 
-#[derive(Error)]
+#[derive(Error, Debug)]
 pub enum IoError:
 	#[err("Failed to open file or directory at path: '{0}'")]
 	OpenFailed(String)

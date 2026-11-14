@@ -33,42 +33,67 @@ pub(crate) fn borrowed_view_root<'a>(
     extract_root_var(recv)
 }
 
+pub fn type_may_borrow(ty: &Type) -> bool {
+    match ty {
+        Type::Ref(_) | Type::MutRef(_) | Type::Str | Type::Slice(_) => true,
+        Type::Obj(name) | Type::Enum(name) => {
+            name.contains("VecIter")
+                || crate::sanal::mono::lookup_mangled(name)
+                    .is_some_and(|(_, args)| args.iter().any(type_may_borrow))
+        }
+        Type::Array(t, _)
+        | Type::Vec(t)
+        | Type::Box(t)
+        | Type::Rc(t)
+        | Type::Arc(t) => type_may_borrow(t),
+        Type::Tuple(elems) => elems.iter().any(type_may_borrow),
+        _ => false,
+    }
+}
+
 pub fn check_return_ref_lifetime(
     scopes: &ScopeStack,
     expr: &TypedExpr,
     errors: &mut Vec<SemanticError>,
 ) {
     match expr {
-        TypedExpr::Ref(inner, _, _, span) => match extract_root_ident_with_ty(inner) {
-            None => errors.push(SemanticError {
-                code: "E0515",
-                message: "Cannot return reference to temporary value".to_string(),
-                label: "Returns a reference to data owned by the current function".to_string(),
-                secondary_label: None,
-                help: Some("Return an owned value instead of a reference".to_string()),
-                span: span.clone(),
-            }),
-            Some((root, root_ty)) => {
-                let valid_caller_origin = matches!(root_ty, Type::Ref(_) | Type::MutRef(_))
-                    && scopes.lookup(root).is_some_and(|info| info.from_caller);
-                if !valid_caller_origin {
-                    errors.push(SemanticError {
-                        code: "E0515",
-                        message: format!("Cannot return reference to local variable `{root}`"),
-                        label: "Returns a reference to data owned by the current function"
-                            .to_string(),
-                        secondary_label: None,
-                        help: Some("Return an owned value instead of a reference".to_string()),
-                        span: span.clone(),
-                    });
+        TypedExpr::Ref(inner, _, _, span)
+        | TypedExpr::IndexAccess(inner, _, Type::Slice(_) | Type::Str, span) => {
+            match extract_root_ident_with_ty(inner) {
+                None => errors.push(SemanticError {
+                    code: "E0515",
+                    message: "Cannot return reference to temporary value".to_string(),
+                    label: "Returns a reference to data owned by the current function".to_string(),
+                    secondary_label: None,
+                    help: Some("Return an owned value instead of a reference".to_string()),
+                    span: span.clone(),
+                }),
+                Some((root, root_ty)) => {
+                    let valid_caller_origin =
+                        matches!(root_ty, Type::Ref(_) | Type::MutRef(_) | Type::Slice(_))
+                            && scopes.lookup(root).is_some_and(|info| info.from_caller);
+                    if !valid_caller_origin {
+                        errors.push(SemanticError {
+                            code: "E0515",
+                            message: format!("Cannot return reference to local variable `{root}`"),
+                            label: "Returns a reference to data owned by the current function"
+                                .to_string(),
+                            secondary_label: None,
+                            help: Some("Return an owned value instead of a reference".to_string()),
+                            span: span.clone(),
+                        });
+                    }
                 }
             }
-        },
+        }
         TypedExpr::Ident(name, ty, span) => {
-            let borrowed_str_or_iter = matches!(ty, Type::Str)
+            let borrowed_str_or_iter = matches!(ty, Type::Str | Type::Slice(_))
                 || matches!(ty, Type::Obj(s) if s.contains("VecIter"));
+            let valid_caller_borrow = scopes
+                .borrow_target(name)
+                .is_some_and(|root| scopes.lookup(&root).is_some_and(|info| info.from_caller));
             if (matches!(ty, Type::Ref(_) | Type::MutRef(_))
-                || (borrowed_str_or_iter && scopes.borrow_target(name).is_some()))
+                || (borrowed_str_or_iter && scopes.borrow_target(name).is_some() && !valid_caller_borrow))
                 && !scopes.lookup(name).is_some_and(|info| info.from_caller)
             {
                 errors.push(SemanticError {
@@ -205,8 +230,9 @@ pub fn check_block_escape_lifetime(
             }
         }
         TypedExpr::Ident(name, ty, span) => {
-            let may_hold_borrow = matches!(ty, Type::Ref(_) | Type::MutRef(_) | Type::Str)
-                || matches!(ty, Type::Obj(s) if s.contains("VecIter"));
+            let may_hold_borrow =
+                matches!(ty, Type::Ref(_) | Type::MutRef(_) | Type::Str | Type::Slice(_))
+                    || matches!(ty, Type::Obj(s) if s.contains("VecIter"));
             if may_hold_borrow {
                 if let Some(target) = scopes.borrow_target(name) {
                     if scopes.current_scope_contains(&target) {

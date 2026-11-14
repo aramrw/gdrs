@@ -16,8 +16,16 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
     let type_parser = recursive(|type_parser| {
         let array_type = just(Token::LBracket)
             .ignore_then(type_parser.clone())
+            .then(
+                just(Token::Semicolon)
+                    .ignore_then(select! { Token::Int(n) if n >= 0 => n as usize })
+                    .or_not(),
+            )
             .then_ignore(just(Token::RBracket))
-            .map(|t| Type::Vec(intern_type(t)));
+            .map(|(t, opt_len)| match opt_len {
+                Some(len) => Type::Array(intern_type(t), len),
+                None => Type::Slice(intern_type(t)),
+            });
 
         let generic_type = just(Token::Dollar)
             .ignore_then(select! { Token::Ident(s) => s })
@@ -27,17 +35,33 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             .ignore_then(select! { Token::Ident(s) => s })
             .map(|s| Type::DynTrait(intern_str(&s)));
 
-        let rc_type = just(Token::TypeRc)
-            .ignore_then(just(Token::LBracket))
-            .ignore_then(type_parser.clone())
-            .then_ignore(just(Token::RBracket))
-            .map(|t| Type::Rc(intern_type(t)));
+        let fn_ptr_type = just(Token::Fn)
+            .ignore_then(
+                type_parser
+                    .clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .then(just(Token::Arrow).ignore_then(type_parser.clone()).or_not())
+            .map(|(params, opt_ret)| {
+                let ret = opt_ret.unwrap_or(Type::Unit);
+                Type::FnPtr(intern_tuple(&params), intern_type(ret))
+            });
 
-        let arc_type = just(Token::TypeArc)
-            .ignore_then(just(Token::LBracket))
-            .ignore_then(type_parser.clone())
-            .then_ignore(just(Token::RBracket))
-            .map(|t| Type::Arc(intern_type(t)));
+        let smart_ptr_bracket_type = select! {
+            Token::Ident(ref s) if matches!(s.as_str(), "rc" | "Rc" | "arc" | "Arc" | "box" | "Box") => s.clone()
+        }
+        .then(
+            just(Token::LBracket)
+                .ignore_then(type_parser.clone())
+                .then_ignore(just(Token::RBracket)),
+        )
+        .map(|(kind, t)| match kind.as_str() {
+            "rc" | "Rc" => Type::Rc(intern_type(t)),
+            "arc" | "Arc" => Type::Arc(intern_type(t)),
+            _ => Type::Box(intern_type(t)),
+        });
 
         let tuple_or_unit_type = just(Token::LParen)
             .ignore_then(
@@ -89,6 +113,15 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
                     if (normalized_base == "Vec" || normalized_base == "std_vec_Vec") && generics.len() == 1 {
                         return Type::Vec(intern_type(generics[0]));
                     }
+                    if matches!(normalized_base.as_str(), "Box" | "std_boxed_Box" | "box") && generics.len() == 1 {
+                        return Type::Box(intern_type(generics[0]));
+                    }
+                    if matches!(normalized_base.as_str(), "Rc" | "std_rc_Rc" | "rc") && generics.len() == 1 {
+                        return Type::Rc(intern_type(generics[0]));
+                    }
+                    if matches!(normalized_base.as_str(), "Arc" | "std_sync_Arc" | "arc") && generics.len() == 1 {
+                        return Type::Arc(intern_type(generics[0]));
+                    }
                     let mangled = crate::sanal::mono::mangle_name(&normalized_base, &generics);
                     Type::Obj(intern_str(&mangled))
                 } else if normalized_base == "std_core_Result" || normalized_base == "std_core_Option" {
@@ -102,6 +135,14 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             .ignore_then(just(Token::Mut).or_not())
             .then(type_parser.clone())
             .map(|(opt_mut, inner_ty)| {
+                if opt_mut.is_none() {
+                    if let Type::Slice(_) = inner_ty {
+                        return inner_ty;
+                    }
+                    if inner_ty == Type::Str {
+                        return Type::Str;
+                    }
+                }
                 if opt_mut.is_some() {
                     Type::MutRef(intern_type(inner_ty))
                 } else {
@@ -131,14 +172,14 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             Token::TypeString => Type::String,
             Token::TypeVoid => Type::Void,
         }
+        .or(fn_ptr_type)
         .or(ptr_type)
         .or(ref_type)
+        .or(smart_ptr_bracket_type)
         .or(path_obj_type)
         .or(generic_type)
         .or(dyn_type)
         .or(array_type)
-        .or(rc_type)
-        .or(arc_type)
         .or(tuple_or_unit_type)
     }).boxed();
 

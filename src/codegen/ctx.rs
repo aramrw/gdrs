@@ -23,6 +23,7 @@ pub struct ProgramMeta<'a> {
     pub fn_return_types: HashMap<String, Type>,
     pub known_drop_fns: HashSet<String>,
     pub trait_methods: HashMap<String, Vec<String>>,
+    pub trait_consuming_methods: HashSet<(String, String)>,
     pub track_caller_fns: HashSet<String>,
     pub source_map: &'a crate::loader::SourceMap,
 }
@@ -102,8 +103,22 @@ impl<'a> ProgramMeta<'a> {
         }
 
         let mut trait_methods = HashMap::new();
+        let mut trait_consuming_methods = HashSet::new();
         for t in &program.traits {
-            let names: Vec<String> = t.methods.iter().map(|m| m.name.clone()).collect();
+            let mut names = Vec::with_capacity(t.methods.len());
+            for m in &t.methods {
+                names.push(m.name.clone());
+                let by_val_self = m
+                    .params
+                    .first()
+                    .is_some_and(|p| p.name == "self" && !matches!(p.ty, Type::Ref(_) | Type::MutRef(_)));
+                let is_non_consuming = m.name == "fmt"
+                    || m.name == "to_string"
+                    || (m.return_type != Type::Unit && m.return_type.is_copy());
+                if by_val_self && !is_non_consuming {
+                    trait_consuming_methods.insert((t.name.clone(), m.name.clone()));
+                }
+            }
             trait_methods.insert(t.name.clone(), names);
         }
 
@@ -116,6 +131,7 @@ impl<'a> ProgramMeta<'a> {
             fn_return_types,
             known_drop_fns,
             trait_methods,
+            trait_consuming_methods,
             track_caller_fns,
             source_map,
         }
@@ -180,7 +196,17 @@ impl<'a, 'b> CodegenCtx<'a, 'b> {
     }
 
     pub fn is_addressable_scalar(ty: &Type) -> bool {
-        ty.is_numeric() || matches!(ty, Type::Bool | Type::Str | Type::Ptr(_))
+        ty.is_numeric()
+            || matches!(
+                ty,
+                Type::Bool
+                    | Type::Str
+                    | Type::Ptr(_)
+                    | Type::FnPtr(_, _)
+                    | Type::Box(_)
+                    | Type::Rc(_)
+                    | Type::Arc(_)
+            )
     }
 
     /// Binds `name` to `var` in the current lexical scope, saving any shadowed outer binding

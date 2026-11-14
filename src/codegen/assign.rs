@@ -59,7 +59,13 @@ pub fn compile_let<M: Module>(
             cg.meta.enum_layouts,
             module,
         )
-    } else if let (Type::Slice(_), Type::Array(_, arr_len)) = (ty, value.ty()) {
+    } else if let (
+        Type::Slice(_) | Type::Ref(Type::Slice(_)) | Type::MutRef(Type::Slice(_)),
+        Type::Array(_, arr_len)
+        | Type::Ref(&Type::Array(_, arr_len))
+        | Type::MutRef(&Type::Array(_, arr_len)),
+    ) = (ty, value.ty())
+    {
         builder.declare_var(var, types::I64);
         crate::codegen::arrays::alloc_stack_slice_header(builder, val, arr_len)
     } else if is_aggregate_type(ty, &cg.meta.struct_layouts, cg.meta.enum_layouts) {
@@ -212,7 +218,13 @@ pub fn compile_assign<M: Module>(
             cg.meta.enum_layouts,
             module,
         )
-    } else if let (Type::Slice(_), Type::Array(_, arr_len)) = (target_ty, value.ty()) {
+    } else if let (
+        Type::Slice(_) | Type::Ref(Type::Slice(_)) | Type::MutRef(Type::Slice(_)),
+        Type::Array(_, arr_len)
+        | Type::Ref(&Type::Array(_, arr_len))
+        | Type::MutRef(&Type::Array(_, arr_len)),
+    ) = (target_ty, value.ty())
+    {
         crate::codegen::arrays::alloc_stack_slice_header(builder, raw_val, arr_len)
     } else {
         raw_val

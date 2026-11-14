@@ -82,12 +82,34 @@ pub fn type_check_ident<'a>(
                 Type::Enum(mangled_enum),
                 span.clone(),
             ))
-        } else if name == "rc"
-            || name == "arc"
-            || type_ctx.fn_map.borrow().contains_key(name)
-            || type_ctx.fn_map.borrow().contains_key(&normalized)
-        {
+        } else if matches!(
+            name,
+            "rc" | "arc" | "box" | "Rc" | "Arc" | "Box"
+        ) || matches!(
+            normalized.as_str(),
+            "std_rc_Rc" | "std_sync_Arc" | "std_boxed_Box"
+        ) {
             Some(TypedExpr::Ident(name.to_string(), Type::Int, span.clone()))
+        } else if let Some(fn_decl) = {
+            let map = type_ctx.fn_map.borrow();
+            map.get(name).or_else(|| map.get(&normalized)).cloned()
+        } {
+            let p_tys: Vec<Type> = fn_decl.params.iter().map(|p| p.ty).collect();
+            let fn_ty = Type::FnPtr(
+                crate::ast::intern_tuple(&p_tys),
+                crate::ast::intern_type(fn_decl.return_type),
+            );
+            Some(TypedExpr::Ident(fn_decl.name, fn_ty, span.clone()))
+        } else if let Some((p_tys, ret_ty)) = type_ctx
+            .extern_signatures
+            .get(name)
+            .or_else(|| type_ctx.extern_signatures.get(&normalized))
+        {
+            let fn_ty = Type::FnPtr(
+                crate::ast::intern_tuple(p_tys),
+                crate::ast::intern_type(*ret_ty),
+            );
+            Some(TypedExpr::Ident(normalized, fn_ty, span.clone()))
         } else {
             errors.push(SemanticError {
                 code: "E0425",
@@ -191,12 +213,34 @@ pub fn type_check_ident<'a>(
                 Type::Enum(mangled_enum),
                 span.clone(),
             ))
-        } else if name == "rc"
-            || name == "arc"
-            || type_ctx.fn_map.borrow().contains_key(name)
-            || type_ctx.fn_map.borrow().contains_key(&normalized)
-        {
+        } else if matches!(
+            name,
+            "rc" | "arc" | "box" | "Rc" | "Arc" | "Box"
+        ) || matches!(
+            normalized.as_str(),
+            "std_rc_Rc" | "std_sync_Arc" | "std_boxed_Box"
+        ) {
             Some(TypedExpr::Ident(name.to_string(), Type::Int, span.clone()))
+        } else if let Some(fn_decl) = {
+            let map = type_ctx.fn_map.borrow();
+            map.get(name).or_else(|| map.get(&normalized)).cloned()
+        } {
+            let p_tys: Vec<Type> = fn_decl.params.iter().map(|p| p.ty).collect();
+            let fn_ty = Type::FnPtr(
+                crate::ast::intern_tuple(&p_tys),
+                crate::ast::intern_type(fn_decl.return_type),
+            );
+            Some(TypedExpr::Ident(fn_decl.name, fn_ty, span.clone()))
+        } else if let Some((p_tys, ret_ty)) = type_ctx
+            .extern_signatures
+            .get(name)
+            .or_else(|| type_ctx.extern_signatures.get(&normalized))
+        {
+            let fn_ty = Type::FnPtr(
+                crate::ast::intern_tuple(p_tys),
+                crate::ast::intern_type(*ret_ty),
+            );
+            Some(TypedExpr::Ident(normalized, fn_ty, span.clone()))
         } else {
             errors.push(SemanticError {
                 code: "E0425",
@@ -238,9 +282,40 @@ fn resolve_ref_borrow_info(
     match typed_val {
         TypedExpr::Ref(inner, ref_is_mut, _, _) => {
             if let Some(target_var) = extract_root_var(inner) {
-                let target_owned = target_var.to_string();
+                let target_owned = match scopes.lookup(target_var).map(|i| i.ty) {
+                    Some(Type::Ref(_) | Type::MutRef(_) | Type::Slice(_))
+                        if !scopes.lookup(target_var).is_some_and(|i| i.from_caller) =>
+                    {
+                        scopes
+                            .borrow_target(target_var)
+                            .unwrap_or_else(|| target_var.to_string())
+                    }
+                    _ => target_var.to_string(),
+                };
                 let from_caller = scopes.lookup(&target_owned).is_some_and(|i| i.from_caller);
                 (Some((target_owned, *ref_is_mut)), from_caller)
+            } else {
+                temp_err(errors, span);
+                (None, false)
+            }
+        }
+        TypedExpr::IndexAccess(target, idx, Type::Slice(_) | Type::Str, _)
+            if matches!(idx.as_ref(), TypedExpr::Range(..))
+                || matches!(idx.ty(), Type::Obj("Range")) =>
+        {
+            if let Some(target_var) = extract_root_var(target) {
+                let target_owned = match scopes.lookup(target_var).map(|i| i.ty) {
+                    Some(Type::Ref(_) | Type::MutRef(_) | Type::Slice(_))
+                        if !scopes.lookup(target_var).is_some_and(|i| i.from_caller) =>
+                    {
+                        scopes
+                            .borrow_target(target_var)
+                            .unwrap_or_else(|| target_var.to_string())
+                    }
+                    _ => target_var.to_string(),
+                };
+                let from_caller = scopes.lookup(&target_owned).is_some_and(|i| i.from_caller);
+                (Some((target_owned, false)), from_caller)
             } else {
                 temp_err(errors, span);
                 (None, false)
@@ -253,7 +328,7 @@ fn resolve_ref_borrow_info(
                 crate::sanal::control_flow::lifetimes::borrowed_view_root(fn_name, call_args)
             {
                 let target_owned = match scopes.lookup(root).map(|i| i.ty) {
-                    Some(Type::Ref(_) | Type::MutRef(_))
+                    Some(Type::Ref(_) | Type::MutRef(_) | Type::Slice(_))
                         if !scopes.lookup(root).is_some_and(|i| i.from_caller) =>
                     {
                         scopes.borrow_target(root).unwrap_or_else(|| root.to_string())
@@ -268,8 +343,10 @@ fn resolve_ref_borrow_info(
             }
         }
         TypedExpr::Ident(src_name, _, _)
-            if matches!(dest_ty, Type::Ref(_) | Type::MutRef(_) | Type::Str)
-                || matches!(dest_ty, Type::Obj(s) if s.contains("VecIter")) =>
+            if matches!(
+                dest_ty,
+                Type::Ref(_) | Type::MutRef(_) | Type::Str | Type::Slice(_)
+            ) || matches!(dest_ty, Type::Obj(s) if s.contains("VecIter")) =>
         {
             let from_caller = scopes.lookup(src_name).is_some_and(|i| i.from_caller);
             let inherited = scopes
@@ -323,7 +400,7 @@ fn check_compound_assign_borrow_depths(
             }
         }
         TypedExpr::Ident(src, ty, _)
-            if matches!(ty, Type::Ref(_) | Type::MutRef(_) | Type::Str)
+            if matches!(ty, Type::Ref(_) | Type::MutRef(_) | Type::Str | Type::Slice(_))
                 || matches!(ty, Type::Obj(s) if s.contains("VecIter")) =>
         {
             if let Some(target) = scopes.borrow_target(src) {
@@ -385,6 +462,12 @@ pub fn type_check_let<'a>(
             let _ = type_ctx.infer.borrow_mut().unify(*expected_elem, *elem_var);
             typed_val = TypedExpr::ArrayInit(elems, Type::Vec(expected_elem), arr_span);
         }
+    } else if let Some(Type::Slice(expected_elem) | Type::Array(expected_elem, _)) =
+        resolved_explicit
+    {
+        if let TypedExpr::ArrayInit(_, Type::Array(elem_var, _), _) = &typed_val {
+            let _ = type_ctx.infer.borrow_mut().unify(*expected_elem, **elem_var);
+        }
     } else if resolved_explicit.is_none() && is_mutable {
         if let TypedExpr::ArrayInit(elems, Type::Array(elem_ty, 0), arr_span) = typed_val {
             typed_val = TypedExpr::ArrayInit(elems, Type::Vec(elem_ty), arr_span);
@@ -399,6 +482,8 @@ pub fn type_check_let<'a>(
         if let Type::DynTrait(t_name) = resolved_annotated {
             if !matches!(resolved_inferred, Type::DynTrait(_)) {
                 type_ctx.validate_dyn_coercion(&resolved_inferred, t_name, span, errors);
+                type_ctx.check_not_moved_from_projection(&typed_val, errors);
+                mark_expr_moved_if_ident(scopes, errors, &typed_val);
                 typed_val = TypedExpr::CoerceToDyn(Box::new(typed_val), t_name, span.clone());
             }
         }

@@ -50,10 +50,15 @@ pub fn type_check_field_access<'a>(
     let mut field_ty = Type::Int;
 
     let target_ty = type_ctx.infer.borrow_mut().resolve(t_target.ty());
-    let unwrapped_tuple = match target_ty {
-        Type::Ref(inner) | Type::MutRef(inner) => *inner,
-        other => other,
-    };
+    let mut unwrapped_tuple = target_ty;
+    while let Type::Ref(inner)
+    | Type::MutRef(inner)
+    | Type::Box(inner)
+    | Type::Rc(inner)
+    | Type::Arc(inner) = unwrapped_tuple
+    {
+        unwrapped_tuple = *inner;
+    }
     if let Type::Tuple(elems) = unwrapped_tuple {
         if let Ok(idx) = field_name.parse::<usize>() {
             if let Some(&elem_ty) = elems.get(idx) {
@@ -128,21 +133,41 @@ pub fn type_check_field_access<'a>(
             });
         }
     } else if field_name == "len" {
-        let clean_ty = match t_target.ty() {
-            Type::Ref(inner) | Type::MutRef(inner) => *inner,
-            other => other,
-        };
-        if matches!(clean_ty, Type::Vec(_) | Type::Slice(_) | Type::Array(_, _) | Type::String) || match &clean_ty { Type::Obj(s) => s.contains("Vec"), _ => false } {
-            return crate::sanal::calls::type_check_call(scopes, errors, type_ctx, "len", &[target.clone()], span);
+        let mut clean_ty = type_ctx.infer.borrow_mut().resolve(t_target.ty());
+        while let Type::Ref(inner)
+        | Type::MutRef(inner)
+        | Type::Box(inner)
+        | Type::Rc(inner)
+        | Type::Arc(inner) = clean_ty
+        {
+            clean_ty = *inner;
         }
-        errors.push(SemanticError {
-            code: "E0599",
-            message: format!("Cannot access field on non-object type {:?}", t_target.ty()),
-            label: "Not a struct object".to_string(),
-            secondary_label: None,
-            help: Some("Did you mean to call a method like `.len()` with parentheses?".to_string()),
-            span: span.clone(),
-        });
+        if matches!(clean_ty, Type::Slice(_) | Type::Array(_, _)) {
+            field_ty = Type::Int;
+        } else if matches!(clean_ty, Type::Vec(_) | Type::String | Type::Str)
+            || match &clean_ty {
+                Type::Obj(s) => s.contains("Vec"),
+                _ => false,
+            }
+        {
+            return crate::sanal::calls::type_check_call(
+                scopes,
+                errors,
+                type_ctx,
+                "len",
+                &[target.clone()],
+                span,
+            );
+        } else {
+            errors.push(SemanticError {
+                code: "E0599",
+                message: format!("Cannot access field on non-object type {:?}", t_target.ty()),
+                label: "Not a struct object".to_string(),
+                secondary_label: None,
+                help: Some("Did you mean to call a method like `.len()` with parentheses?".to_string()),
+                span: span.clone(),
+            });
+        }
     } else {
         errors.push(SemanticError {
             code: "E0599",
@@ -197,7 +222,7 @@ pub fn type_check_field_assign<'a>(
             });
         }
         if let Some(info) = scopes.lookup(var_name) {
-            if matches!(info.ty, Type::Ref(_)) {
+            if matches!(info.ty, Type::Ref(_) | Type::Rc(_) | Type::Arc(_)) {
                 errors.push(SemanticError {
                     code: "E0594",
                     message: format!("Cannot mutate field through immutable reference '{var_name}'"),
@@ -223,10 +248,10 @@ pub fn type_check_field_assign<'a>(
     }
 
     let resolved_target_ty = type_ctx.infer.borrow_mut().resolve(t_target.ty());
-    let unwrapped_tuple_assign = match resolved_target_ty {
-        Type::Ref(inner) | Type::MutRef(inner) => *inner,
-        other => other,
-    };
+    let mut unwrapped_tuple_assign = resolved_target_ty;
+    while let Type::Ref(inner) | Type::MutRef(inner) | Type::Box(inner) = unwrapped_tuple_assign {
+        unwrapped_tuple_assign = *inner;
+    }
     if let Type::Tuple(elems) = unwrapped_tuple_assign {
         if let Ok(idx) = field_name.parse::<usize>() {
             if let Some(&expected_ty) = elems.get(idx) {

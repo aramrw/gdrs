@@ -66,12 +66,9 @@ pub fn compile_ref<M: Module>(
             {
                 return compile_expr(builder, inner_expr, cg, module);
             }
-            let base_ptr = compile_expr(builder, target, cg, module);
+            let (base_ptr, unwrapped_target) =
+                crate::codegen::objects::unwrap_struct_base_ptr(builder, target, cg, module);
             let mut offset = 0i32;
-            let unwrapped_target = match target.ty() {
-                Type::Ref(inner) | Type::MutRef(inner) => *inner,
-                other => other,
-            };
             if let Type::Tuple(elems) = unwrapped_target {
                 if let Ok(idx) = field_name.parse::<usize>() {
                     let (_, _, offsets) =
@@ -100,9 +97,27 @@ pub fn compile_ref<M: Module>(
             }
         }
         TypedExpr::IndexAccess(target, idx, elem_ty, _) => {
-            crate::codegen::arrays::compile_index_addr(builder, target, idx, elem_ty, cg, module).0
+            if matches!(idx.as_ref(), TypedExpr::Range(..))
+                || matches!(elem_ty, Type::Slice(_) | Type::Str)
+            {
+                compile_expr(builder, inner_expr, cg, module)
+            } else {
+                crate::codegen::arrays::compile_index_addr(builder, target, idx, elem_ty, cg, module)
+                    .0
+            }
         }
-        TypedExpr::Deref(ptr_expr, _, _) => compile_expr(builder, ptr_expr, cg, module),
+        TypedExpr::Deref(ptr_expr, deref_ty, _) => {
+            let ptr_val = compile_expr(builder, ptr_expr, cg, module);
+            if matches!(ptr_expr.ty(), Type::Rc(_) | Type::Arc(_)) {
+                if is_aggregate_type(deref_ty, &cg.meta.struct_layouts, cg.meta.enum_layouts) {
+                    builder.ins().load(types::I64, MemFlags::new(), ptr_val, 8)
+                } else {
+                    builder.ins().iadd_imm(ptr_val, 8)
+                }
+            } else {
+                ptr_val
+            }
+        }
         _ => compile_expr(builder, inner_expr, cg, module),
     }
 }
@@ -114,6 +129,25 @@ pub fn compile_deref<M: Module>(
     cg: &mut CodegenCtx,
     module: &mut M,
 ) -> Value {
+    if matches!(inner_expr.ty(), Type::Box(_)) && !ty.is_copy() {
+        let ptr_val = compile_expr(builder, inner_expr, cg, module);
+        cg.cancel_temp(ptr_val);
+        let res_val = if is_aggregate_type(ty, &cg.meta.struct_layouts, cg.meta.enum_layouts) {
+            let (size, align) = size_and_align(ty, &cg.meta.struct_layouts, cg.meta.enum_layouts);
+            let (_, dst_addr) = crate::codegen::layout::alloc_stack_slot(builder, size, align);
+            emit_memcpy_bytes(builder, module, dst_addr, ptr_val, size);
+            dst_addr
+        } else {
+            let load_ty = cranelift_type_of(ty);
+            builder.ins().load(load_ty, MemFlags::new(), ptr_val, 0)
+        };
+        crate::codegen::drops::synthesis::emit_free_call(builder, ptr_val, module);
+        if let TypedExpr::Ident(b_name, _, _) = inner_expr {
+            cg.mark_moved(builder, b_name);
+        }
+        return res_val;
+    }
+
     let ptr_val = compile_expr(builder, inner_expr, cg, module);
     let is_rc_arc = matches!(inner_expr.ty(), Type::Rc(_) | Type::Arc(_));
     if is_aggregate_type(ty, &cg.meta.struct_layouts, cg.meta.enum_layouts) {
@@ -147,6 +181,7 @@ pub fn compile_deref_assign<M: Module>(
 
     let (is_rc_arc, inner_ty, drop_inner) = match ptr_expr.ty() {
         Type::Rc(inner) | Type::Arc(inner) => (true, *inner, Some(*inner)),
+        Type::Box(inner) => (false, *inner, Some(*inner)),
         Type::Ptr(inner) => (false, *inner, None),
         Type::MutRef(inner) => (false, *inner, Some(*inner)),
         _ => (false, val_expr.ty(), None),

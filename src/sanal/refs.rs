@@ -69,7 +69,43 @@ pub fn type_check_ref<'a>(
         }
     }
     let inner_ty = t_inner.ty();
-    let ref_ty = if is_mut {
+    let is_range_slice = matches!(
+        &t_inner,
+        TypedExpr::IndexAccess(_, idx, _, _)
+            if matches!(idx.as_ref(), TypedExpr::Range(..))
+                || matches!(idx.ty(), Type::Obj("Range"))
+    );
+    let ref_ty = if is_range_slice {
+        match inner_ty {
+            Type::Slice(elem_ty) => {
+                if is_mut {
+                    Type::MutRef(crate::ast::intern_type(Type::Slice(elem_ty)))
+                } else {
+                    Type::Slice(elem_ty)
+                }
+            }
+            Type::Str => {
+                if is_mut {
+                    errors.push(SemanticError {
+                        code: "E0596",
+                        message: "Cannot take a mutable slice of `str` or `String`".to_string(),
+                        label: "Mutable string slicing is not supported".to_string(),
+                        secondary_label: None,
+                        help: Some("Use an immutable slice `&s[start..end]` instead".to_string()),
+                        span: span.clone(),
+                    });
+                }
+                Type::Str
+            }
+            other => {
+                if is_mut {
+                    Type::MutRef(crate::ast::intern_type(other))
+                } else {
+                    Type::Ref(crate::ast::intern_type(other))
+                }
+            }
+        }
+    } else if is_mut {
         Type::MutRef(crate::ast::intern_type(inner_ty))
     } else {
         Type::Ref(crate::ast::intern_type(inner_ty))
@@ -90,7 +126,8 @@ pub fn type_check_deref<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_inner = type_check_expr(scopes, errors, type_ctx, inner)?;
-    match t_inner.ty() {
+    let resolved_inner_ty = type_ctx.infer.borrow_mut().resolve(t_inner.ty());
+    match resolved_inner_ty {
         Type::Ptr(inner_ty) => {
             if !type_ctx.is_unsafe {
                 errors.push(SemanticError {
@@ -116,13 +153,16 @@ pub fn type_check_deref<'a>(
                 Some(TypedExpr::Deref(Box::new(t_inner), *inner_ty, span.clone()))
             }
         }
+        Type::Box(inner_ty) => {
+            Some(TypedExpr::Deref(Box::new(t_inner), *inner_ty, span.clone()))
+        }
         Type::Rc(inner_ty) | Type::Arc(inner_ty) | Type::Ref(inner_ty) | Type::MutRef(inner_ty) => {
             if !inner_ty.is_copy() {
                 errors.push(SemanticError {
                     code: "E0507",
                     message: format!(
                         "Cannot move out of dereferenced `{:?}` which is not `Copy`",
-                        t_inner.ty()
+                        resolved_inner_ty
                     ),
                     label: "Cannot move out of borrowed/shared content".to_string(),
                     secondary_label: None,
@@ -138,7 +178,7 @@ pub fn type_check_deref<'a>(
                 message: format!("Cannot dereference type `{:?}`", other),
                 label: "Type cannot be dereferenced".to_string(),
                 secondary_label: None,
-                help: Some("Use raw pointer `*T`, `rc<T>`, `arc<T>`, or reference `&T`".to_string()),
+                help: Some("Use raw pointer `*T`, `Box<T>`, `Rc<T>`, `Arc<T>`, or reference `&T`".to_string()),
                 span: span.clone(),
             });
             Some(TypedExpr::Deref(
@@ -162,7 +202,8 @@ pub fn type_check_deref_assign<'a>(
     let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
     type_ctx.check_not_moved_from_projection(&t_val, errors);
     crate::sanal::compat::mark_expr_moved_if_ident(scopes, errors, &t_val);
-    match t_ptr.ty() {
+    let resolved_ptr_ty = type_ctx.infer.borrow_mut().resolve(t_ptr.ty());
+    match resolved_ptr_ty {
         Type::Ptr(inner_ty) => {
             if !type_ctx.is_unsafe {
                 errors.push(SemanticError {
@@ -209,7 +250,7 @@ pub fn type_check_deref_assign<'a>(
                 message: "Cannot assign through immutable reference `&T`".to_string(),
                 label: "Immutable reference cannot be mutated".to_string(),
                 secondary_label: None,
-                help: Some("Use `&mut T` or `rc<T>` / `arc<T>` if mutation is needed".to_string()),
+                help: Some("Use `&mut T` or `Box<T>` if mutation is needed".to_string()),
                 span: span.clone(),
             });
             Some(TypedExpr::DerefAssign(
@@ -218,16 +259,75 @@ pub fn type_check_deref_assign<'a>(
                 span.clone(),
             ))
         }
+        Type::Box(inner_ty) => {
+            if let Some(var_name) = crate::sanal::compat::extract_root_var(&t_ptr) {
+                if let Some((_, holder)) = scopes.active_borrow(var_name) {
+                    errors.push(SemanticError {
+                        code: "E0506",
+                        message: format!(
+                            "Cannot assign to `*{var_name}` because `{var_name}` is borrowed by `{holder}`"
+                        ),
+                        label: "Assignment while borrowed".to_string(),
+                        secondary_label: None,
+                        help: None,
+                        span: span.clone(),
+                    });
+                }
+                if let Some(info) = scopes.lookup(var_name) {
+                    if !info.is_mutable && !matches!(info.ty, Type::MutRef(_) | Type::Ptr(_)) {
+                        errors.push(SemanticError {
+                            code: "E0596",
+                            message: format!(
+                                "Cannot assign through immutable `Box` variable `{var_name}`"
+                            ),
+                            label: "Variable is immutable".to_string(),
+                            secondary_label: None,
+                            help: Some(format!("Declare as mutable: `let mut {var_name}`")),
+                            span: span.clone(),
+                        });
+                    }
+                }
+            }
+            let unify_res = type_ctx.infer.borrow_mut().unify(*inner_ty, t_val.ty());
+            let resolved_expected = type_ctx.infer.borrow_mut().resolve(*inner_ty);
+            let resolved_found = type_ctx.infer.borrow_mut().resolve(t_val.ty());
+            if unify_res.is_err()
+                && !crate::sanal::compat::is_type_compatible(&resolved_expected, &resolved_found)
+            {
+                errors.push(SemanticError {
+                    code: "E0308",
+                    message: format!(
+                        "Mismatched type in dereference assignment. `Box` holds `{:?}`, found `{:?}`",
+                        resolved_expected,
+                        resolved_found
+                    ),
+                    label: format!("Expected `{:?}`", resolved_expected),
+                    secondary_label: None,
+                    help: None,
+                    span: span.clone(),
+                });
+            }
+            Some(TypedExpr::DerefAssign(
+                Box::new(t_ptr),
+                Box::new(t_val),
+                span.clone(),
+            ))
+        }
         Type::Rc(inner_ty) | Type::Arc(inner_ty) | Type::MutRef(inner_ty) => {
-            if !crate::sanal::compat::is_type_compatible(inner_ty, &t_val.ty()) {
+            let unify_res = type_ctx.infer.borrow_mut().unify(*inner_ty, t_val.ty());
+            let resolved_expected = type_ctx.infer.borrow_mut().resolve(*inner_ty);
+            let resolved_found = type_ctx.infer.borrow_mut().resolve(t_val.ty());
+            if unify_res.is_err()
+                && !crate::sanal::compat::is_type_compatible(&resolved_expected, &resolved_found)
+            {
                 errors.push(SemanticError {
                     code: "E0308",
                     message: format!(
                         "Mismatched type in dereference assignment. Pointer holds `{:?}`, found `{:?}`",
-                        *inner_ty,
-                        t_val.ty()
+                        resolved_expected,
+                        resolved_found
                     ),
-                    label: format!("Expected `{:?}`", *inner_ty),
+                    label: format!("Expected `{:?}`", resolved_expected),
                     secondary_label: None,
                     help: None,
                     span: span.clone(),

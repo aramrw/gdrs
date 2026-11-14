@@ -10,6 +10,7 @@ pub struct VarInfo {
     pub ty: Type,
     pub is_moved: bool,
     pub from_caller: bool,
+    pub is_borrowed_self: bool,
 }
 
 /// A scope stack (symbol table) to manage nested lexical scopes, variable types, and mutability flags.
@@ -61,6 +62,23 @@ impl ScopeStack {
                     ty,
                     is_moved: false,
                     from_caller,
+                    is_borrowed_self: false,
+                },
+            );
+        }
+    }
+
+    /// Declares a borrowed non-consuming `self` parameter that may be read/matched without moving out of it.
+    pub fn declare_borrowed_self(&mut self, name: String, is_mutable: bool, ty: Type) {
+        if let Some(current_scope) = self.scopes.last_mut() {
+            current_scope.insert(
+                name,
+                VarInfo {
+                    is_mutable,
+                    ty,
+                    is_moved: false,
+                    from_caller: false,
+                    is_borrowed_self: true,
                 },
             );
         }

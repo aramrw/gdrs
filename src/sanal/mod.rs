@@ -21,8 +21,14 @@ use resolve::{resolve_type, substitute_self_type};
 pub(crate) fn type_contains_ref(ty: &Type) -> bool {
     match ty {
         Type::Ref(_) | Type::MutRef(_) => true,
-        Type::Ptr(t) | Type::Slice(t) | Type::Vec(t) | Type::Rc(t) | Type::Arc(t) => {
-            type_contains_ref(t)
+        Type::Ptr(t)
+        | Type::Slice(t)
+        | Type::Vec(t)
+        | Type::Box(t)
+        | Type::Rc(t)
+        | Type::Arc(t) => type_contains_ref(t),
+        Type::FnPtr(params, ret) => {
+            params.iter().any(type_contains_ref) || type_contains_ref(ret)
         }
         Type::Array(t, _) => type_contains_ref(t),
         Type::Tuple(tys) => tys.iter().any(type_contains_ref),
@@ -69,6 +75,8 @@ pub fn check_semantics(
     mono.impl_templates = program.impls.clone();
     let mono_cell = std::cell::RefCell::new(mono);
 
+    let enum_names: std::collections::HashSet<String> =
+        program.enums.iter().map(|e| e.name.clone()).collect();
     let mut struct_map = HashMap::new();
 
     for s in &program.structs {
@@ -100,7 +108,8 @@ pub fn check_semantics(
             let mut field_offsets = HashMap::new();
             let mut field_vis = HashMap::new();
             for field in &s.fields {
-                field_offsets.insert(field.name.clone(), (total_size, field.ty));
+                let resolved_field_ty = resolve_type(field.ty, &enum_names, field.span.clone(), &mut errors);
+                field_offsets.insert(field.name.clone(), (total_size, resolved_field_ty));
                 field_vis.insert(field.name.clone(), field.vis);
                 total_size += 8;
             }
@@ -118,8 +127,6 @@ pub fn check_semantics(
         }
     }
 
-    let enum_names: std::collections::HashSet<String> =
-        program.enums.iter().map(|e| e.name.clone()).collect();
     let mut enum_map = HashMap::new();
     let mut enum_vis_map = HashMap::new();
     for e in &program.enums {
@@ -199,9 +206,14 @@ pub fn check_semantics(
         } else {
             let mut variant_map = HashMap::new();
             for (i, variant) in e.variants.iter().enumerate() {
+                let resolved_payloads: Vec<Type> = variant
+                    .payload_types
+                    .iter()
+                    .map(|pt| resolve_type(*pt, &enum_names, variant.span.clone(), &mut errors))
+                    .collect();
                 variant_map.insert(
                     variant.name.clone(),
-                    (i as i64, variant.payload_types.clone()),
+                    (i as i64, resolved_payloads),
                 );
             }
             enum_map.insert(e.name.clone(), (intern_str(&e.name), variant_map));
@@ -222,8 +234,16 @@ pub fn check_semantics(
     fn type_contains_generic_decl(ty: &Type) -> bool {
         match ty {
             Type::Generic(_) => true,
-            Type::Ptr(t) | Type::Ref(t) | Type::MutRef(t) | Type::Slice(t) | Type::Vec(t) | Type::Rc(t) | Type::Arc(t) => {
-                type_contains_generic_decl(t)
+            Type::Ptr(t)
+            | Type::Ref(t)
+            | Type::MutRef(t)
+            | Type::Slice(t)
+            | Type::Vec(t)
+            | Type::Box(t)
+            | Type::Rc(t)
+            | Type::Arc(t) => type_contains_generic_decl(t),
+            Type::FnPtr(params, ret) => {
+                params.iter().any(type_contains_generic_decl) || type_contains_generic_decl(ret)
             }
             Type::Array(t, _) => type_contains_generic_decl(t),
             Type::Tuple(tys) => tys.iter().any(type_contains_generic_decl),
@@ -467,7 +487,10 @@ pub fn check_semantics(
             for req_m in &t_decl.methods {
                 let imp_m = impl_block.methods.iter().find(|m| m.name == req_m.name);
                 match imp_m {
-                    None if req_m.body.is_empty() => {
+                    None if req_m.body.is_empty()
+                        && !(impl_block.methods.is_empty()
+                            && (tr_name == "Debug" || tr_name.ends_with("_Debug"))) =>
+                    {
                         errors.push(SemanticError {
                             code: "E0046",
                             message: format!(
@@ -588,6 +611,28 @@ pub fn check_semantics(
         infer: &dummy_infer_cell,
     };
 
+    let ensure_layout_types_monomorphized = |ctx: &TypeCtx<'_>| {
+        let field_tys: Vec<Type> = ctx
+            .struct_map
+            .borrow()
+            .values()
+            .flat_map(|s| s.field_offsets.values().map(|(_, t)| *t))
+            .collect();
+        for ty in field_tys {
+            infer::ensure_concrete_monomorphized(ty, ctx);
+        }
+        let payload_tys: Vec<Type> = ctx
+            .enum_map
+            .borrow()
+            .values()
+            .flat_map(|(_, variants)| variants.values().flat_map(|(_, pts)| pts.iter().copied()))
+            .collect();
+        for ty in payload_tys {
+            infer::ensure_concrete_monomorphized(ty, ctx);
+        }
+    };
+    ensure_layout_types_monomorphized(&type_ctx);
+
     let mut processed_fn_names = std::collections::HashSet::new();
     let mut i = 0;
     while i < worklist_cell.borrow().len() {
@@ -619,10 +664,21 @@ pub fn check_semantics(
         fn_ctx.current_return_type = Some(resolved_return_type);
         fn_ctx.infer = &fn_infer_cell;
 
+        let fn_non_consuming_self = calls::validation::is_non_consuming_self_method(
+            &func.name,
+            &func.params,
+            resolved_return_type,
+            &trait_methods,
+            &trait_impls,
+        );
         for param in &func.params {
             let res_ty = param.ty;
-            let from_caller = matches!(res_ty, Type::Ref(_) | Type::MutRef(_));
-            scope_stack.declare_with_caller(param.name.clone(), param.is_mutable, res_ty, from_caller);
+            let from_caller = matches!(res_ty, Type::Ref(_) | Type::MutRef(_) | Type::Slice(_));
+            if param.name == "self" && !from_caller && fn_non_consuming_self {
+                scope_stack.declare_borrowed_self(param.name.clone(), param.is_mutable, res_ty);
+            } else {
+                scope_stack.declare_with_caller(param.name.clone(), param.is_mutable, res_ty, from_caller);
+            }
             resolved_params.push(Param {
                 name: param.name.clone(),
                 is_mutable: param.is_mutable,
@@ -662,7 +718,7 @@ pub fn check_semantics(
         if resolved_return_type != Type::Unit && !compat::definitely_returns(&typed_body) {
             if let Some(last) = typed_body.last() {
                 compat::consume_tail_expr(&mut scope_stack, &mut errors, &fn_ctx, last);
-                if matches!(resolved_return_type, Type::Ref(_) | Type::MutRef(_)) {
+                if control_flow::lifetimes::type_may_borrow(&resolved_return_type) {
                     control_flow::check_return_ref_lifetime(&scope_stack, last, &mut errors);
                 }
             }
@@ -710,6 +766,8 @@ pub fn check_semantics(
             is_track_caller: func.is_track_caller,
         });
     }
+
+    ensure_layout_types_monomorphized(&type_ctx);
 
     let final_struct_map = struct_map_cell.into_inner();
     let final_enum_map = enum_map_cell.into_inner();

@@ -146,7 +146,11 @@ pub fn load_program(entry_file: &Path) -> Result<(Program, SourceMap), String> {
         ("iter.gdrs", vec!["std".to_string(), "iter".to_string()]),
         ("convert.gdrs", vec!["std".to_string(), "convert".to_string()]),
         ("vec.gdrs", vec!["std".to_string(), "vec".to_string()]),
+        ("boxed.gdrs", vec!["std".to_string(), "boxed".to_string()]),
+        ("rc.gdrs", vec!["std".to_string(), "rc".to_string()]),
+        ("sync.gdrs", vec!["std".to_string(), "sync".to_string()]),
         ("string.gdrs", vec!["std".to_string(), "string".to_string()]),
+        ("fmt.gdrs", vec!["std".to_string(), "fmt".to_string()]),
         ("time.gdrs", vec!["std".to_string(), "time".to_string()]),
         ("env.gdrs", vec!["std".to_string(), "env".to_string()]),
         ("fs.gdrs", vec!["std".to_string(), "fs".to_string()]),
@@ -328,6 +332,11 @@ fn rewrite_type(
             rewrite_type(&mut inner, local_types, aliases, prefix);
             *ty = Type::MutRef(intern_type(inner));
         }
+        Type::Box(elem_ty) => {
+            let mut inner = **elem_ty;
+            rewrite_type(&mut inner, local_types, aliases, prefix);
+            *ty = Type::Box(intern_type(inner));
+        }
         Type::Rc(elem_ty) => {
             let mut inner = **elem_ty;
             rewrite_type(&mut inner, local_types, aliases, prefix);
@@ -337,6 +346,19 @@ fn rewrite_type(
             let mut inner = **elem_ty;
             rewrite_type(&mut inner, local_types, aliases, prefix);
             *ty = Type::Arc(intern_type(inner));
+        }
+        Type::FnPtr(params, ret) => {
+            let rewritten_params: Vec<Type> = params
+                .iter()
+                .map(|p| {
+                    let mut copy = *p;
+                    rewrite_type(&mut copy, local_types, aliases, prefix);
+                    copy
+                })
+                .collect();
+            let mut rewritten_ret = **ret;
+            rewrite_type(&mut rewritten_ret, local_types, aliases, prefix);
+            *ty = Type::FnPtr(intern_tuple(&rewritten_params), intern_type(rewritten_ret));
         }
         Type::Int
         | Type::I32

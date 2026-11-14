@@ -1,0 +1,3 @@
+// std/rc.gdrs - Single-threaded reference-counting pointer Rc<T>
+pub obj Rc:
+	ptr: *u8

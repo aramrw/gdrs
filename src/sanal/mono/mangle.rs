@@ -39,8 +39,13 @@ pub fn type_suffix(ty: &Type) -> String {
         }
         Type::Slice(t) => format!("slice_{}", type_suffix(t)),
         Type::Vec(t) => format!("vec_{}", type_suffix(t)),
+        Type::Box(t) => format!("box_{}", type_suffix(t)),
         Type::Rc(t) => format!("rc_{}", type_suffix(t)),
         Type::Arc(t) => format!("arc_{}", type_suffix(t)),
+        Type::FnPtr(params, ret) => {
+            let ps: Vec<String> = params.iter().map(type_suffix).collect();
+            format!("fn_{}_ret_{}", ps.join("_"), type_suffix(ret))
+        }
         Type::Void => "void".to_string(),
         Type::Ptr(t) => format!("ptr_{}", type_suffix(t)),
         Type::Ref(t) => format!("ref_{}", type_suffix(t)),

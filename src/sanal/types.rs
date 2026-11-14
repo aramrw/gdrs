@@ -95,8 +95,19 @@ impl<'a> TypeCtx<'a> {
             Type::Ptr(elem) => Type::Ptr(crate::ast::intern_type(self.resolve_type_annotation(*elem))),
             Type::Ref(elem) => Type::Ref(crate::ast::intern_type(self.resolve_type_annotation(*elem))),
             Type::MutRef(elem) => Type::MutRef(crate::ast::intern_type(self.resolve_type_annotation(*elem))),
+            Type::Box(elem) => Type::Box(crate::ast::intern_type(self.resolve_type_annotation(*elem))),
             Type::Rc(elem) => Type::Rc(crate::ast::intern_type(self.resolve_type_annotation(*elem))),
             Type::Arc(elem) => Type::Arc(crate::ast::intern_type(self.resolve_type_annotation(*elem))),
+            Type::FnPtr(params, ret) => {
+                let resolved_params: Vec<Type> = params
+                    .iter()
+                    .map(|p| self.resolve_type_annotation(*p))
+                    .collect();
+                Type::FnPtr(
+                    crate::ast::intern_tuple(&resolved_params),
+                    crate::ast::intern_type(self.resolve_type_annotation(*ret)),
+                )
+            }
             other => other,
         }
     }
@@ -107,6 +118,7 @@ impl<'a> TypeCtx<'a> {
                 | Type::Vec(_)
                 | Type::Array(..)
                 | Type::DynTrait(_)
+                | Type::Box(_)
                 | Type::Rc(_)
                 | Type::Arc(_) => true,
                 Type::Tuple(elems) => elems.iter().any(|e| inner(ctx, e, visited)),
@@ -433,7 +445,15 @@ pub fn type_check_expr<'a>(
         Expr::String(s, span) => Some(TypedExpr::String(s.clone(), span.clone())),
         Expr::Range(start, end, span) => {
             let t_start = type_check_expr(scopes, errors, type_ctx, start)?;
-            let t_end = type_check_expr(scopes, errors, type_ctx, end)?;
+            let t_end = if let Expr::Ident(end_name, end_span) = end.as_ref() {
+                if end_name == "__slice_len__" {
+                    TypedExpr::Ident(end_name.clone(), Type::Int, end_span.clone())
+                } else {
+                    type_check_expr(scopes, errors, type_ctx, end)?
+                }
+            } else {
+                type_check_expr(scopes, errors, type_ctx, end)?
+            };
             Some(TypedExpr::Range(
                 Box::new(t_start),
                 Box::new(t_end),
@@ -511,6 +531,15 @@ pub fn type_check_expr<'a>(
         Expr::DerefAssign(ptr, val, span) => refs::type_check_deref_assign(scopes, errors, type_ctx, ptr, val, span),
         Expr::Cast(inner, target_ty, span) => {
             let t_inner = type_check_expr(scopes, errors, type_ctx, inner)?;
+            if let Type::DynTrait(t_name) = type_ctx.resolve_type_annotation(*target_ty) {
+                let inner_ty = type_ctx.infer.borrow_mut().resolve(t_inner.ty());
+                if !matches!(inner_ty, Type::DynTrait(_)) {
+                    type_ctx.validate_dyn_coercion(&inner_ty, t_name, span, errors);
+                    type_ctx.check_not_moved_from_projection(&t_inner, errors);
+                    crate::sanal::compat::mark_expr_moved_if_ident(scopes, errors, &t_inner);
+                    return Some(TypedExpr::CoerceToDyn(Box::new(t_inner), t_name, span.clone()));
+                }
+            }
             Some(TypedExpr::Cast(Box::new(t_inner), *target_ty, span.clone()))
         }
     }

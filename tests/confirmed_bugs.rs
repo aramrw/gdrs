@@ -569,3 +569,400 @@ DYLD_INTERPOSE(oom_malloc, malloc)
         combined_output(&run_out)
     );
 }
+
+/// src/sanal/mod.rs & src/sanal/mono/instances.rs:
+/// Struct fields and enum payloads holding `enum` types (including generic enums like `Option<String>`)
+/// stayed `Type::Obj(enum_name)` or remained unmonomorphized during layout synthesis, leaking 100%.
+#[cfg(target_os = "macos")]
+#[test]
+fn confirmed_bug_struct_and_enum_holding_enum_leak() {
+    let make_src = |n: usize| {
+        format!(
+            r#"
+use std::string::String
+
+obj Holder:
+	s: Option<String>
+
+enum Wrap:
+	Has(Option<String>)
+	Empty
+
+fn main():
+	let mut i = 0
+	while i < {n}:
+		let h = Holder {{ s: Option::Some(String::from("hello world heap payload")) }}
+		let w = Wrap::Has(Option::Some(String::from("nested enum heap payload")))
+		i = i + 1
+"#
+        )
+    };
+    let net_small = measure_net_allocs_macos(&make_src, 10, &[]);
+    let net_large = measure_net_allocs_macos(&make_src, 210, &[]);
+    let leaked = net_large - net_small;
+    assert!(
+        leaked < 50,
+        "Expected nested enum fields/payloads in structs and enums not to leak, leaked {leaked} allocations over 200 iterations"
+    );
+}
+
+/// src/sanal/control_flow/try_op.rs:
+/// `?` on non-Copy `Result<T, E>` failed to mark the scrutinee moved or reject moving out of a projection.
+#[test]
+fn confirmed_bug_try_operator_use_after_move_and_projection_move() {
+    let out_uam = run_gdrs_source(
+        "try_uam",
+        r#"
+use std::string::String
+
+fn consume(s: String):
+	log!("{}", s.len())
+
+fn test_try(r: Result<String, i64>) -> Result<i64, i64>:
+	let a = r?
+	consume(a)
+	let b = r?
+	consume(b)
+	return Result::Ok(1)
+
+fn main():
+	let _ = test_try(Result::Ok(String::from("hello")))
+"#,
+    );
+    assert!(
+        !out_uam.status.success() && combined_output(&out_uam).contains("E0382"),
+        "Expected E0382 use-after-move on repeated `?` of Result<String, i64>, got:\n{}",
+        combined_output(&out_uam)
+    );
+
+    let out_proj = run_gdrs_source(
+        "try_proj",
+        r#"
+use std::string::String
+
+obj Holder:
+	res: Result<String, i64>
+
+fn test_proj(h: Holder) -> Result<i64, i64>:
+	let s = h.res?
+	log!("{}", s.len())
+	return Result::Ok(1)
+
+fn main():
+	let h = Holder { res: Result::Ok(String::from("hello")) }
+	let _ = test_proj(h)
+"#,
+    );
+    assert!(
+        !out_proj.status.success() && combined_output(&out_proj).contains("E0507"),
+        "Expected E0507 when `?` moves non-Copy payload out of field projection, got:\n{}",
+        combined_output(&out_proj)
+    );
+}
+
+/// src/sanal/control_flow/patterns.rs & src/sanal/scope.rs:
+/// `match self:` inside a consuming method did not mark `self` moved, enabling double-free on second match/use.
+#[test]
+fn confirmed_bug_match_self_consuming_method_use_after_move() {
+    let out = run_gdrs_source(
+        "match_self_uam",
+        r#"
+use std::string::String
+
+enum E:
+	A(String)
+	B
+
+impl E:
+	fn bad(self):
+		match self:
+			E::A(s) => log!("first {}", s.len())
+			E::B => log!("b")
+		match self:
+			E::A(s2) => log!("second {}", s2.len())
+			E::B => log!("b2")
+
+fn main():
+	let e = E::A(String::from("boom"))
+	e.bad()
+"#,
+    );
+    assert!(
+        !out.status.success() && combined_output(&out).contains("E0382"),
+        "Expected E0382 when `match self:` consumes `self` twice, got:\n{}",
+        combined_output(&out)
+    );
+}
+
+/// src/sanal/calls/mod.rs & src/codegen/calls.rs:
+/// Consuming `self` trait-object calls double-freed even on a single call and allowed use-after-move.
+#[test]
+fn confirmed_bug_dyn_trait_consuming_self_drop_count_and_uam() {
+    let single_out = run_gdrs_source(
+        "dyn_consume_once",
+        r#"
+use std::string::String
+
+trait Take:
+	fn into_str(self) -> String
+
+obj Hold:
+	id: i64
+	s: String
+
+impl Drop for Hold:
+	fn drop(&mut self):
+		log!("drop_h {}", self.id)
+
+impl Take for Hold:
+	fn into_str(self) -> String:
+		return String::from(self.s.as_str())
+
+fn main():
+	let h = Hold { id: 77, s: String::from("ok") }
+	let d: dyn Take = h as dyn Take
+	let out = d.into_str()
+	log!("len={}", out.len())
+"#,
+    );
+    let combined_single = combined_output(&single_out);
+    let drop_count = combined_single.matches("drop_h 77").count();
+    assert!(
+        single_out.status.success() && combined_single.contains("len=2") && drop_count == 1,
+        "Expected single `d.into_str()` to succeed and drop Hold once (got {drop_count}):\n{combined_single}"
+    );
+
+    let double_out = run_gdrs_source(
+        "dyn_consume_twice",
+        r#"
+use std::string::String
+
+trait Take:
+	fn into_str(self) -> String
+
+obj Hold:
+	s: String
+
+impl Take for Hold:
+	fn into_str(self) -> String:
+		return String::from(self.s.as_str())
+
+fn main():
+	let d: dyn Take = Hold { s: String::from("ok") } as dyn Take
+	let a = d.into_str()
+	let b = d.into_str()
+	log!("{} {}", a.len(), b.len())
+"#,
+    );
+    assert!(
+        !double_out.status.success() && combined_output(&double_out).contains("E0382"),
+        "Expected E0382 on second consuming `dyn Take` call, got:\n{}",
+        combined_output(&double_out)
+    );
+
+    let borrow_out = run_gdrs_source(
+        "dyn_consume_through_ref",
+        r#"
+use std::string::String
+
+trait Take:
+	fn into_str(self) -> String
+
+obj Hold:
+	s: String
+
+impl Take for Hold:
+	fn into_str(self) -> String:
+		return String::from(self.s.as_str())
+
+fn call_ref(d: &dyn Take):
+	let _ = d.into_str()
+
+fn main():
+	let d: dyn Take = Hold { s: String::from("ok") } as dyn Take
+	call_ref(&d)
+"#,
+    );
+    assert!(
+        !borrow_out.status.success() && combined_output(&borrow_out).contains("E0507"),
+        "Expected E0507 when calling consuming dyn method through `&dyn Take`, got:\n{}",
+        combined_output(&borrow_out)
+    );
+}
+
+/// src/sanal/mod.rs, src/sanal/scope.rs & src/sanal/compat.rs:
+/// Trait/display methods that treat bare `self` as borrowed at call sites must not move `self` internally.
+#[test]
+fn confirmed_bug_non_consuming_self_cannot_move_self() {
+    let out = run_gdrs_source(
+        "borrowed_self_move",
+        r#"
+use std::string::String
+
+trait Score:
+	fn score(self) -> i64
+
+obj Boxed:
+	name: String
+
+fn consume(b: Boxed):
+	log!("{}", b.name.len())
+
+impl Score for Boxed:
+	fn score(self) -> i64:
+		consume(self)
+		return 1
+
+fn main():
+	let b = Boxed { name: String::from("hi") }
+	log!("{}", b.score())
+"#,
+    );
+    assert!(
+        !out.status.success() && combined_output(&out).contains("E0507"),
+        "Expected E0507 when non-consuming `self` method moves `self`, got:\n{}",
+        combined_output(&out)
+    );
+}
+
+/// src/sanal/control_flow/lifetimes.rs & blocks.rs:
+/// Returning `str` or `VecIter<T>` derived from locals/temporaries escaped dangling pointers.
+#[test]
+fn confirmed_bug_return_local_as_str_and_vec_iter() {
+    let out_temp_str = run_gdrs_source(
+        "return_temp_as_str",
+        r#"
+use std::string::String
+
+fn bad() -> str:
+	return String::from("ephemeral").as_str()
+
+fn main():
+	log!("{}", bad())
+"#,
+    );
+    assert!(
+        !out_temp_str.status.success() && combined_output(&out_temp_str).contains("E0515"),
+        "Expected E0515 returning temp String.as_str(), got:\n{}",
+        combined_output(&out_temp_str)
+    );
+
+    let out_local_str = run_gdrs_source(
+        "return_local_as_str",
+        r#"
+use std::string::String
+
+fn bad() -> str:
+	let s = String::from("local")
+	let p = s.as_str()
+	return p
+
+fn main():
+	log!("{}", bad())
+"#,
+    );
+    assert!(
+        !out_local_str.status.success() && combined_output(&out_local_str).contains("E0515"),
+        "Expected E0515 returning local String slice binding, got:\n{}",
+        combined_output(&out_local_str)
+    );
+
+    let out_vec_iter = run_gdrs_source(
+        "return_local_vec_iter",
+        r#"
+use std::vec::Vec
+use std::vec::VecIter
+
+fn bad() -> VecIter<i64>:
+	let v: Vec<i64> = Vec::new()
+	v.push(123)
+	return v.iter()
+
+fn main():
+	let _ = bad()
+"#,
+    );
+    assert!(
+        !out_vec_iter.status.success() && combined_output(&out_vec_iter).contains("E0515"),
+        "Expected E0515 returning VecIter of local Vec, got:\n{}",
+        combined_output(&out_vec_iter)
+    );
+
+    let ok_param_borrow = run_gdrs_source(
+        "return_param_as_str_ok",
+        r#"
+use std::string::String
+
+fn view(s: &String) -> str:
+	let sub = s.as_str()
+	return sub
+
+fn main():
+	let s = String::from("hello")
+	log!("v={}", view(&s))
+"#,
+    );
+    let combined_ok = combined_output(&ok_param_borrow);
+    assert!(
+        ok_param_borrow.status.success() && combined_ok.contains("v=hello"),
+        "Expected borrowing from `&String` parameter via local binding to compile & run, got:\n{combined_ok}"
+    );
+}
+
+/// std/string.gdrs: `String::new().as_str()` previously cast `ptr == NULL` to `str`, crashing `strlen`.
+#[test]
+fn confirmed_bug_empty_string_as_str_non_null() {
+    let out = run_gdrs_source(
+        "empty_string_as_str",
+        r#"
+use std::string::String
+
+extern "C":
+	fn strlen(s: str) -> u64
+
+fn main():
+	let s = String::new()
+	let p = s.as_str()
+	let mut n = 0
+	unsafe:
+		n = strlen(p) as i64
+	log!("len={} eq={}", n, p == "")
+"#,
+    );
+    let combined = combined_output(&out);
+    assert!(
+        out.status.success() && combined.contains("len=0 eq=true"),
+        "Expected `String::new().as_str()` to return valid non-null `\"\"`, got:\n{combined}"
+    );
+}
+
+/// src/codegen/intrinsics/macros.rs:
+/// Named functions returning Indirect (`sret`) structs like `String` spawned via `thread!(f, arg)`
+/// skipped trampoline synthesis, corrupting `sret` and crashing child threads.
+#[test]
+fn confirmed_bug_thread_named_fn_sret_no_crash() {
+    let out = run_gdrs_source(
+        "thread_named_fn_sret",
+        r#"
+use std::string::String
+
+extern "C":
+	fn usleep(usec: u32) -> i32
+
+fn ret_str(x: i64) -> String:
+	log!("arg={}", x)
+	return String::from("threaded_sret_value")
+
+fn main():
+	let _ = thread!(ret_str, 42)
+	unsafe:
+		let _ = usleep(50000 as u32)
+	log!("done")
+"#,
+    );
+    let combined = combined_output(&out);
+    assert!(
+        out.status.success() && combined.contains("arg=42") && combined.contains("done"),
+        "Expected `thread!(ret_str, 42)` to pass arg=42 and handle sret cleanly, got:\n{combined}"
+    );
+}

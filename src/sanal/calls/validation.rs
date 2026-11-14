@@ -6,6 +6,42 @@ use crate::{
     sanal::{types::TypeCtx, ScopeStack, SemanticError},
 };
 
+/// Returns true when a method's `self` parameter acts as an implicit borrow rather than moving ownership.
+pub fn is_non_consuming_self_method(
+    fn_name: &str,
+    params: &[crate::ast::Param],
+    return_type: Type,
+    trait_methods: &std::collections::HashMap<String, Vec<(String, Vec<Type>, Type)>>,
+    trait_impls: &std::collections::HashSet<(String, String)>,
+) -> bool {
+    let is_non_drop_trait_copy_method = !params.is_empty()
+        && params[0].name == "self"
+        && return_type != Type::Unit
+        && return_type.is_copy()
+        && fn_name.rsplit_once('_').is_some_and(|(ty_prefix, m_name)| {
+            trait_impls.iter().any(|(imp_ty, tr_name)| {
+                !tr_name.ends_with("Drop")
+                    && *tr_name != "Drop"
+                    && (imp_ty == ty_prefix
+                        || ty_prefix.ends_with(&format!("_{imp_ty}"))
+                        || imp_ty.ends_with(&format!("_{ty_prefix}")))
+                    && trait_methods
+                        .get(tr_name)
+                        .or_else(|| {
+                            trait_methods
+                                .iter()
+                                .find(|(k, _)| k.ends_with(&format!("_{tr_name}")))
+                                .map(|(_, v)| v)
+                        })
+                        .is_some_and(|ms| ms.iter().any(|(mn, _, _)| mn == m_name))
+            })
+        });
+    fn_name.ends_with("_drop")
+        || fn_name.ends_with("_fmt")
+        || (fn_name.ends_with("_to_string") && !fn_name.ends_with("read_to_string"))
+        || is_non_drop_trait_copy_method
+}
+
 pub fn validate_call_arguments<'a>(
     target_func: &FuncDecl,
     typed_args: &mut Vec<TypedExpr>,
@@ -38,35 +74,13 @@ pub fn validate_call_arguments<'a>(
         });
     }
     if target_func.params.len() == typed_args.len() {
-        let is_non_drop_trait_copy_method = !target_func.params.is_empty()
-            && target_func.params[0].name == "self"
-            && target_func.return_type != Type::Unit
-            && target_func.return_type.is_copy()
-            && resolved_name.rsplit_once('_').is_some_and(|(ty_prefix, m_name)| {
-                type_ctx.trait_impls.iter().any(|(imp_ty, tr_name)| {
-                    !tr_name.ends_with("Drop")
-                        && *tr_name != "Drop"
-                        && (imp_ty == ty_prefix
-                            || ty_prefix.ends_with(&format!("_{imp_ty}"))
-                            || imp_ty.ends_with(&format!("_{ty_prefix}")))
-                        && type_ctx
-                            .trait_methods
-                            .get(tr_name)
-                            .or_else(|| {
-                                type_ctx
-                                    .trait_methods
-                                    .iter()
-                                    .find(|(k, _)| k.ends_with(&format!("_{tr_name}")))
-                                    .map(|(_, v)| v)
-                            })
-                            .is_some_and(|ms| ms.iter().any(|(mn, _, _)| mn == m_name))
-                })
-            });
-        let is_non_consuming_self_fn = resolved_name.ends_with("_drop")
-            || resolved_name.ends_with("_fmt")
-            || (resolved_name.ends_with("_to_string")
-                && !resolved_name.ends_with("read_to_string"))
-            || is_non_drop_trait_copy_method;
+        let is_non_consuming_self_fn = is_non_consuming_self_method(
+            resolved_name,
+            &target_func.params,
+            target_func.return_type,
+            type_ctx.trait_methods,
+            type_ctx.trait_impls,
+        );
         let mut call_borrows: Vec<(String, bool)> = Vec::new();
         let mut call_moved: Vec<String> = Vec::new();
         let mut call_val_reads: Vec<String> = Vec::new();
@@ -82,6 +96,110 @@ pub fn validate_call_arguments<'a>(
             } else {
                 !param.ty.is_copy() && !matches!(param.ty, Type::Ref(_) | Type::MutRef(_))
             };
+
+            // Auto-deref smart pointer receiver (`Box<T>`, `Rc<T>`, `Arc<T>`) when method expects `T`, `&T`, or `&mut T`,
+            // or Deref coercion on `&Box<T>` / `&Rc<T>` / `&Arc<T>` -> `&T` (and `&mut Box<T>` -> `&mut T`) for any argument.
+            {
+                let resolved_arg_ty = type_ctx.infer.borrow_mut().resolve(arg.ty());
+                let resolved_param_ty = type_ctx.infer.borrow_mut().resolve(param.ty);
+                let param_unwrapped = match resolved_param_ty {
+                    Type::Ref(inner) | Type::MutRef(inner) => *inner,
+                    other => other,
+                };
+                if !matches!(param_unwrapped, Type::Box(_) | Type::Rc(_) | Type::Arc(_)) {
+                    if is_receiver {
+                        let smart_inner = match resolved_arg_ty {
+                            Type::Box(inner) | Type::Rc(inner) | Type::Arc(inner) => {
+                                Some((resolved_arg_ty, *inner, false))
+                            }
+                            Type::Ref(outer) | Type::MutRef(outer) => match *outer {
+                                Type::Box(inner) | Type::Rc(inner) | Type::Arc(inner) => {
+                                    Some((*outer, *inner, true))
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some((smart_ty, inner_ty, was_ref)) = smart_inner {
+                            if matches!(smart_ty, Type::Rc(_) | Type::Arc(_))
+                                && matches!(resolved_param_ty, Type::MutRef(_))
+                            {
+                                errors.push(SemanticError {
+                                    code: "E0596",
+                                    message: format!(
+                                        "Cannot borrow content of `{}` as mutable",
+                                        crate::sanal::compat::format_type(&smart_ty)
+                                    ),
+                                    label: "Shared smart pointer cannot be mutably borrowed".to_string(),
+                                    secondary_label: None,
+                                    help: Some("Use `Box<T>` or an owned `mut` binding for mutation".to_string()),
+                                    span: arg.span(),
+                                });
+                            }
+                            if matches!(smart_ty, Type::Rc(_) | Type::Arc(_)) && param_moves_arg {
+                                errors.push(SemanticError {
+                                    code: "E0507",
+                                    message: format!(
+                                        "Cannot move out of `{}` in consuming method `{resolved_name}`",
+                                        crate::sanal::compat::format_type(&smart_ty)
+                                    ),
+                                    label: "Cannot move out of shared pointer".to_string(),
+                                    secondary_label: None,
+                                    help: None,
+                                    span: arg.span(),
+                                });
+                            }
+                            let arg_span = arg.span();
+                            let base_smart = if was_ref {
+                                TypedExpr::Deref(Box::new(arg.clone()), smart_ty, arg_span.clone())
+                            } else {
+                                arg.clone()
+                            };
+                            *arg = TypedExpr::Deref(Box::new(base_smart), inner_ty, arg_span);
+                        }
+                    } else if matches!(resolved_param_ty, Type::Ref(_) | Type::MutRef(_)) {
+                        if let Type::Ref(outer) | Type::MutRef(outer) = resolved_arg_ty {
+                            if let Type::Box(inner) | Type::Rc(inner) | Type::Arc(inner) = *outer {
+                                let is_mut_param = matches!(resolved_param_ty, Type::MutRef(_));
+                                if is_mut_param && matches!(*outer, Type::Rc(_) | Type::Arc(_)) {
+                                    errors.push(SemanticError {
+                                        code: "E0596",
+                                        message: format!(
+                                            "Cannot borrow content of `{}` as mutable",
+                                            crate::sanal::compat::format_type(outer)
+                                        ),
+                                        label: "Shared smart pointer cannot be mutably borrowed"
+                                            .to_string(),
+                                        secondary_label: None,
+                                        help: None,
+                                        span: arg.span(),
+                                    });
+                                }
+                                let arg_span = arg.span();
+                                let smart_expr = match arg.clone() {
+                                    TypedExpr::Ref(inner_e, _, _, _) => *inner_e,
+                                    other => {
+                                        TypedExpr::Deref(Box::new(other), *outer, arg_span.clone())
+                                    }
+                                };
+                                let derefed_inner =
+                                    TypedExpr::Deref(Box::new(smart_expr), *inner, arg_span.clone());
+                                let coerced_ref_ty = if is_mut_param {
+                                    Type::MutRef(inner)
+                                } else {
+                                    Type::Ref(inner)
+                                };
+                                *arg = TypedExpr::Ref(
+                                    Box::new(derefed_inner),
+                                    is_mut_param,
+                                    coerced_ref_ty,
+                                    arg_span,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
 
             // Check cross-argument aliasing and move conflicts within this call
             match param.ty {
@@ -209,12 +327,7 @@ pub fn validate_call_arguments<'a>(
 
             if param_moves_arg {
                 type_ctx.check_not_moved_from_projection(arg, errors);
-                if let TypedExpr::Ident(arg_name, _, arg_span) = arg {
-                    crate::sanal::compat::check_not_borrowed_on_move(
-                        scopes, errors, arg_name, arg_span,
-                    );
-                    scopes.mark_moved(arg_name);
-                }
+                crate::sanal::compat::mark_expr_moved_if_ident(scopes, errors, arg);
             }
             let mut reported_borrow_err = false;
             match (param.ty, arg.ty()) {
@@ -344,10 +457,21 @@ pub fn validate_call_arguments<'a>(
                 type_ctx.validate_dyn_coercion(&arg.ty(), t_name, &arg.span(), errors);
                 *arg = TypedExpr::CoerceToDyn(Box::new(arg.clone()), t_name, span.clone());
             }
-            if !reported_borrow_err {
-                let unify_res = type_ctx.infer.borrow_mut().unify(param.ty, arg.ty());
-                let resolved_param = type_ctx.infer.borrow_mut().resolve(param.ty);
-                let resolved_arg = type_ctx.infer.borrow_mut().resolve(arg.ty());
+                let is_slice_iter_call = is_receiver
+                    && (resolved_name.ends_with("_into_iter") || resolved_name.ends_with("_iter"))
+                    && matches!(
+                        arg.ty(),
+                        Type::Slice(_)
+                            | Type::Array(_, _)
+                            | Type::Ref(Type::Slice(_))
+                            | Type::MutRef(Type::Slice(_))
+                            | Type::Ref(Type::Array(_, _))
+                            | Type::MutRef(Type::Array(_, _))
+                    );
+                if !reported_borrow_err && !is_slice_iter_call {
+                    let unify_res = type_ctx.infer.borrow_mut().unify(param.ty, arg.ty());
+                    let resolved_param = type_ctx.infer.borrow_mut().resolve(param.ty);
+                    let resolved_arg = type_ctx.infer.borrow_mut().resolve(arg.ty());
                 let is_string_borrow_as_str = resolved_param == Type::Str
                     && matches!(
                         resolved_arg,

@@ -135,6 +135,16 @@ pub fn expand_derives(program: &mut Program) {
             });
         }
 
+        if has_derive(&e.attributes, "Debug") {
+            synthesized_impls.push(ImplDecl {
+                trait_name: Some("Debug".to_string()),
+                target_type: e.name.clone(),
+                methods: Vec::new(),
+                where_clause: e.where_clause.clone(),
+                span: e.span.clone(),
+            });
+        }
+
         let has_derive_error = has_derive(&e.attributes, "Error");
 
         if has_derive_error {
@@ -306,6 +316,16 @@ pub fn expand_derives(program: &mut Program) {
                 target_type: s.name.clone(),
                 methods: Vec::new(),
                 where_clause: None,
+                span: s.span.clone(),
+            });
+        }
+
+        if has_derive(&s.attributes, "Debug") {
+            synthesized_impls.push(ImplDecl {
+                trait_name: Some("Debug".to_string()),
+                target_type: s.name.clone(),
+                methods: Vec::new(),
+                where_clause: s.where_clause.clone(),
                 span: s.span.clone(),
             });
         }

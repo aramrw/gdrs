@@ -60,9 +60,22 @@ pub fn collect_generics_from_type(ty: &Type, params: &mut Vec<String>) {
                 params.push(clean);
             }
         }
-        Type::Ref(inner) | Type::MutRef(inner) | Type::Rc(inner) | Type::Arc(inner)
-        | Type::Ptr(inner) | Type::Vec(inner) | Type::Slice(inner) | Type::Array(inner, _) => {
+        Type::Ref(inner)
+        | Type::MutRef(inner)
+        | Type::Box(inner)
+        | Type::Rc(inner)
+        | Type::Arc(inner)
+        | Type::Ptr(inner)
+        | Type::Vec(inner)
+        | Type::Slice(inner)
+        | Type::Array(inner, _) => {
             collect_generics_from_type(inner, params);
+        }
+        Type::FnPtr(ps, ret) => {
+            for p in *ps {
+                collect_generics_from_type(p, params);
+            }
+            collect_generics_from_type(ret, params);
         }
         Type::Tuple(elems) => {
             for e in *elems {
@@ -93,11 +106,19 @@ pub fn substitute_type(ty: Type, env: &HashMap<String, Type>) -> Type {
         Type::Ptr(inner) => Type::Ptr(intern_type(substitute_type(*inner, env))),
         Type::Ref(inner) => Type::Ref(intern_type(substitute_type(*inner, env))),
         Type::MutRef(inner) => Type::MutRef(intern_type(substitute_type(*inner, env))),
+        Type::Box(inner) => Type::Box(intern_type(substitute_type(*inner, env))),
         Type::Rc(inner) => Type::Rc(intern_type(substitute_type(*inner, env))),
         Type::Arc(inner) => Type::Arc(intern_type(substitute_type(*inner, env))),
         Type::Vec(inner) => Type::Vec(intern_type(substitute_type(*inner, env))),
         Type::Slice(inner) => Type::Slice(intern_type(substitute_type(*inner, env))),
         Type::Array(inner, len) => Type::Array(intern_type(substitute_type(*inner, env)), len),
+        Type::FnPtr(params, ret) => {
+            let sub_params: Vec<Type> = params.iter().map(|p| substitute_type(*p, env)).collect();
+            Type::FnPtr(
+                crate::ast::intern_tuple(&sub_params),
+                intern_type(substitute_type(*ret, env)),
+            )
+        }
         Type::Tuple(elems) => {
             let sub: Vec<Type> = elems.iter().map(|e| substitute_type(*e, env)).collect();
             Type::Tuple(crate::ast::intern_tuple(&sub))

@@ -42,10 +42,20 @@ pub fn type_check_match<'a>(
         }
     };
 
-    let variant_info = type_ctx.get_enum(enum_name);
+    let variant_info = type_ctx.get_enum(enum_name).or_else(|| {
+        if enum_name.starts_with("std_core_Option") || enum_name.starts_with("Option") {
+            type_ctx
+                .get_enum("std_core_Option")
+                .or_else(|| type_ctx.get_enum("Option"))
+        } else {
+            None
+        }
+    });
     let can_move_target = !is_ref_target
         && match &t_target {
-            TypedExpr::Ident(name, _, _) if name != "self" => true,
+            TypedExpr::Ident(name, _, _) => {
+                !scopes.lookup(name).is_some_and(|i| i.is_borrowed_self)
+            }
             _ => false,
         };
     if can_move_target {

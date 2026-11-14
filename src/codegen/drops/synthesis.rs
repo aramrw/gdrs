@@ -46,6 +46,68 @@ pub fn resolve_or_synthesize_drop_fn<M: Module>(
         .ok();
     }
 
+    if let Type::Box(inner_ty) = ty {
+        let inner_ty = **inner_ty;
+        let synth_name = format!("__gdrs_drop_{}", crate::sanal::mono::type_suffix(ty));
+        if let Some(cranelift_module::FuncOrDataId::Func(id)) = module.get_name(&synth_name) {
+            return Some(id);
+        }
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function(&synth_name, Linkage::Export, &sig)
+            .ok()?;
+
+        let mut ctx = module.make_context();
+        ctx.func.signature = sig;
+        let mut builder_ctx = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+            let entry = builder.create_block();
+            builder.switch_to_block(entry);
+            builder.append_block_params_for_function_params(entry);
+            let ptr_val = builder.block_params(entry)[0];
+
+            let drop_body = builder.create_block();
+            let exit_block = builder.create_block();
+            builder.ins().brif(ptr_val, drop_body, &[], exit_block, &[]);
+
+            builder.switch_to_block(drop_body);
+            builder.seal_block(drop_body);
+
+            if has_drop_glue(&inner_ty, known_drop_fns, struct_layouts, enum_layouts) {
+                let drop_arg = if is_aggregate_type(&inner_ty, struct_layouts, enum_layouts) {
+                    ptr_val
+                } else {
+                    builder
+                        .ins()
+                        .load(cranelift_type_of(&inner_ty), MemFlags::new(), ptr_val, 0)
+                };
+                emit_drop_for_value(
+                    &mut builder,
+                    drop_arg,
+                    &inner_ty,
+                    known_drop_fns,
+                    struct_layouts,
+                    enum_layouts,
+                    module,
+                );
+            }
+
+            emit_free_call(&mut builder, ptr_val, module);
+            builder.ins().jump(exit_block, &[]);
+
+            builder.switch_to_block(exit_block);
+            builder.seal_block(exit_block);
+            builder.ins().return_(&[]);
+            builder.seal_all_blocks();
+            builder.finalize();
+        }
+        let _ = module.define_function(func_id, &mut ctx);
+        module.clear_context(&mut ctx);
+        return Some(func_id);
+    }
+
     if matches!(ty, Type::DynTrait(_)) {
         let synth_name = "__gdrs_drop_dyn";
         if let Some(cranelift_module::FuncOrDataId::Func(id)) = module.get_name(synth_name) {

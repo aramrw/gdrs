@@ -79,6 +79,29 @@ void intrinsic_bounds_panic(int64_t idx, int64_t len) {
     intrinsic_bounds_panic_loc(idx, len, NULL, 0, 0);
 }
 
+void intrinsic_slice_bounds_panic_loc(int64_t start, int64_t end, int64_t len, const char* file, int64_t line, int64_t col) {
+    if (file && file[0] != '\0' && line > 0) {
+        if (start < 0 || start > end) {
+            fprintf(stderr,
+                    "thread 'main' panicked at %s:%lld:%lld:\nslice index starts at %lld but ends at %lld\n",
+                    file, (long long)line, (long long)col,
+                    (long long)start, (long long)end);
+        } else {
+            fprintf(stderr,
+                    "thread 'main' panicked at %s:%lld:%lld:\nrange end index %lld out of range for slice of length %lld\n",
+                    file, (long long)line, (long long)col,
+                    (long long)end, (long long)len);
+        }
+    } else {
+        fprintf(stderr,
+                "thread 'main' panicked at slice range %lld..%lld out of bounds for length %lld\n",
+                (long long)start, (long long)end, (long long)len);
+    }
+    gdrs_print_backtrace_or_note();
+    fflush(stderr);
+    exit(101);
+}
+
 int main(int argc, char** argv) {
     setbuf(stdout, NULL);
     g_argc = argc;
@@ -213,6 +236,227 @@ char* intrinsic_bool_to_str(uint8_t b) {
     return strdup(b ? "true" : "false");
 }
 
+char* intrinsic_debug_escape_str(const char* s) {
+    if (!s) {
+        return strdup("\"\"");
+    }
+    size_t len = 2; // quotes
+    for (const char* p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        switch (c) {
+            case '"':
+            case '\\':
+            case '\n':
+            case '\r':
+            case '\t':
+            case '\0':
+                len += 2;
+                break;
+            default:
+                if (c < 0x20 || c == 0x7f) {
+                    len += 4; // \xNN
+                } else {
+                    len += 1;
+                }
+                break;
+        }
+    }
+    char* out = (char*)malloc(len + 1);
+    if (!out) return strdup("\"\"");
+    char* dst = out;
+    *dst++ = '"';
+    for (const char* p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        switch (c) {
+            case '"':  *dst++ = '\\'; *dst++ = '"'; break;
+            case '\\': *dst++ = '\\'; *dst++ = '\\'; break;
+            case '\n': *dst++ = '\\'; *dst++ = 'n'; break;
+            case '\r': *dst++ = '\\'; *dst++ = 'r'; break;
+            case '\t': *dst++ = '\\'; *dst++ = 't'; break;
+            case '\0': *dst++ = '\\'; *dst++ = '0'; break;
+            default:
+                if (c < 0x20 || c == 0x7f) {
+                    snprintf(dst, 5, "\\x%02x", c);
+                    dst += 4;
+                } else {
+                    *dst++ = (char)c;
+                }
+                break;
+        }
+    }
+    *dst++ = '"';
+    *dst = '\0';
+    return out;
+}
+
+char* intrinsic_ptr_to_debug_str(uint64_t ptr) {
+    char buf[32];
+    if (ptr == 0) {
+        snprintf(buf, sizeof(buf), "0x0");
+    } else {
+        snprintf(buf, sizeof(buf), "0x%llx", (unsigned long long)ptr);
+    }
+    return strdup(buf);
+}
+
+static void append_debug_indented(char** p_dst, const char* src, int indent_spaces) {
+    char* dst = *p_dst;
+    while (*src) {
+        *dst++ = *src;
+        if (*src == '\n' && *(src + 1) != '\0') {
+            for (int i = 0; i < indent_spaces; i++) {
+                *dst++ = ' ';
+            }
+        }
+        src++;
+    }
+    *p_dst = dst;
+}
+
+char* intrinsic_format_debug_struct(const char* name, int64_t field_count, const char** field_names, const char** field_vals, int64_t alternate) {
+    if (!name) name = "";
+    if (field_count <= 0) {
+        return strdup(name);
+    }
+    size_t total = strlen(name) + 32;
+    for (int64_t i = 0; i < field_count; i++) {
+        total += (field_names && field_names[i] ? strlen(field_names[i]) : 0) + 4;
+        total += (field_vals && field_vals[i] ? strlen(field_vals[i]) * 2 + 16 : 8);
+    }
+    char* out = (char*)malloc(total);
+    if (!out) return strdup(name);
+    char* dst = out;
+    if (!alternate) {
+        dst += sprintf(dst, "%s { ", name);
+        for (int64_t i = 0; i < field_count; i++) {
+            if (i > 0) dst += sprintf(dst, ", ");
+            dst += sprintf(dst, "%s: %s",
+                           (field_names && field_names[i]) ? field_names[i] : "",
+                           (field_vals && field_vals[i]) ? field_vals[i] : "");
+        }
+        sprintf(dst, " }");
+    } else {
+        dst += sprintf(dst, "%s {\n", name);
+        for (int64_t i = 0; i < field_count; i++) {
+            dst += sprintf(dst, "    %s: ", (field_names && field_names[i]) ? field_names[i] : "");
+            const char* val = (field_vals && field_vals[i]) ? field_vals[i] : "";
+            append_debug_indented(&dst, val, 4);
+            dst += sprintf(dst, ",\n");
+        }
+        sprintf(dst, "}");
+    }
+    return out;
+}
+
+char* intrinsic_format_debug_tuple(const char* name, int64_t elem_count, const char** elem_vals, int64_t alternate) {
+    bool is_enum = (name && name[0] != '\0');
+    if (is_enum && elem_count <= 0) {
+        return strdup(name);
+    }
+    if (!is_enum && elem_count <= 0) {
+        return strdup("()");
+    }
+    size_t total = (is_enum ? strlen(name) : 0) + 32;
+    for (int64_t i = 0; i < elem_count; i++) {
+        total += (elem_vals && elem_vals[i] ? strlen(elem_vals[i]) * 2 + 16 : 8);
+    }
+    char* out = (char*)malloc(total);
+    if (!out) return strdup("()");
+    char* dst = out;
+    if (!alternate) {
+        if (is_enum) {
+            dst += sprintf(dst, "%s(", name);
+        } else {
+            dst += sprintf(dst, "(");
+        }
+        for (int64_t i = 0; i < elem_count; i++) {
+            if (i > 0) dst += sprintf(dst, ", ");
+            dst += sprintf(dst, "%s", (elem_vals && elem_vals[i]) ? elem_vals[i] : "");
+        }
+        if (!is_enum && elem_count == 1) {
+            sprintf(dst, ",)");
+        } else {
+            sprintf(dst, ")");
+        }
+    } else {
+        if (is_enum) {
+            dst += sprintf(dst, "%s(\n", name);
+        } else {
+            dst += sprintf(dst, "(\n");
+        }
+        for (int64_t i = 0; i < elem_count; i++) {
+            dst += sprintf(dst, "    ");
+            const char* val = (elem_vals && elem_vals[i]) ? elem_vals[i] : "";
+            append_debug_indented(&dst, val, 4);
+            dst += sprintf(dst, ",\n");
+        }
+        sprintf(dst, ")");
+    }
+    return out;
+}
+
+char* intrinsic_format_debug_list(int64_t count, const char** elem_vals, int64_t alternate) {
+    if (count <= 0) {
+        return strdup("[]");
+    }
+    size_t total = 32;
+    for (int64_t i = 0; i < count; i++) {
+        total += (elem_vals && elem_vals[i] ? strlen(elem_vals[i]) * 2 + 16 : 8);
+    }
+    char* out = (char*)malloc(total);
+    if (!out) return strdup("[]");
+    char* dst = out;
+    if (!alternate) {
+        dst += sprintf(dst, "[");
+        for (int64_t i = 0; i < count; i++) {
+            if (i > 0) dst += sprintf(dst, ", ");
+            dst += sprintf(dst, "%s", (elem_vals && elem_vals[i]) ? elem_vals[i] : "");
+        }
+        sprintf(dst, "]");
+    } else {
+        dst += sprintf(dst, "[\n");
+        for (int64_t i = 0; i < count; i++) {
+            dst += sprintf(dst, "    ");
+            const char* val = (elem_vals && elem_vals[i]) ? elem_vals[i] : "";
+            append_debug_indented(&dst, val, 4);
+            dst += sprintf(dst, ",\n");
+        }
+        sprintf(dst, "]");
+    }
+    return out;
+}
+
+void intrinsic_free_cstr_array(int64_t count, const char** vals) {
+    if (vals) {
+        for (int64_t i = 0; i < count; i++) {
+            if (vals[i]) {
+                free((void*)vals[i]);
+            }
+        }
+    }
+}
+
+char* intrinsic_format_debug_list_and_free(int64_t count, const char** elem_vals, int64_t alternate) {
+    char* res = intrinsic_format_debug_list(count, elem_vals, alternate);
+    if (elem_vals) {
+        for (int64_t i = 0; i < count; i++) {
+            if (elem_vals[i]) {
+                free((void*)elem_vals[i]);
+            }
+        }
+        free((void*)elem_vals);
+    }
+    return res;
+}
+
+void intrinsic_eprint_dbg(const char* loc, const char* expr_str, const char* val_str) {
+    fprintf(stderr, "[%s] %s = %s\n",
+            loc ? loc : "?",
+            expr_str ? expr_str : "?",
+            val_str ? val_str : "<null>");
+    fflush(stderr);
+}
+
 char* intrinsic_format_join(int64_t count, const char** parts, const uint8_t* is_owned) {
     size_t total = 0;
     for (int64_t i = 0; i < count; i++) {
@@ -221,7 +465,16 @@ char* intrinsic_format_join(int64_t count, const char** parts, const uint8_t* is
         }
     }
     char* buf = (char*)malloc(total + 1);
-    if (!buf) return NULL;
+    if (!buf) {
+        if (is_owned) {
+            for (int64_t i = 0; i < count; i++) {
+                if (parts[i] && is_owned[i]) {
+                    free((void*)parts[i]);
+                }
+            }
+        }
+        return NULL;
+    }
     size_t offset = 0;
     for (int64_t i = 0; i < count; i++) {
         if (parts[i]) {
@@ -361,6 +614,12 @@ int64_t intrinsic_rc_clone(int64_t ptr_val) {
     return ptr_val;
 }
 
+int64_t intrinsic_rc_strong_count(int64_t ptr_val) {
+    if (ptr_val == 0) return 0;
+    uint64_t* ptr = (uint64_t*)ptr_val;
+    return (int64_t)ptr[0];
+}
+
 int64_t intrinsic_rc_drop(int64_t ptr_val) {
     if (ptr_val == 0) return 0;
     uint64_t* ptr = (uint64_t*)ptr_val;
@@ -392,6 +651,57 @@ int64_t intrinsic_arc_clone(int64_t ptr_val) {
     _Atomic uint64_t* ptr = (_Atomic uint64_t*)ptr_val;
     atomic_fetch_add(&ptr[0], 1);
     return ptr_val;
+}
+
+int64_t intrinsic_arc_strong_count(int64_t ptr_val) {
+    if (ptr_val == 0) return 0;
+    _Atomic uint64_t* ptr = (_Atomic uint64_t*)ptr_val;
+    return (int64_t)atomic_load(&ptr[0]);
+}
+
+const char* intrinsic_str_slice_loc(
+    int64_t s_val,
+    int64_t is_obj,
+    int64_t start,
+    int64_t end,
+    const char* file,
+    int64_t line,
+    int64_t col
+) {
+    const char* ptr = "";
+    int64_t len = 0;
+    if (s_val != 0) {
+        if (is_obj) {
+            GdrsString* gs = (GdrsString*)s_val;
+            ptr = gs->ptr ? (const char*)gs->ptr : "";
+            len = (gs->len > 0) ? gs->len : (int64_t)strlen(ptr);
+        } else {
+            ptr = (const char*)s_val;
+            len = (int64_t)strlen(ptr);
+        }
+    }
+    if (end == -1) {
+        end = len;
+    }
+    if (start < 0 || end < start || end > len) {
+        intrinsic_slice_bounds_panic_loc(start, end, len, file, line, col);
+    }
+    int64_t sub_len = end - start;
+    if (sub_len == 0) {
+        return "";
+    }
+    if (end == len) {
+        return ptr + start;
+    }
+    static char* ring[64] = {0};
+    static size_t ring_idx = 0;
+    size_t slot = (ring_idx++) & 63;
+    char* out = (char*)realloc(ring[slot], (size_t)sub_len + 1);
+    if (!out) return "";
+    ring[slot] = out;
+    memcpy(out, ptr + start, (size_t)sub_len);
+    out[sub_len] = '\0';
+    return out;
 }
 
 int64_t intrinsic_arc_drop(int64_t ptr_val) {

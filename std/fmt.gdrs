@@ -1,4 +1,56 @@
 // std/fmt.gdrs - Formatting traits
+use std::string::String
+
+pub obj Formatter:
+	buf: String
+	alternate: bool
+	depth: i64
+
+impl Formatter:
+	pub fn is_alternate(&self) -> bool:
+		return self.alternate
+
+	pub fn write_str(&mut self, s: str):
+		self.buf.append(s)
+
+pub obj DebugStruct:
+	fmt_ptr: *Formatter
+	name: str
+	has_fields: bool
+
+impl DebugStruct:
+	pub fn field(&mut self, name: str, value: str):
+		unsafe:
+			let f = self.fmt_ptr as &mut Formatter
+			if !self.has_fields:
+				f.write_str(self.name)
+				if f.alternate:
+					f.write_str(" {\n    ")
+				else:
+					f.write_str(" { ")
+				self.has_fields = true
+			else:
+				if f.alternate:
+					f.write_str(",\n    ")
+				else:
+					f.write_str(", ")
+			f.write_str(name)
+			f.write_str(": ")
+			f.write_str(value)
+
+	pub fn finish(&mut self):
+		unsafe:
+			let f = self.fmt_ptr as &mut Formatter
+			if !self.has_fields:
+				f.write_str(self.name)
+			else:
+				if f.alternate:
+					f.write_str(",\n}")
+				else:
+					f.write_str(" }")
 
 pub trait Display:
 	fn fmt(self) -> String
+
+pub trait Debug:
+	fn fmt(&self, f: &mut Formatter)

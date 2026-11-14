@@ -195,20 +195,46 @@ pub fn compile_expr<M: Module>(
             compile_assign(builder, value, cg, module, name)
         }
 
-        TypedExpr::Ident(name, _, _) => {
+        TypedExpr::Ident(name, ty, _) => {
             if let Some(&(slot, slot_ty)) = cg.var_slots.get(name) {
                 builder.ins().stack_load(slot_ty, slot, 0)
             } else if let Some(&var) = cg.vars.get(name) {
                 builder.use_var(var)
             } else {
-                let mut sig = module.make_signature();
-                sig.params.push(AbiParam::new(types::I64));
-                sig.returns.push(AbiParam::new(types::I64));
-                let callee = match module.get_name(name) {
+                let resolved_name = if module.get_name(name).is_some() {
+                    name.clone()
+                } else {
+                    cg.meta
+                        .fn_param_types
+                        .keys()
+                        .find(|k| *k == name || k.ends_with(&format!("_{name}")))
+                        .cloned()
+                        .unwrap_or_else(|| name.clone())
+                };
+                let callee = match module.get_name(&resolved_name) {
                     Some(cranelift_module::FuncOrDataId::Func(id)) => id,
-                    _ => module
-                        .declare_function(name, Linkage::Import, &sig)
-                        .unwrap(),
+                    _ => {
+                        let call_conv = module.isa().default_call_conv();
+                        let sig = if let Type::FnPtr(p_tys, r_ty) = ty {
+                            crate::codegen::layout::abi_signature_for_fn(
+                                call_conv,
+                                p_tys,
+                                r_ty,
+                                false,
+                                &cg.meta.struct_layouts,
+                                cg.meta.enum_layouts,
+                            )
+                            .0
+                        } else {
+                            let mut s = module.make_signature();
+                            s.params.push(AbiParam::new(types::I64));
+                            s.returns.push(AbiParam::new(types::I64));
+                            s
+                        };
+                        module
+                            .declare_function(&resolved_name, Linkage::Import, &sig)
+                            .unwrap()
+                    }
                 };
                 let local_callee = module.declare_func_in_func(callee, builder.func);
                 builder.ins().func_addr(types::I64, local_callee)

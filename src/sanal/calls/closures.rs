@@ -25,17 +25,45 @@ pub fn build_non_capturing_closure<'a>(
         CLOSURE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     );
 
+    let expected_fn_sig = type_ctx.current_expected_type.and_then(|exp| {
+        let resolved = type_ctx.infer.borrow_mut().probe(exp);
+        if let Type::FnPtr(p_tys, r_ty) = resolved {
+            Some((p_tys.to_vec(), *r_ty))
+        } else {
+            None
+        }
+    });
+
     // Closures compile as standalone non-capturing function pointers.
     // Type-checking against a fresh ScopeStack blocks outer captures and reports E0434.
     let mut closure_scopes = ScopeStack::new();
     let mut typed_params = Vec::new();
-    for p in params {
-        closure_scopes.declare(p.clone(), false, param_ty);
-        typed_params.push((p.clone(), param_ty));
+    for (i, raw_p) in params.iter().enumerate() {
+        let (p_name, explicit_p_ty) = if let Some((n, t_str)) = raw_p.split_once(':') {
+            let resolved_t = type_ctx.resolve_type_annotation(Type::Obj(crate::ast::intern_str(t_str)));
+            (n.to_string(), Some(resolved_t))
+        } else {
+            (raw_p.clone(), None)
+        };
+        let p_ty = explicit_p_ty
+            .or_else(|| {
+                expected_fn_sig
+                    .as_ref()
+                    .and_then(|(ps, _)| ps.get(i).copied())
+            })
+            .unwrap_or(param_ty);
+        closure_scopes.declare(p_name.clone(), false, p_ty);
+        typed_params.push((p_name, p_ty));
+    }
+
+    let mut body_ctx = type_ctx.clone();
+    body_ctx.current_expected_type = expected_fn_sig.as_ref().map(|(_, r)| *r);
+    if let Some((_, exp_r)) = &expected_fn_sig {
+        body_ctx.current_return_type = Some(*exp_r);
     }
 
     let mut closure_errors = Vec::new();
-    let t_body = type_check_expr(&mut closure_scopes, &mut closure_errors, type_ctx, body)
+    let t_body = type_check_expr(&mut closure_scopes, &mut closure_errors, &body_ctx, body)
         .unwrap_or(TypedExpr::Int(0, span.clone()));
     for mut err in closure_errors {
         if err.code == "E0425" {
@@ -58,7 +86,7 @@ pub fn build_non_capturing_closure<'a>(
                         label: "Outer variable captured here".to_string(),
                         secondary_label: None,
                         help: Some(
-                            "Pass state explicitly as closure arguments or via `arc.new(...)`"
+                            "Pass state explicitly as closure arguments or via `Arc::new(...)`"
                                 .to_string(),
                         ),
                         span: err.span,
@@ -69,6 +97,9 @@ pub fn build_non_capturing_closure<'a>(
         errors.push(err);
     }
     let ret_ty = t_body.ty();
+    if let Some((_, exp_r)) = &expected_fn_sig {
+        let _ = type_ctx.infer.borrow_mut().unify(*exp_r, ret_ty);
+    }
     let resolved_ret_ty = type_ctx.infer.borrow_mut().resolve(ret_ty);
     if crate::sanal::type_contains_ref(&resolved_ret_ty) {
         errors.push(SemanticError {
@@ -76,7 +107,7 @@ pub fn build_non_capturing_closure<'a>(
             message: "Closure cannot return a reference (`&T` / `&mut T`)".to_string(),
             label: "References cannot escape a closure".to_string(),
             secondary_label: None,
-            help: Some("Return an owned value, `rc<T>`, or `arc<T>` instead".to_string()),
+            help: Some("Return an owned value, `Rc<T>`, or `Arc<T>` instead".to_string()),
             span: t_body.span(),
         });
     }

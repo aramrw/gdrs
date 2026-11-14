@@ -168,8 +168,6 @@ pub fn math_parser<'a>(
 
         let path_segment = select! {
             Token::Ident(s) => s,
-            Token::TypeRc => "rc".to_string(),
-            Token::TypeArc => "arc".to_string(),
         };
 
         let path = path_segment
@@ -233,11 +231,19 @@ pub fn math_parser<'a>(
 
         let ident = path.clone().map_with_span(|name, span| Expr::Ident(name, span));
 
-        let closure_params = select! { Token::Ident(s) => s }
+        let single_closure_param = select! { Token::Ident(s) => s }
+            .then(just(Token::Colon).ignore_then(type_parser.clone()).or_not())
+            .map(|(name, opt_ty)| match opt_ty {
+                Some(ty) => format!("{name}:{}", crate::sanal::compat::format_type(&ty)),
+                None => name,
+            });
+
+        let closure_params = single_closure_param
             .separated_by(just(Token::Comma))
             .allow_trailing()
             .delimited_by(just(Token::Pipe), just(Token::Pipe))
-            .or(just(Token::Pipe).then(just(Token::Pipe).then(just(Token::Colon))).to(Vec::new()));
+            .or(just(Token::Or).to(Vec::new()))
+            .or(just(Token::Pipe).then(just(Token::Pipe)).to(Vec::new()));
 
         type ExprOp = fn(Box<Expr>, Box<Expr>, Span) -> Expr;
 
@@ -430,6 +436,7 @@ pub fn math_parser<'a>(
             DotCall(String, Vec<Expr>, Span),
             Dot(Vec<String>, Span),
             Index(Expr, Span),
+            Call(Vec<Expr>, Span),
             Try(Span),
         }
 
@@ -446,18 +453,33 @@ pub fn math_parser<'a>(
             .delimited_by(just(Token::LBracket), just(Token::RBracket))
             .map_with_span(|idx, span: Span| Postfix::Index(idx, span));
 
+        let call_post = parenthesized_args
+            .clone()
+            .map_with_span(|args, span: Span| Postfix::Call(args, span));
+
         let try_post = just(Token::Question)
             .map_with_span(|_, span: Span| Postfix::Try(span));
 
         let postfix_atom = atom
-            .then(dot_call_post.or(dot_post).or(index_post).or(try_post).repeated())
+            .then(
+                dot_call_post
+                    .or(dot_post)
+                    .or(index_post)
+                    .or(call_post)
+                    .or(try_post)
+                    .repeated(),
+            )
             .foldl(|target, post| match post {
                 Postfix::DotCall(method, args, method_span) => {
                     let span = target.span().start..method_span.end;
                     if method == "for_each" && args.len() == 1 {
                         if let Expr::Closure(params, closure_body, _) = &args[0] {
-                            let item_name =
+                            let raw_first =
                                 params.first().cloned().unwrap_or_else(|| "_".to_string());
+                            let item_name = raw_first
+                                .split_once(':')
+                                .map(|(n, _)| n.to_string())
+                                .unwrap_or(raw_first);
                             let body_stmts = match closure_body.as_ref() {
                                 Expr::Block(stmts, _) => stmts.clone(),
                                 single => vec![single.clone()],
@@ -485,6 +507,16 @@ pub fn math_parser<'a>(
                 Postfix::Index(idx, idx_span) => {
                     let span = target.span().start..idx_span.end;
                     Expr::IndexAccess(Box::new(target), Box::new(idx), span)
+                }
+                Postfix::Call(args, call_span) => {
+                    let span = target.span().start..call_span.end;
+                    if let Expr::Ident(name, _) = target {
+                        Expr::Call(name, args, span)
+                    } else {
+                        let mut call_args = vec![target];
+                        call_args.extend(args);
+                        Expr::Call("__call_fn_ptr".to_string(), call_args, span)
+                    }
                 }
                 Postfix::Try(try_span) => {
                     let span = target.span().start..try_span.end;
@@ -546,16 +578,30 @@ pub fn math_parser<'a>(
                 })
                 .boxed();
 
-        let range_term = term
-            .clone()
-            .then(just(Token::DotDot).then(term.clone()).or_not())
-            .map(|(lhs, opt_rhs)| match opt_rhs {
-                Some((_, rhs)) => {
-                    let span = lhs.span().start..rhs.span().end;
-                    Expr::Range(Box::new(lhs), Box::new(rhs), span)
-                }
-                None => lhs,
-            })
+        let open_start_range = just(Token::DotDot)
+            .then(term.clone().or_not())
+            .map_with_span(|(_, opt_rhs), span: Span| {
+                let start = Expr::Int(0, span.clone());
+                let end = opt_rhs
+                    .unwrap_or_else(|| Expr::Ident("__slice_len__".to_string(), span.clone()));
+                Expr::Range(Box::new(start), Box::new(end), span)
+            });
+
+        let range_term = open_start_range
+            .or(term
+                .clone()
+                .then(just(Token::DotDot).then(term.clone().or_not()).or_not())
+                .map_with_span(|(lhs, opt_dotdot), span: Span| match opt_dotdot {
+                    Some((_, Some(rhs))) => {
+                        let rspan = lhs.span().start..rhs.span().end;
+                        Expr::Range(Box::new(lhs), Box::new(rhs), rspan)
+                    }
+                    Some((_, None)) => {
+                        let end = Expr::Ident("__slice_len__".to_string(), span.clone());
+                        Expr::Range(Box::new(lhs), Box::new(end), span)
+                    }
+                    None => lhs,
+                }))
             .boxed();
 
         // 1. Shift operations (<<, >>) - Binds looser than +, - but tighter than comparisons

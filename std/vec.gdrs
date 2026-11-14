@@ -32,6 +32,8 @@ impl Vec:
 			let elem_size = ((0 as *$T) + 1) as i64
 			if elem_size == 0:
 				return Vec{ ptr: 0 as *u8, len: 0, cap: 9223372036854775807 }
+			if capacity > (9223372036854775807 / elem_size):
+				return Vec{ ptr: 0 as *u8, len: 0, cap: 0 }
 			let p = malloc(capacity * elem_size)
 			if (p as u64) == 0:
 				return Vec{ ptr: 0 as *u8, len: 0, cap: 0 }
@@ -49,10 +51,13 @@ impl Vec:
 			if elem_size == 0:
 				v.cap = 9223372036854775807
 			else:
+				if slice.len > (9223372036854775807 / elem_size):
+					return v
 				let p = malloc(slice.len * elem_size)
-				if (p as u64) != 0:
-					v.ptr = p as *u8
-					v.cap = slice.len
+				if (p as u64) == 0:
+					return v
+				v.ptr = p as *u8
+				v.cap = slice.len
 			let mut i = 0
 			while i < slice.len:
 				v.push(slice[i])
@@ -69,8 +74,10 @@ impl Vec:
 				if self.len >= self.cap:
 					let mut new_cap = 4
 					if self.cap > 0:
+						if self.cap > (9223372036854775807 / 2):
+							return
 						new_cap = self.cap * 2
-					if new_cap <= self.cap:
+					if new_cap <= self.cap || new_cap > (9223372036854775807 / elem_size):
 						return
 					let p = realloc(self.ptr as *void, new_cap * elem_size)
 					if (p as u64) == 0:

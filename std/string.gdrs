@@ -48,11 +48,11 @@ impl String:
 			memset(end_ptr as *void, 0, 1)
 			return String{ ptr: p as *i64, len: self.len, cap: self.len + 1 }
 
-	pub fn push_str(mut self, s: str) -> String:
+	pub fn append(&mut self, s: str):
 		unsafe:
 			let s_len = strlen(s)
 			if s_len == 0:
-				return self
+				return
 			let needed_cap = self.len + s_len + 1
 			if self.cap == 0:
 				let mut new_cap = 16
@@ -60,7 +60,7 @@ impl String:
 					new_cap = needed_cap
 				let p = malloc(new_cap)
 				if (p as i64) == 0:
-					return self
+					return
 				self.ptr = p as *i64
 				self.cap = new_cap
 				memcpy(self.ptr as *void, s as *void, s_len)
@@ -72,7 +72,7 @@ impl String:
 					let new_cap = needed_cap * 2
 					let p = realloc(self.ptr as *void, new_cap)
 					if (p as i64) == 0:
-						return self
+						return
 					self.ptr = p as *i64
 					self.cap = new_cap
 				let dst_ptr = (self.ptr as i64) + self.len
@@ -80,9 +80,14 @@ impl String:
 				self.len = self.len + s_len
 				let end_ptr = (self.ptr as i64) + self.len
 				memset(end_ptr as *void, 0, 1)
+
+	pub fn push_str(mut self, s: str) -> String:
+		self.append(s)
 		return self
 
 	pub fn as_str(&self) -> str:
+		if (self.ptr as i64) == 0:
+			return ""
 		return self.ptr as str
 
 	pub fn free(&mut self):

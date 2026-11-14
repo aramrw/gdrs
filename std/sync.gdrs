@@ -1,0 +1,3 @@
+// std/sync.gdrs - Thread-safe atomic reference-counting pointer Arc<T>
+pub obj Arc:
+	ptr: *u8
