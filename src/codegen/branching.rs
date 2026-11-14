@@ -16,7 +16,13 @@ pub fn expr_is_terminator(expr: &TypedExpr) -> bool {
     match expr {
         TypedExpr::Return(..) | TypedExpr::Break(..) | TypedExpr::Continue(..) => true,
         TypedExpr::Block(stmts, _, _) | TypedExpr::Unsafe(stmts, _, _) => {
-            stmts.last().map(expr_is_terminator).unwrap_or(false)
+            stmts.iter().any(expr_is_terminator)
+        }
+        TypedExpr::IfElse(_, then_b, else_b, _, _) => {
+            expr_is_terminator(then_b) && expr_is_terminator(else_b)
+        }
+        TypedExpr::Match(_, arms, _, _) => {
+            !arms.is_empty() && arms.iter().all(|a| a.body.iter().any(expr_is_terminator))
         }
         _ => false,
     }

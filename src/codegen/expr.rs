@@ -391,8 +391,52 @@ pub fn compile_expr<M: Module>(
             crate::codegen::calls::compile_coerce_to_dyn(builder, inner_expr, trait_name, cg, module)
         }
         TypedExpr::DynCall(receiver_expr, method_name, args, ret_ty, _) => {
-            crate::codegen::calls::compile_dyn_call(builder, receiver_expr, method_name, args, ret_ty, cg, module)
+            let val = crate::codegen::calls::compile_dyn_call(
+                builder,
+                receiver_expr,
+                method_name,
+                args,
+                ret_ty,
+                cg,
+                module,
+            );
+            cg.register_temp(val, ret_ty);
+            val
         }
+    }
+}
+
+fn int_bit_width(ty: cranelift_codegen::ir::Type) -> Option<u32> {
+    if ty == types::I8 {
+        Some(8)
+    } else if ty == types::I16 {
+        Some(16)
+    } else if ty == types::I32 {
+        Some(32)
+    } else if ty == types::I64 {
+        Some(64)
+    } else {
+        None
+    }
+}
+
+fn coerce_int_width(
+    builder: &mut cranelift_frontend::FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    target_ty: cranelift_codegen::ir::Type,
+    signed_extend: bool,
+) -> Option<cranelift_codegen::ir::Value> {
+    let val_ty = builder.func.dfg.value_type(val);
+    let src_bits = int_bit_width(val_ty)?;
+    let dst_bits = int_bit_width(target_ty)?;
+    if src_bits == dst_bits {
+        Some(val)
+    } else if src_bits > dst_bits {
+        Some(builder.ins().ireduce(target_ty, val))
+    } else if signed_extend {
+        Some(builder.ins().sextend(target_ty, val))
+    } else {
+        Some(builder.ins().uextend(target_ty, val))
     }
 }
 
@@ -404,23 +448,22 @@ pub(crate) fn coerce_val(
 ) -> cranelift_codegen::ir::Value {
     let val_ty = builder.func.dfg.value_type(val);
     if val_ty == target_ty {
-        val
-    } else if val_ty == types::I32 && target_ty == types::I64 {
-        builder.ins().sextend(types::I64, val)
-    } else if val_ty == types::I64 && target_ty == types::I32 {
-        builder.ins().ireduce(types::I32, val)
-    } else if val_ty == types::I64 && target_ty == types::I8 {
-        builder.ins().ireduce(types::I8, val)
-    } else if val_ty == types::I32 && target_ty == types::I8 {
-        builder.ins().ireduce(types::I8, val)
-    } else if val_ty == types::I8 && target_ty == types::I64 {
-        builder.ins().uextend(types::I64, val)
-    } else if val_ty == types::I8 && target_ty == types::I32 {
-        builder.ins().uextend(types::I32, val)
-    } else if (val_ty == types::I32 || val_ty == types::I64) && target_ty == types::F32 {
+        return val;
+    }
+    if let Some(int_conv) =
+        coerce_int_width(builder, val, target_ty, val_ty == types::I32 && target_ty == types::I64)
+    {
+        return int_conv;
+    }
+    if (val_ty == types::I32 || val_ty == types::I64) && target_ty == types::F32 {
         builder.ins().fcvt_from_sint(types::F32, val)
     } else if val_ty == types::I32 && target_ty == types::F64 {
         builder.ins().fcvt_from_sint(types::F64, val)
+    } else if (val_ty == types::I8 || val_ty == types::I16)
+        && (target_ty == types::F32 || target_ty == types::F64)
+    {
+        let wide = builder.ins().uextend(types::I64, val);
+        builder.ins().fcvt_from_uint(target_ty, wide)
     } else if val_ty == types::I64 && target_ty == types::F64 {
         builder.ins().bitcast(types::F64, MemFlags::new(), val)
     } else if val_ty == types::F64 && target_ty == types::I64 {
@@ -452,11 +495,24 @@ pub(crate) fn coerce_typed_val(
     if val_ty == target_ty {
         return val;
     }
+    if int_bit_width(val_ty).is_some() && int_bit_width(target_ty).is_some() {
+        return coerce_int_width(builder, val, target_ty, src_ty.is_signed_integer()).unwrap();
+    }
     if src_ty.is_unsigned_integer() && (target_ty == types::F64 || target_ty == types::F32) {
-        return builder.ins().fcvt_from_uint(target_ty, val);
+        let wide = if matches!(val_ty, types::I8 | types::I16) {
+            builder.ins().uextend(types::I64, val)
+        } else {
+            val
+        };
+        return builder.ins().fcvt_from_uint(target_ty, wide);
     }
     if src_ty.is_signed_integer() && (target_ty == types::F64 || target_ty == types::F32) {
-        return builder.ins().fcvt_from_sint(target_ty, val);
+        let wide = if matches!(val_ty, types::I8 | types::I16) {
+            builder.ins().sextend(types::I64, val)
+        } else {
+            val
+        };
+        return builder.ins().fcvt_from_sint(target_ty, wide);
     }
     coerce_val(builder, val, target_ty)
 }

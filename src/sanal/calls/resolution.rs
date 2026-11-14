@@ -273,9 +273,13 @@ pub fn resolve_call_target<'a>(
                             }
                         } else if let Some((_, mangled_args)) = crate::sanal::mono::lookup_mangled(&name_str) {
                             type_args.extend(mangled_args);
-                        } else if let Some((_, suffix)) = name_str.rsplit_once('_') {
-                            if type_ctx.contains_struct(suffix) || type_ctx.contains_enum(suffix) {
-                                type_args.push(Type::Obj(crate::ast::intern_str(suffix)));
+                        } else if !type_ctx.contains_struct(&name_str)
+                            && !type_ctx.mono.borrow().struct_templates.contains_key(&name_str)
+                        {
+                            if let Some((_, suffix)) = name_str.rsplit_once('_') {
+                                if type_ctx.contains_struct(suffix) || type_ctx.contains_enum(suffix) {
+                                    type_args.push(Type::Obj(crate::ast::intern_str(suffix)));
+                                }
                             }
                         }
                     }
@@ -384,13 +388,14 @@ pub fn resolve_call_target<'a>(
                     .or_else(|| base_struct.strip_prefix("std_fs_"))
                     .unwrap_or(&base_struct);
 
-                let is_generic_template = type_ctx.get_fn(&direct_method).map(|f| {
-                    f.params.iter().any(|p| matches!(p.ty, Type::Generic(_))) || matches!(f.return_type, Type::Generic(_))
-                }).unwrap_or(false)
-                    || type_ctx.mono.borrow().struct_templates.contains_key(&base_struct)
+                let is_generic_type = type_ctx.mono.borrow().struct_templates.contains_key(&base_struct)
                     || type_ctx.mono.borrow().struct_templates.contains_key(clean_base)
                     || type_ctx.mono.borrow().enum_templates.contains_key(&base_struct)
                     || type_ctx.mono.borrow().enum_templates.contains_key(clean_base);
+                let is_generic_template = is_generic_type
+                    || type_ctx.get_fn(&direct_method).map(|f| {
+                        f.params.iter().any(|p| matches!(p.ty, Type::Generic(_))) || matches!(f.return_type, Type::Generic(_))
+                    }).unwrap_or(false);
 
                 if !typed_args.is_empty() {
                     let arg_ty = match typed_args[0].ty() {
@@ -405,7 +410,7 @@ pub fn resolve_call_target<'a>(
                     }
                 }
 
-                if resolved_name == name && !type_args.is_empty() {
+                if resolved_name == name && !type_args.is_empty() && (is_generic_type || !type_ctx.contains_fn(&direct_method)) {
                     let has_infer = type_args.iter().any(|t| {
                         crate::sanal::compat::type_contains_infer(t)
                             || crate::sanal::compat::type_contains_generic(t)
@@ -469,7 +474,7 @@ pub fn resolve_call_target<'a>(
                             resolved_name = direct_method;
                         }
                     }
-                } else if resolved_name == name && !is_generic_template && type_ctx.contains_fn(&direct_method) {
+                } else if resolved_name == name && !is_generic_type && type_ctx.contains_fn(&direct_method) {
                     resolved_name = direct_method;
                 }
             }

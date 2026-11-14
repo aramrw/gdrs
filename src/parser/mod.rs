@@ -187,7 +187,7 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
     let math = math_parser(type_parser.clone());
 
     // 4. Recursive statement and block parser
-    let stmt = stmt_parser(math, type_parser.clone());
+    let stmt = stmt_parser(math.clone(), type_parser.clone());
 
     let ref_mut_self_param = just(Token::Ampersand)
         .ignore_then(just(Token::Mut))
@@ -213,19 +213,46 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
                 .map_with_span(|(name, ty), span| Param { name, is_mutable: false, ty, span }),
         );
 
-    let where_clause = just(Token::Where)
-        .ignore_then(just(Token::Dollar).or_not())
+    let single_bound = select! { Token::Ident(s) if matches!(s.as_str(), "Fn" | "FnMut" | "FnOnce") => s }
+        .then(
+            type_parser
+                .clone()
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .delimited_by(just(Token::LParen), just(Token::RParen)),
+        )
+        .then(just(Token::Arrow).ignore_then(type_parser.clone()).or_not())
+        .map(|((trait_name, params), ret_opt)| {
+            let p_str: Vec<String> = params.iter().map(crate::sanal::compat::format_type).collect();
+            let ret = ret_opt.unwrap_or(Type::Unit);
+            format!(
+                "{trait_name}({})->{}",
+                p_str.join(","),
+                crate::sanal::compat::format_type(&ret)
+            )
+        })
+        .or(select! { Token::Ident(s) => s });
+
+    let single_where_predicate = just(Token::Dollar)
+        .or_not()
         .ignore_then(select! { Token::Ident(s) => s })
         .then_ignore(just(Token::Colon))
-        .then(
-            select! { Token::Ident(s) => s }
-                .separated_by(just(Token::Plus))
+        .then(single_bound.separated_by(just(Token::Plus)).at_least(1));
+
+    let where_clause = just(Token::Where)
+        .ignore_then(
+            single_where_predicate
+                .separated_by(just(Token::Comma))
                 .at_least(1),
         )
-        .map_with_span(|(target_param, bounds), span| WhereClause {
-            target_param,
-            bounds,
-            span,
+        .map_with_span(|mut preds, span| {
+            let (target_param, bounds) = preds.remove(0);
+            WhereClause {
+                target_param,
+                bounds,
+                predicates: preds,
+                span,
+            }
         });
 
     let opt_where = just(Token::Newline)
@@ -677,6 +704,23 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             span,
         });
 
+    let const_decl = opt_vis
+        .clone()
+        .then_ignore(just(Token::Const))
+        .then(select! { Token::Ident(n) => n })
+        .then_ignore(just(Token::Colon))
+        .then(type_parser.clone())
+        .then_ignore(just(Token::Assign))
+        .then(math.clone())
+        .map_with_span(|(((vis, name), ty), value), span| ConstDecl {
+            name,
+            ty,
+            value,
+            vis,
+            module_path: Vec::new(),
+            span,
+        });
+
     let item = just(Token::Newline)
         .repeated()
         .ignore_then(
@@ -686,6 +730,7 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
                 .or(trait_decl.map(Item::Trait))
                 .or(trait_alias_decl.map(Item::TraitAlias))
                 .or(extern_decl.map(Item::Extern))
+                .or(const_decl.map(Item::Const))
                 .or(function.map(Item::Func))
                 .or(obj_decl.map(Item::Struct))
                 .or(enum_decl.map(Item::Enum))
@@ -700,6 +745,7 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
         let mut traits = Vec::new();
         let mut trait_aliases = Vec::new();
         let mut externs = Vec::new();
+        let mut consts = Vec::new();
         let mut structs = Vec::new();
         let mut enums = Vec::new();
         let mut impls = Vec::new();
@@ -711,6 +757,7 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
                 Item::Trait(t) => traits.push(t),
                 Item::TraitAlias(ta) => trait_aliases.push(ta),
                 Item::Extern(ext) => externs.push(ext),
+                Item::Const(c) => consts.push(c),
                 Item::Func(f) => functions.push(f),
                 Item::Struct(s) => structs.push(s),
                 Item::Enum(e) => enums.push(e),
@@ -723,6 +770,7 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             traits,
             trait_aliases,
             externs,
+            consts,
             structs,
             enums,
             impls,
@@ -738,6 +786,7 @@ enum Item {
     Trait(TraitDecl),
     TraitAlias(TraitAliasDecl),
     Extern(ExternDecl),
+    Const(ConstDecl),
     Func(FuncDecl),
     Struct(StructDecl),
     Enum(EnumDecl),

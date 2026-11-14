@@ -10,6 +10,57 @@ use crate::{
     },
 };
 
+fn with_const_span(expr: &TypedExpr, span: Span) -> TypedExpr {
+    match expr {
+        TypedExpr::Int(v, _) => TypedExpr::Int(*v, span),
+        TypedExpr::Float(f, _) => TypedExpr::Float(*f, span),
+        TypedExpr::Bool(b, _) => TypedExpr::Bool(*b, span),
+        TypedExpr::String(s, _) => TypedExpr::String(s.clone(), span),
+        TypedExpr::CastI32(inner, _) => {
+            TypedExpr::CastI32(Box::new(with_const_span(inner, span.clone())), span)
+        }
+        TypedExpr::CastF32(inner, _) => {
+            TypedExpr::CastF32(Box::new(with_const_span(inner, span.clone())), span)
+        }
+        TypedExpr::Cast(inner, ty, _) => {
+            TypedExpr::Cast(Box::new(with_const_span(inner, span.clone())), *ty, span)
+        }
+        other => other.clone(),
+    }
+}
+
+fn lookup_const_ident(
+    name: &str,
+    normalized: &str,
+    type_ctx: &TypeCtx<'_>,
+    errors: &mut Vec<SemanticError>,
+    span: &Span,
+) -> Option<TypedExpr> {
+    let local_key = if !type_ctx.current_module.is_empty() {
+        Some(format!("{}_{}", type_ctx.current_module.join("_"), name))
+    } else {
+        None
+    };
+    let found = local_key
+        .as_ref()
+        .and_then(|k| type_ctx.const_map.get(k))
+        .or_else(|| type_ctx.const_map.get(name))
+        .or_else(|| type_ctx.const_map.get(normalized));
+    let (_, val_expr, vis, decl_mod) = found?;
+    if !crate::ast::is_visible(*vis, decl_mod, &type_ctx.current_module) {
+        let clean = name.rsplit("::").next().unwrap_or(name);
+        errors.push(SemanticError {
+            code: "E0603",
+            message: format!("Constant `{clean}` is private"),
+            label: "Private constant".to_string(),
+            secondary_label: None,
+            help: Some(format!("Mark `{clean}` with `pub const` in its defining module")),
+            span: span.clone(),
+        });
+    }
+    Some(with_const_span(val_expr, span.clone()))
+}
+
 pub fn type_check_ident<'a>(
     scopes: &mut ScopeStack,
     errors: &mut Vec<SemanticError>,
@@ -110,6 +161,8 @@ pub fn type_check_ident<'a>(
                 crate::ast::intern_type(*ret_ty),
             );
             Some(TypedExpr::Ident(normalized, fn_ty, span.clone()))
+        } else if let Some(const_expr) = lookup_const_ident(name, &normalized, type_ctx, errors, span) {
+            Some(const_expr)
         } else {
             errors.push(SemanticError {
                 code: "E0425",
@@ -241,6 +294,8 @@ pub fn type_check_ident<'a>(
                 crate::ast::intern_type(*ret_ty),
             );
             Some(TypedExpr::Ident(normalized, fn_ty, span.clone()))
+        } else if let Some(const_expr) = lookup_const_ident(name, &normalized, type_ctx, errors, span) {
+            Some(const_expr)
         } else {
             errors.push(SemanticError {
                 code: "E0425",
@@ -487,6 +542,22 @@ pub fn type_check_let<'a>(
                 typed_val = TypedExpr::CoerceToDyn(Box::new(typed_val), t_name, span.clone());
             }
         }
+        if let Type::FnPtr(..) = resolved_annotated {
+            if let Type::Obj(cname) = resolved_inferred {
+                if cname.starts_with("__Closure_") {
+                    errors.push(SemanticError {
+                        code: "E0434",
+                        message: format!(
+                            "Cannot coerce capturing closure `{cname}` to function pointer `{resolved_annotated:?}`"
+                        ),
+                        label: "Closures can only be coerced to `fn` pointers if they capture no variables".to_string(),
+                        secondary_label: None,
+                        help: Some("Use a non-capturing closure or accept a generic closure bound `where F: Fn(...) -> ...`".to_string()),
+                        span: typed_val.span(),
+                    });
+                }
+            }
+        }
         if unify_res.is_err() && !is_type_compatible(&resolved_annotated, &resolved_inferred) {
             errors.push(SemanticError {
                 code: "E0308",
@@ -515,6 +586,15 @@ pub fn type_check_let<'a>(
     );
     if let Some((target_owned, ref_is_mut)) = borrow_info {
         scopes.add_borrow(name.to_string(), target_owned, ref_is_mut);
+    }
+    let mut closure_borrows = Vec::new();
+    crate::sanal::calls::closures::collect_borrowed_paths_from_typed_expr(
+        &typed_val,
+        scopes,
+        &mut closure_borrows,
+    );
+    for (cap_path, cap_is_mut) in closure_borrows {
+        scopes.add_borrow(name.to_string(), cap_path, cap_is_mut);
     }
 
     type_ctx.check_not_moved_from_projection(&typed_val, errors);
@@ -640,6 +720,22 @@ pub fn type_check_let_tuple<'a>(
         let unify_res = type_ctx.infer.borrow_mut().unify(annotated, inferred_ty);
         let resolved_inferred = type_ctx.infer.borrow_mut().resolve(inferred_ty);
         let resolved_annotated = type_ctx.infer.borrow_mut().resolve(annotated);
+        if let Type::FnPtr(..) = resolved_annotated {
+            if let Type::Obj(cname) = resolved_inferred {
+                if cname.starts_with("__Closure_") {
+                    errors.push(SemanticError {
+                        code: "E0434",
+                        message: format!(
+                            "Cannot coerce capturing closure `{cname}` to function pointer `{resolved_annotated:?}`"
+                        ),
+                        label: "Closures can only be coerced to `fn` pointers if they capture no variables".to_string(),
+                        secondary_label: None,
+                        help: Some("Use a non-capturing closure or accept a generic closure bound `where F: Fn(...) -> ...`".to_string()),
+                        span: typed_val.span(),
+                    });
+                }
+            }
+        }
         if unify_res.is_err() && !is_type_compatible(&resolved_annotated, &resolved_inferred) {
             errors.push(SemanticError {
                 code: "E0308",

@@ -65,18 +65,18 @@ fn ensure_runtime_object() -> Result<PathBuf, String> {
     Ok(runtime_obj_path)
 }
 
-pub fn compile_program_to_binary(
+pub fn compile_program_to_object_bytes(
     program: &TypedProgram,
     struct_layouts: &HashMap<String, StructLayout>,
-    output_binary_path: &str,
-    lib_dirs: &[String],
-    libs: &[String],
     source_map: &crate::loader::SourceMap,
-) -> Result<(), String> {
+) -> Result<Vec<u8>, String> {
     let mut flag_builder = settings::builder();
     flag_builder
         .set("is_pic", "true")
         .map_err(|e| format!("Setting is_pic error: {}", e))?;
+    flag_builder
+        .set("enable_verifier", "true")
+        .map_err(|e| format!("Setting enable_verifier error: {}", e))?;
     let isa_builder = native_builder().map_err(|e| format!("Host target architecture error: {}", e))?;
     let target_isa = isa_builder
         .finish(Flags::new(flag_builder))
@@ -110,7 +110,7 @@ pub fn compile_program_to_binary(
                 meta.enum_layouts,
             );
             if func.is_track_caller {
-                use cranelift_codegen::ir::{types, AbiParam};
+                use cranelift_codegen::ir::types;
                 sig.params.push(AbiParam::new(types::I64));
                 sig.params.push(AbiParam::new(types::I64));
                 sig.params.push(AbiParam::new(types::I64));
@@ -132,9 +132,20 @@ pub fn compile_program_to_binary(
     }
 
     let product = module.finish();
-    let object_bytes = product
+    product
         .emit()
-        .map_err(|e| format!("Failed to emit object bytes: {}", e))?;
+        .map_err(|e| format!("Failed to emit object bytes: {}", e))
+}
+
+pub fn compile_program_to_binary(
+    program: &TypedProgram,
+    struct_layouts: &HashMap<String, StructLayout>,
+    output_binary_path: &str,
+    lib_dirs: &[String],
+    libs: &[String],
+    source_map: &crate::loader::SourceMap,
+) -> Result<(), String> {
+    let object_bytes = compile_program_to_object_bytes(program, struct_layouts, source_map)?;
 
     let temp_dir = std::env::temp_dir();
     let obj_path = temp_dir.join(format!("gdrs_main_{}.o", std::process::id()));

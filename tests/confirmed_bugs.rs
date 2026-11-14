@@ -966,3 +966,1048 @@ fn main():
         "Expected `thread!(ret_str, 42)` to pass arg=42 and handle sret cleanly, got:\n{combined}"
     );
 }
+
+/// src/sanal/control_flow/blocks.rs:
+/// Blocks whose last statement is `let` returned the bound variable's type instead of `Type::Unit`,
+/// causing false E0308 mismatches across `if`/`else` arms and re-registering dropped `let` values
+/// as block result temps in `compile_block`.
+#[test]
+fn bug_fuzz1_if_else_trailing_let_unit_and_no_double_drop() {
+    let out = run_gdrs_source(
+        "fuzz1_trailing_let",
+        r#"
+use std::vec::Vec
+
+fn check_branches(flag: bool) -> i64:
+	if flag:
+		let a: i64 = 10
+	else:
+		let v: Vec<i64> = vec![1, 2, 3]
+	if flag:
+		let x: Vec<i64> = vec![4, 5]
+	else:
+		let y: Vec<i64> = vec![6, 7]
+	return 42
+
+fn main():
+	let r1 = check_branches(true)
+	let r2 = check_branches(false)
+	log!("r1={} r2={}", r1, r2)
+"#,
+    );
+    let combined = combined_output(&out);
+    assert!(
+        out.status.success() && combined.contains("r1=42 r2=42"),
+        "Expected trailing `let` inside `if`/`else` to check as Unit and run without double-drop, got:\n{combined}"
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        let make_src = |n: usize| {
+            format!(
+                r#"
+use std::vec::Vec
+
+fn step(flag: bool):
+	if flag:
+		let v: Vec<i64> = vec![10, 20, 30]
+	else:
+		let w: Vec<i64> = vec![40, 50, 60]
+
+fn main():
+	let mut i = 0
+	while i < {n}:
+		step((i % 2) == 0)
+		i = i + 1
+"#
+            )
+        };
+        let net_small = measure_net_allocs_macos(&make_src, 10, &[]);
+        let net_large = measure_net_allocs_macos(&make_src, 210, &[]);
+        let leaked = net_large - net_small;
+        assert_eq!(
+            leaked, 0,
+            "Expected trailing `let Vec` in `if`/`else` not to leak, leaked {leaked} allocations over 200 iterations"
+        );
+    }
+}
+
+/// src/codegen/expr.rs:
+/// `coerce_val` and `coerce_typed_val` omitted `types::I16`, lacked signed/unsigned extension
+/// distinction on widening, and passed `I8`/`I16` directly to `fcvt_from_*`.
+#[test]
+fn bug_fuzz2_i16_u16_coercion_reassignment_and_float_cast() {
+    let out = run_gdrs_source(
+        "fuzz2_i16_u16",
+        r#"
+fn main():
+	let mut a: i16 = -154
+	let mut b: u16 = 50000
+	a = 11
+	a = -88
+	b = 1234
+	let a32: i32 = a as i32
+	let a64: i64 = a as i64
+	let b32: u32 = b as u32
+	let b64: u64 = b as u64
+	let mut c8: i8 = -12
+	let c16: i16 = c8 as i16
+	let mut u8v: u8 = 250
+	let u16v: u16 = u8v as u16
+	let af32: f32 = a as f32
+	let af64: f64 = a as f64
+	let bf32: f32 = b as f32
+	let bf64: f64 = b as f64
+	assert_eq!(a32, -88 as i32)
+	assert_eq!(a64, -88)
+	assert_eq!(b32, 1234 as u32)
+	assert_eq!(b64, 1234 as u64)
+	assert_eq!(c16, -12 as i16)
+	assert_eq!(u16v, 250 as u16)
+	assert!(af32 < 0.0 as f32)
+	assert!(af64 < 0.0)
+	assert!(bf32 > 1000.0 as f32)
+	assert!(bf64 > 1000.0)
+	log!("ok {} {} {} {}", a, b, c16, u16v)
+"#,
+    );
+    let combined = combined_output(&out);
+    assert!(
+        out.status.success() && combined.contains("ok -88 1234 -12 250"),
+        "Expected i16/u16 locals, reassignments, width coercions, and float casts to work, got:\n{combined}"
+    );
+}
+
+/// src/ast/mod.rs:
+/// `Type::is_copy` omitted `Type::Array(elem, _) => elem.is_copy()`, causing arrays of `Copy`
+/// elements like `[i64; 4]` to move on binding/assignment and trigger false `E0382`.
+#[test]
+fn bug_fuzz3_fixed_array_copy_semantics() {
+    let ok_out = run_gdrs_source(
+        "fuzz3_array_copy_pos",
+        r#"
+fn main():
+	let a: [i64; 4] = [1, 2, 3, 4]
+	let mut b: [i64; 4] = a
+	b = a
+	let tp: [(i64, bool); 2] = [(7, true), (8, false)]
+	let tp2: [(i64, bool); 2] = tp
+	log!("a={:?} b={:?} tp={}", a, b, tp[0].0 + tp2[1].0)
+"#,
+    );
+    let ok_combined = combined_output(&ok_out);
+    assert!(
+        ok_out.status.success() && ok_combined.contains("a=[1, 2, 3, 4] b=[1, 2, 3, 4] tp=15"),
+        "Expected `[i64; 4]` and `[(i64, bool); 2]` to be Copy without E0382, got:\n{ok_combined}"
+    );
+
+    let err_out = run_gdrs_source(
+        "fuzz3_array_non_copy_neg",
+        r#"
+use std::string::String
+
+fn main():
+	let arr: [String; 2] = [String::from("a"), String::from("b")]
+	let moved: [String; 2] = arr
+	log!("{:?}", arr)
+"#,
+    );
+    let err_combined = combined_output(&err_out);
+    assert!(
+        !err_out.status.success() && err_combined.contains("E0382"),
+        "Expected `[String; 2]` not to be Copy and reject use-after-move with E0382, got:\n{err_combined}"
+    );
+}
+
+/// src/codegen/func.rs & src/codegen/branching.rs:
+/// Dead statements after `return`, `break`, `continue`, or all-diverging `if`/`else`/`match`
+/// caused `compile_func` / `expr_is_terminator` to append terminators to already-filled Cranelift blocks.
+#[test]
+fn bug_fuzz4_dead_code_after_return_break_continue_and_diverging_branches() {
+    let out = run_gdrs_source(
+        "fuzz4_dead_after_term",
+        r#"
+enum Kind:
+	A
+	B
+
+fn early_unit():
+	return
+	let mut total: i64 = 0
+
+fn early_val(flag: bool) -> i64:
+	if flag:
+		return 10
+	else:
+		return 20
+	let unreachable_x: i64 = 999
+	return unreachable_x
+
+fn match_diverge(k: Kind) -> i64:
+	match k:
+		Kind::A => return 1
+		Kind::B => return 2
+	let unreachable_y: i64 = 888
+	return unreachable_y
+
+fn loop_dead_code() -> i64:
+	let mut acc: i64 = 0
+	let mut i: i64 = 0
+	while i < 4:
+		i += 1
+		if i == 2:
+			continue
+			acc += 100
+		if i == 3:
+			break
+			let dead: i64 = 50
+		acc += i
+	return acc
+
+fn main():
+	early_unit()
+	let a = early_val(true)
+	let b = early_val(false)
+	let m = match_diverge(Kind::B)
+	let l = loop_dead_code()
+	log!("a={} b={} m={} l={}", a, b, m, l)
+"#,
+    );
+    let combined = combined_output(&out);
+    assert!(
+        out.status.success() && combined.contains("a=10 b=20 m=2 l=1"),
+        "Expected dead statements after return/break/continue/diverging branches to compile cleanly, got:\n{combined}"
+    );
+}
+
+/// src/sanal/calls/mod.rs & src/sanal/objects/construction.rs:
+/// Enum variant calls were type-checked once in `type_check_call`'s `typed_args` loop and again in
+/// `type_check_enum_construct`, moving arguments like `Box::new(v)` twice and triggering false E0382.
+#[test]
+fn bug_fuzz5_enum_variant_arg_evaluated_once_with_box_move() {
+    let ok_out = run_gdrs_source(
+        "fuzz5_enum_single_eval_pos",
+        r#"
+use std::boxed::Box
+use std::string::String
+
+#[derive(Debug)]
+enum RecNode:
+	Leaf(i64)
+	Cons(i64, Box<RecNode>)
+
+fn main():
+	let mut v: RecNode = RecNode::Leaf(1)
+	v = RecNode::Cons(34, Box::new(v))
+	let s: String = String::from("boxed_opt")
+	let o: Option<Box<String> > = Option::Some(Box::new(s))
+	log!("{:?} {:?}", v, o)
+"#,
+    );
+    let ok_combined = combined_output(&ok_out);
+    assert!(
+        ok_out.status.success()
+            && ok_combined.contains("Cons(34, Leaf(1))")
+            && ok_combined.contains("Some(\"boxed_opt\")"),
+        "Expected enum constructor moving into Box::new(v) to evaluate args once without false E0382, got:\n{ok_combined}"
+    );
+}
+
+// ============================================================================
+// Batch 1 Low-Level Foundations Tests (ARM64 C-ABI HFA/sret, Ops, Intrinsics,
+// Raw Pointers, Top-Level Consts, IEEE-754 Math, AST-Indexed Modules)
+// ============================================================================
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn batch1_arm64_c_abi_hfa_and_sret() {
+    let dir = make_temp_dir("batch1_abi_hfa_sret");
+    let c_src = r#"
+typedef struct { float x; float y; } Vec2f;
+typedef struct { double x; double y; double z; } Vec3d;
+typedef struct { double x; double y; double z; double w; } Vec4d;
+typedef struct { long a; long b; long c; long d; } BigStruct;
+
+Vec2f c_vec2f_add(Vec2f a, Vec2f b) {
+    Vec2f out = { a.x + b.x, a.y + b.y };
+    return out;
+}
+
+Vec3d c_vec3d_scale(Vec3d v, double s) {
+    Vec3d out = { v.x * s, v.y * s, v.z * s };
+    return out;
+}
+
+Vec4d c_vec4d_add(Vec4d a, Vec4d b) {
+    Vec4d out = { a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w };
+    return out;
+}
+
+BigStruct c_big_make(long seed, long step) {
+    BigStruct out = { seed, seed + step, seed + 2 * step, seed + 3 * step };
+    return out;
+}
+
+long c_big_sum(BigStruct bs) {
+    return bs.a + bs.b + bs.c + bs.d;
+}
+"#;
+    let _dylib = build_dylib(&dir, "abi_probe", c_src);
+
+    let gdrs_src = r#"
+obj Vec2f:
+	x: f32
+	y: f32
+
+obj Vec3d:
+	x: f64
+	y: f64
+	z: f64
+
+obj Vec4d:
+	x: f64
+	y: f64
+	z: f64
+	w: f64
+
+obj BigStruct:
+	a: i64
+	b: i64
+	c: i64
+	d: i64
+
+extern "C":
+	fn c_vec2f_add(a: Vec2f, b: Vec2f) -> Vec2f
+	fn c_vec3d_scale(v: Vec3d, s: f64) -> Vec3d
+	fn c_vec4d_add(a: Vec4d, b: Vec4d) -> Vec4d
+	fn c_big_make(seed: i64, step: i64) -> BigStruct
+	fn c_big_sum(bs: BigStruct) -> i64
+
+fn main():
+	unsafe:
+		let v2 = c_vec2f_add(Vec2f{ x: 1.5 as f32, y: 2.5 as f32 }, Vec2f{ x: 4.0 as f32, y: 5.0 as f32 })
+		let v3 = c_vec3d_scale(Vec3d{ x: 1.0, y: 2.0, z: 3.0 }, 2.5)
+		let v4 = c_vec4d_add(
+			Vec4d{ x: 1.0, y: 2.0, z: 3.0, w: 4.0 },
+			Vec4d{ x: 10.0, y: 20.0, z: 30.0, w: 40.0 }
+		)
+		let big = c_big_make(10, 5)
+		let total = c_big_sum(big)
+		log!("v2={} {}", v2.x, v2.y)
+		log!("v3={} {} {}", v3.x, v3.y, v3.z)
+		log!("v4={} {} {} {}", v4.x, v4.y, v4.z, v4.w)
+		log!("big={} {} {} {} sum={}", big.a, big.b, big.c, big.d, total)
+"#;
+    let src_path = dir.join("abi_test.gdrs");
+    let bin_path = dir.join("abi_test");
+    fs::write(&src_path, gdrs_src).unwrap();
+
+    let build_out = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .arg("build")
+        .arg(&src_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .arg("-L")
+        .arg(&dir)
+        .arg("-l")
+        .arg("abi_probe")
+        .output()
+        .expect("failed to build abi test");
+    assert!(
+        build_out.status.success(),
+        "gdrs build failed:\n{}",
+        combined_output(&build_out)
+    );
+
+    let run_out = Command::new(&bin_path)
+        .env("DYLD_LIBRARY_PATH", &dir)
+        .output()
+        .expect("failed to run abi_test binary");
+    let _ = fs::remove_dir_all(&dir);
+
+    let out_str = combined_output(&run_out);
+    assert!(
+        run_out.status.success()
+            && out_str.contains("v2=5.5 7.5")
+            && out_str.contains("v3=2.5 5.0 7.5")
+            && out_str.contains("v4=11.0 22.0 33.0 44.0")
+            && out_str.contains("big=10 15 20 25 sum=70"),
+        "ARM64 C-ABI HFA/sret test failed:\n{out_str}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn batch1_overloaded_ops_and_dyncall_temp_drop() {
+    let ok_out = run_gdrs_source(
+        "batch1_overloaded_ops_ok",
+        r#"
+use std::ops::{Add, Sub, Mul, Div, Rem, Neg}
+
+obj Num:
+	v: i64
+
+impl Mul for Num:
+	fn mul(&self, other: &Num) -> Num:
+		return Num{ v: self.v * other.v }
+
+impl Div for Num:
+	fn div(&self, other: &Num) -> Num:
+		return Num{ v: self.v / other.v }
+
+impl Rem for Num:
+	fn rem(&self, other: &Num) -> Num:
+		return Num{ v: self.v % other.v }
+
+impl Neg for Num:
+	fn neg(&self) -> Num:
+		return Num{ v: 0 - self.v }
+
+obj RefBox:
+	v: i64
+
+impl Add for RefBox:
+	fn add(&self, other: &RefBox) -> RefBox:
+		return RefBox{ v: self.v + other.v }
+
+fn main():
+	let a = Num{ v: 20 }
+	let b = Num{ v: 6 }
+	let m = a * b
+	let d = a / b
+	let r = a % b
+	let n = -b
+	let rb1 = RefBox{ v: 12 }
+	let rb2 = RefBox{ v: 30 }
+	let rb_sum1 = &rb1 + &rb2
+	let rb_sum2 = rb1 + rb2
+	log!("ops={} {} {} {} {} {}", m.v, d.v, r.v, n.v, rb_sum1.v, rb_sum2.v)
+"#,
+    );
+    let ok_str = combined_output(&ok_out);
+    assert!(
+        ok_out.status.success() && ok_str.contains("ops=120 3 2 -6 42 42"),
+        "Overloaded Mul/Div/Rem/Neg/&T+T failed:\n{ok_str}"
+    );
+
+    let uam_out = run_gdrs_source(
+        "batch1_overloaded_ops_move_err",
+        r#"
+use std::ops::Add
+use std::string::String
+
+obj Owned:
+	label: String
+
+impl Add for Owned:
+	fn add(self, other: Owned) -> Owned:
+		return Owned{ label: self.label }
+
+fn main():
+	let a = Owned{ label: String::from("a") }
+	let b = Owned{ label: String::from("b") }
+	let c = a + b
+	log!("{}", a.label)
+"#,
+    );
+    let uam_str = combined_output(&uam_out);
+    assert!(
+        !uam_out.status.success() && uam_str.contains("E0382"),
+        "Expected E0382 use-after-move after moving non-Copy operand in `+`, got:\n{uam_str}"
+    );
+
+    let make_dyn_src = |n: usize| {
+        format!(
+            r#"
+use std::string::String
+
+trait Greeter:
+	fn greet(&self) -> String
+
+obj Bot:
+	id: i64
+
+impl Greeter for Bot:
+	fn greet(&self) -> String:
+		return String::from("hello_dyn_trait_temp_drop_check_payload")
+
+fn main():
+	let b = Bot{{ id: 1 }}
+	let g: dyn Greeter = b
+	let mut i = 0
+	while i < {n}:
+		g.greet()
+		i = i + 1
+"#
+        )
+    };
+    let net1 = measure_net_allocs_macos(&make_dyn_src, 200, &[]);
+    let net2 = measure_net_allocs_macos(&make_dyn_src, 2000, &[]);
+    assert_eq!(
+        net1, net2,
+        "Expected DynCall temporary return String to drop with 0 leak growth (n=200 net={net1}, n=2000 net={net2})"
+    );
+}
+
+#[test]
+fn batch1_mem_intrinsics_and_vec_raw_parts() {
+    let out = run_gdrs_source(
+        "batch1_mem_and_vec_raw",
+        r#"
+use std::mem::{size_of, align_of, alloc_aligned}
+use std::vec::Vec
+use std::libc::{malloc, free}
+
+obj Padded:
+	flag: u8
+	val: i64
+
+fn main():
+	let p = Padded{ flag: 1 as u8, val: 99 }
+	log!(
+		"sizes={} {} {} {} {} align={} {} vec={}",
+		size_of::<i64>(),
+		size_of::<i32>(),
+		size_of::<u8>(),
+		size_of::<Padded>(),
+		size_of(&p),
+		align_of::<Padded>(),
+		align_of(&p),
+		size_of::<Vec<i64> >()
+	)
+	let aligned = alloc_aligned(256, 64)
+	let is_aligned = ((aligned as i64) != 0) && (((aligned as i64) % 64) == 0)
+	unsafe:
+		free(aligned)
+
+	let mut v: Vec<i64> = Vec::new()
+	v.push(10)
+	v.push(20)
+	v.push(30)
+	unsafe:
+		let p_mut = v.as_mut_ptr()
+		let slot1 = p_mut + 1
+		*slot1 = 222
+		let p_const = v.as_ptr()
+		let third = *(p_const + 2)
+
+		let raw_buf = malloc(3 * size_of::<i64>()) as *i64
+		*raw_buf = 100
+		*(raw_buf + 1) = 200
+		*(raw_buf + 2) = 300
+		let rebuilt = Vec::from_raw_parts(raw_buf, 3, 3)
+		log!(
+			"aligned={} vec_raw={} {} rebuilt={} {}",
+			is_aligned,
+			v[1],
+			third,
+			rebuilt[0],
+			rebuilt[2]
+		)
+"#,
+    );
+    let s = combined_output(&out);
+    assert!(
+        out.status.success()
+            && s.contains("sizes=8 4 1 16 16 align=8 8 vec=24")
+            && s.contains("aligned=true vec_raw=222 30 rebuilt=100 300"),
+        "size_of/align_of/alloc_aligned/Vec raw parts test failed:\n{s}"
+    );
+}
+
+#[test]
+fn batch1_top_level_const_math_and_ast_modules() {
+    let basic_out = run_gdrs_source(
+        "batch1_const_and_math",
+        r#"
+use std::math::{PI, E, EPSILON, INFINITY, NEG_INFINITY, NAN, is_nan, is_infinite, is_finite}
+
+const LIMIT: i64 = 10 + 2 * 3
+const DOUBLE_LIMIT: i64 = LIMIT * 2
+const BYTE_MAX: u8 = 250
+const HALF: f32 = 1.5
+const FLAG: bool = 3 < 5
+const TAG: str = "const_ok"
+
+fn main():
+	log!(
+		"const={} {} {} {} {} {}",
+		LIMIT,
+		DOUBLE_LIMIT,
+		BYTE_MAX as i64,
+		HALF,
+		FLAG,
+		TAG
+	)
+	log!(
+		"ieee={} {} {} {} {} {} eps={}",
+		is_nan(NAN),
+		is_nan(PI),
+		is_infinite(INFINITY),
+		is_infinite(NEG_INFINITY),
+		is_finite(E),
+		is_finite(INFINITY),
+		EPSILON > 0.0
+	)
+"#,
+    );
+    let basic_str = combined_output(&basic_out);
+    assert!(
+        basic_out.status.success()
+            && basic_str.contains("const=16 32 250 1.5 true const_ok")
+            && basic_str.contains("ieee=true false true true true false eps=true"),
+        "Top-level const & math IEEE-754 constants test failed:\n{basic_str}"
+    );
+
+    let dir = make_temp_dir("batch1_ast_modules");
+    let pkg_dir = dir.join("pkg");
+    fs::create_dir_all(&pkg_dir).unwrap();
+
+    fs::write(
+        pkg_dir.join("fake.gdrs"),
+        r#"
+// obj Widget fn make_val const SCALE
+pub fn dummy() -> i64:
+	let note = "obj Widget fn make_val const SCALE"
+	return 0
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        pkg_dir.join("real.gdrs"),
+        r#"
+pub obj Widget:
+	pub val: i64
+
+pub const SCALE: i64 = 10
+const SECRET: i64 = 99
+
+fn sibling_secret() -> i64:
+	return 7
+
+pub fn make_val() -> i64:
+	return sibling_secret() * SCALE
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        dir.join("facade.gdrs"),
+        r#"
+pub use pkg::Widget
+pub use pkg::make_val
+"#,
+    )
+    .unwrap();
+
+    let main_ok = dir.join("main_ok.gdrs");
+    fs::write(
+        &main_ok,
+        r#"
+use facade::{Widget, make_val}
+use pkg::SCALE
+
+fn main():
+	let w = Widget{ val: make_val() + SCALE }
+	log!("mod_ok={}", w.val)
+"#,
+    )
+    .unwrap();
+
+    let ok_mod_out = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .arg(&main_ok)
+        .output()
+        .expect("failed to run AST module test");
+    let ok_mod_str = combined_output(&ok_mod_out);
+
+    let main_priv = dir.join("main_priv.gdrs");
+    fs::write(
+        &main_priv,
+        r#"
+use pkg::SECRET
+
+fn main():
+	log!("{}", SECRET)
+"#,
+    )
+    .unwrap();
+
+    let priv_out = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .arg(&main_priv)
+        .output()
+        .expect("failed to run private const visibility test");
+    let priv_str = combined_output(&priv_out);
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        ok_mod_out.status.success() && ok_mod_str.contains("mod_ok=80"),
+        "AST-indexed module lookup + pub use + intra-module sibling fn + pub const failed:\n{ok_mod_str}"
+    );
+    assert!(
+        !priv_out.status.success() && priv_str.contains("E0603"),
+        "Expected E0603 when importing private `const SECRET`, got:\n{priv_str}"
+    );
+}
+
+#[test]
+fn priority2_closures_move_drop_fn_fnmut_fnonce() {
+    // 1. Positive: move closure transfers Drop ownership and drops once; Fn / FnMut / FnOnce semantics
+    let ok_out = run_gdrs_source(
+        "p2_closures_ok",
+        r#"
+use std::core::Drop
+use std::string::String
+
+obj Canary:
+	pub tag: i64
+
+impl Drop for Canary:
+	fn drop(mut self):
+		log!("drop_canary={}", self.tag)
+
+fn apply_fn(f: $F, x: i64) -> i64 where F: Fn(i64) -> i64:
+	return f(x) + f(x + 1)
+
+fn consume_str(s: String) -> i64:
+	return s.len()
+
+fn main():
+	let base = 10
+	let fn_closure = |x|: x + base
+	log!("fn_res={}", apply_fn(fn_closure, 5))
+
+	let mut acc = 0
+	if true:
+		let mut mut_closure = |x|:
+			acc += x
+			acc
+		let a1 = mut_closure(3)
+		let a2 = mut_closure(4)
+		log!("fnmut_res={},{}", a1, a2)
+	log!("acc_after={}", acc)
+
+	let moved_msg = String::from("owned")
+	let c_moved = Canary{ tag: 77 }
+	if true:
+		let once_closure = move ||:
+			let len = consume_str(moved_msg)
+			len + c_moved.tag
+		log!("fnonce_res={}", once_closure())
+	log!("after_inner")
+"#,
+    );
+    let ok_str = combined_output(&ok_out);
+    assert!(
+        ok_out.status.success()
+            && ok_str.contains("fn_res=31")
+            && ok_str.contains("fnmut_res=3,7")
+            && ok_str.contains("acc_after=7")
+            && ok_str.contains("fnonce_res=82")
+            && ok_str.matches("drop_canary=77").count() == 1
+            && ok_str.contains("after_inner"),
+        "Positive closure test failed:\n{ok_str}"
+    );
+
+    // 2. Negative: use after `move` closure capture (E0382)
+    let uam_moved = run_gdrs_source(
+        "p2_closure_move_uam",
+        r#"
+use std::string::String
+
+fn main():
+	let s = String::from("abc")
+	let f = move ||: s.len()
+	log!("{}", s.len())
+"#,
+    );
+    let uam_str = combined_output(&uam_moved);
+    assert!(
+        !uam_moved.status.success() && uam_str.contains("E0382"),
+        "Expected E0382 when using moved value after `move` closure capture, got:\n{uam_str}"
+    );
+
+    // 3. Negative: FnOnce closure called twice (E0382)
+    let call_twice = run_gdrs_source(
+        "p2_closure_fnonce_twice",
+        r#"
+use std::string::String
+
+fn consume(s: String) -> i64:
+	return s.len()
+
+fn main():
+	let s = String::from("hello")
+	let f = move ||: consume(s)
+	let a = f()
+	let b = f()
+	log!("{} {}", a, b)
+"#,
+    );
+    let twice_str = combined_output(&call_twice);
+    assert!(
+        !call_twice.status.success() && twice_str.contains("E0382"),
+        "Expected E0382 when calling FnOnce closure twice, got:\n{twice_str}"
+    );
+
+    // 4. Negative: FnMut closure bound without `let mut` (E0382/E0596) and outer mutation while borrowed (E0506)
+    let immut_fnmut = run_gdrs_source(
+        "p2_closure_immut_fnmut",
+        r#"
+fn main():
+	let mut count = 0
+	let f = ||:
+		count += 1
+		count
+	f()
+"#,
+    );
+    let immut_str = combined_output(&immut_fnmut);
+    assert!(
+        !immut_fnmut.status.success() && (immut_str.contains("E0382") || immut_str.contains("E0596")),
+        "Expected E0382/E0596 calling FnMut closure stored in immutable `let`, got:\n{immut_str}"
+    );
+
+    let outer_mut_borrow = run_gdrs_source(
+        "p2_closure_outer_mut_conflict",
+        r#"
+fn main():
+	let mut count = 0
+	let f = ||: count + 1
+	count = 99
+	log!("{}", f())
+"#,
+    );
+    let conflict_str = combined_output(&outer_mut_borrow);
+    assert!(
+        !outer_mut_borrow.status.success() && conflict_str.contains("E0506"),
+        "Expected E0506 mutating variable while borrowed by closure, got:\n{conflict_str}"
+    );
+}
+
+#[test]
+fn priority2_closures_rfc2229_disjoint_and_escape_rules() {
+    // 1. Positive RFC 2229: capture `p.x` by ref while mutating `p.y` outside
+    let ok_disjoint = run_gdrs_source(
+        "p2_rfc2229_disjoint_ok",
+        r#"
+obj Pair:
+	pub x: i64
+	pub y: i64
+
+fn main():
+	let mut p = Pair{ x: 10, y: 20 }
+	let read_x = ||: p.x * 2
+	p.y = 50
+	log!("disjoint={},{}", read_x(), p.y)
+"#,
+    );
+    let disjoint_str = combined_output(&ok_disjoint);
+    assert!(
+        ok_disjoint.status.success() && disjoint_str.contains("disjoint=20,50"),
+        "RFC 2229 disjoint field capture failed:\n{disjoint_str}"
+    );
+
+    // 2. Negative RFC 2229: mutating captured field `p.x` fails with E0506
+    let bad_disjoint = run_gdrs_source(
+        "p2_rfc2229_conflict",
+        r#"
+obj Pair:
+	pub x: i64
+	pub y: i64
+
+fn main():
+	let mut p = Pair{ x: 10, y: 20 }
+	let read_x = ||: p.x * 2
+	p.x = 99
+	log!("{}", read_x())
+"#,
+    );
+    let bad_disjoint_str = combined_output(&bad_disjoint);
+    assert!(
+        !bad_disjoint.status.success() && bad_disjoint_str.contains("E0506"),
+        "Expected E0506 mutating field `p.x` captured by closure, got:\n{bad_disjoint_str}"
+    );
+
+    // 3. Returning a non-`move` borrowing closure fails with E0373
+    let bad_escape = run_gdrs_source(
+        "p2_closure_escape_e0373",
+        r#"
+fn leak() -> i64:
+	let local = 42
+	return |x|: x + local
+fn main():
+	log!("ok")
+"#,
+    );
+    let bad_escape_str = combined_output(&bad_escape);
+    assert!(
+        !bad_escape.status.success() && bad_escape_str.contains("E0373"),
+        "Expected E0373 when returning closure borrowing local variable, got:\n{bad_escape_str}"
+    );
+
+    // 4. Passing capturing closure to bare `fn(i64) -> i64` rejected with E0434
+    let bad_fn_ptr = run_gdrs_source(
+        "p2_closure_fn_ptr_e0434",
+        r#"
+fn run_ptr(f: fn(i64) -> i64, x: i64) -> i64:
+	return f(x)
+
+fn main():
+	let k = 5
+	log!("{}", run_ptr(|x|: x + k, 10))
+"#,
+    );
+    let bad_fn_ptr_str = combined_output(&bad_fn_ptr);
+    assert!(
+        !bad_fn_ptr.status.success() && bad_fn_ptr_str.contains("E0434"),
+        "Expected E0434 passing capturing closure as bare fn pointer, got:\n{bad_fn_ptr_str}"
+    );
+}
+
+#[test]
+fn priority2_lazy_iterator_chaining() {
+    let out = run_gdrs_source(
+        "p2_lazy_iter_chaining",
+        r#"
+use std::vec::Vec
+use std::iter::Range
+use std::core::Option
+
+fn main():
+	let v = Vec::from_slice([1, 2, 3, 4, 5, 6])
+	let scale = 10
+	let threshold = 25
+	let filtered = v.iter().map(|x|: x * scale).filter(|x|: *x > threshold).collect()
+	assert_eq!(filtered.len(), 4)
+	log!("vec_chain={},{},{},{}", filtered[0], filtered[1], filtered[2], filtered[3])
+
+	let range_sum = (Range{ start: 1, end: 6 }).map(|x|: x * 2).filter(|x|: *x >= 6).fold(0, |acc, x|: acc + x)
+	log!("range_fold={}", range_sum)
+
+	let mapper = |x|:
+		if x % 2 == 0:
+			Option::Some(x * 100)
+		else:
+			Option::None
+	let fm_res = v.iter().filter_map(mapper).reduce(|a, b|: a + b)
+	match fm_res:
+		Option::Some(total) => log!("fm_reduce={}", total)
+		Option::None => panic!("unexpected empty reduce")
+"#,
+    );
+    let combined = combined_output(&out);
+    assert!(
+        out.status.success()
+            && combined.contains("vec_chain=30,40,50,60")
+            && combined.contains("range_fold=24")
+            && combined.contains("fm_reduce=1200"),
+        "Lazy iterator chaining test failed:\n{combined}"
+    );
+}
+
+#[test]
+fn priority2_overloaded_index_bitwise_and_compound_assign() {
+    let out = run_gdrs_source(
+        "p2_ops_overloading",
+        r#"
+use std::ops::{Index, IndexMut, BitAnd, BitOr, BitXor, Shl, Shr, AddAssign, SubAssign, MulAssign, DivAssign}
+
+obj Buf2:
+	pub a: i64
+	pub b: i64
+
+impl Index for Buf2:
+	fn index(&self, idx: i64) -> &i64:
+		if idx == 0:
+			return &self.a
+		return &self.b
+
+impl IndexMut for Buf2:
+	fn index_mut(&mut self, idx: i64) -> &mut i64:
+		if idx == 0:
+			return &mut self.a
+		return &mut self.b
+
+obj Bits:
+	pub v: i64
+
+impl BitAnd for Bits:
+	fn bitand(self, rhs: &Bits) -> Bits:
+		return Bits{ v: self.v & rhs.v }
+
+impl BitOr for Bits:
+	fn bitor(self, rhs: &Bits) -> Bits:
+		return Bits{ v: self.v | rhs.v }
+
+impl BitXor for Bits:
+	fn bitxor(self, rhs: &Bits) -> Bits:
+		return Bits{ v: self.v ^ rhs.v }
+
+impl Shl for Bits:
+	fn shl(self, shift: i64) -> Bits:
+		return Bits{ v: self.v << shift }
+
+impl Shr for Bits:
+	fn shr(self, shift: i64) -> Bits:
+		return Bits{ v: self.v >> shift }
+
+impl AddAssign for Bits:
+	fn add_assign(&mut self, rhs: Bits):
+		self.v = self.v + rhs.v
+
+impl SubAssign for Bits:
+	fn sub_assign(&mut self, rhs: Bits):
+		self.v = self.v - rhs.v
+
+impl MulAssign for Bits:
+	fn mul_assign(&mut self, rhs: i64):
+		self.v = self.v * rhs
+
+impl DivAssign for Bits:
+	fn div_assign(&mut self, rhs: i64):
+		self.v = self.v / rhs
+
+fn main():
+	let mut buf = Buf2{ a: 10, b: 20 }
+	buf[1] = 99
+	buf[0] += 5
+	log!("idx={},{}", buf[0], buf[1])
+
+	let x = Bits{ v: 6 }
+	let y = Bits{ v: 3 }
+	let and_v = (Bits{ v: 6 } & y).v
+	let or_v = (Bits{ v: 6 } | y).v
+	let xor_v = (x ^ y).v
+	let shl_v = (Bits{ v: 6 } << 2).v
+	let shr_v = (Bits{ v: 16 } >> 2).v
+	log!("bits={},{},{},{},{}", and_v, or_v, xor_v, shl_v, shr_v)
+
+	let mut acc = Bits{ v: 10 }
+	acc += Bits{ v: 5 }
+	acc -= Bits{ v: 3 }
+	acc *= 4
+	acc /= 6
+	log!("acc_bits={}", acc.v)
+
+	let mut p = 100
+	p += 20
+	p -= 10
+	p *= 2
+	p /= 11
+	log!("prim={}", p)
+"#,
+    );
+    let combined = combined_output(&out);
+    assert!(
+        out.status.success()
+            && combined.contains("idx=15,99")
+            && combined.contains("bits=2,7,5,24,4")
+            && combined.contains("acc_bits=8")
+            && combined.contains("prim=20"),
+        "Operator overloading (Index/IndexMut/Bitwise/CompoundAssign) failed:\n{combined}"
+    );
+}

@@ -29,8 +29,7 @@ pub fn type_suffix(ty: &Type) -> String {
         Type::String => "string".to_string(),
         Type::Unit => "unit".to_string(),
         Type::Obj(n) | Type::Enum(n) | Type::Generic(n) | Type::DynTrait(n) => {
-            let clean = n.rsplit_once('_').map(|(_, s)| s).unwrap_or(n);
-            clean.replace("::", "_").to_lowercase()
+            n.replace("::", "_").to_lowercase()
         }
         Type::Array(t, len) => format!("arr_{}_{len}", type_suffix(t)),
         Type::Tuple(tys) => {
@@ -67,5 +66,26 @@ pub fn mangle_name(base: &str, type_args: &[Type]) -> String {
         }
         mangled
     }
+}
+
+pub fn mangle_name_update(base: &str, type_args: &[Type]) -> String {
+    if type_args.is_empty() {
+        base.to_string()
+    } else {
+        let suffixes: Vec<String> = type_args.iter().map(type_suffix).collect();
+        let mangled = format!("{}_{}", base, suffixes.join("_"));
+        if let Ok(mut reg) = MANGLED_REGISTRY.lock() {
+            reg.insert(mangled.clone(), (base.to_string(), type_args.to_vec()));
+        }
+        mangled
+    }
+}
+
+pub fn register_intrinsic_mangled(base: &str, ty: Type) -> String {
+    let mangled = format!("{base}::{ty:?}");
+    if let Ok(mut reg) = MANGLED_REGISTRY.lock() {
+        reg.insert(mangled.clone(), (base.to_string(), vec![ty]));
+    }
+    mangled
 }
 

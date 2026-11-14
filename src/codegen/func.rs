@@ -223,9 +223,11 @@ pub fn compile_func<M: Module>(
 
         // Owned parameters (and consuming by-value `self` methods) are owned by this function and dropped on exit,
         // unless this function is `Drop::drop`, `fmt`/`to_string`, or a non-consuming trait method.
+        let is_unpacked_call_once = cg.meta.closure_unpacked_call_once_fns.contains(&func.name);
         let track_drop = if param.name == "self" {
             !is_drop_impl
                 && !is_non_consuming_self
+                && !is_unpacked_call_once
                 && !matches!(param.ty, Type::Ref(_) | Type::MutRef(_))
         } else {
             !is_drop_impl
@@ -266,15 +268,18 @@ pub fn compile_func<M: Module>(
         PassMode::Ignore | PassMode::Indirect { .. } => None,
     };
 
+    let mut body_terminated = false;
     let body_len = func.body.len();
     for (idx, expr) in func.body.iter().enumerate() {
         if builder.is_unreachable() {
+            body_terminated = true;
             break;
         }
         cg.push_temp_scope();
         let val = compile_expr(&mut builder, expr, &mut cg, module);
         if builder.is_unreachable() || expr_is_terminator(expr) {
             cg.pop_temp_scope_without_drop();
+            body_terminated = true;
             break;
         }
         let is_last = idx + 1 == body_len;
@@ -298,8 +303,7 @@ pub fn compile_func<M: Module>(
         cg.pop_temp_scope_and_drop(&mut builder, module);
     }
 
-    let is_last_term = func.body.last().map(expr_is_terminator).unwrap_or(false);
-    if !builder.is_unreachable() && !is_last_term {
+    if !builder.is_unreachable() && !body_terminated {
         cg.pop_scope_and_drop(&mut builder, module);
         let scalar_val = ret_var.map(|rv| builder.use_var(rv));
         emit_return_inst(&mut builder, &fn_abi.ret_mode, scalar_val, &cg, module);
@@ -313,7 +317,7 @@ pub fn compile_func<M: Module>(
                 module.clear_context(ctx);
                 return Some(func_id);
             }
-            err => panic!("define_function error: {:?}", err),
+            err => panic!("define_function error in '{}': {:?}", func.name, err),
         }
     }
     module.clear_context(ctx);

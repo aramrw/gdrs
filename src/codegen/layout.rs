@@ -24,7 +24,7 @@ pub enum ReprKind {
 pub enum PassMode {
     Ignore,
     Direct(cranelift_codegen::ir::Type),
-    /// Small aggregate (1..=16 bytes) passed/returned in 1 or 2 `I64` registers.
+    /// Small aggregate (1..=16 bytes, or up to 32-byte ARM64 HFA) passed/returned in registers.
     MultiReg {
         size: u32,
         align: u32,
@@ -388,6 +388,128 @@ pub fn scalar_ir_type(ty: &Type) -> cranelift_codegen::ir::Type {
     scalar_cl_ty(ty).unwrap_or(types::I64)
 }
 
+fn collect_hfa_leaves(
+    ty: &Type,
+    struct_layouts: &HashMap<String, StructLayout>,
+    enum_layouts: &EnumLayoutMap,
+    visited: &mut HashSet<String>,
+    leaves: &mut Vec<cranelift_codegen::ir::Type>,
+) -> bool {
+    match ty {
+        Type::F32 => {
+            leaves.push(types::F32);
+            true
+        }
+        Type::Float => {
+            leaves.push(types::F64);
+            true
+        }
+        Type::Array(elem, len) => {
+            if *len == 0 || *len > 4 {
+                return false;
+            }
+            for _ in 0..*len {
+                if !collect_hfa_leaves(elem, struct_layouts, enum_layouts, visited, leaves) {
+                    return false;
+                }
+            }
+            true
+        }
+        Type::Tuple(elems) => {
+            if elems.is_empty() {
+                return false;
+            }
+            for elem in *elems {
+                if !collect_hfa_leaves(elem, struct_layouts, enum_layouts, visited, leaves) {
+                    return false;
+                }
+            }
+            true
+        }
+        Type::Obj(name) => {
+            let norm = normalize_type_name(name);
+            if norm == "f32" {
+                leaves.push(types::F32);
+                return true;
+            }
+            if matches!(norm.as_str(), "f64" | "float") {
+                leaves.push(types::F64);
+                return true;
+            }
+            let Some(layout) = find_struct_layout(struct_layouts, name) else {
+                return false;
+            };
+            if layout.field_offsets.is_empty() || !visited.insert((*name).to_string()) {
+                return false;
+            }
+            let mut ordered: Vec<(u32, Type)> = layout.field_offsets.values().copied().collect();
+            ordered.sort_by_key(|(off, _)| *off);
+            let mut ok = true;
+            for (_, fty) in ordered {
+                if !collect_hfa_leaves(&fty, struct_layouts, enum_layouts, visited, leaves) {
+                    ok = false;
+                    break;
+                }
+            }
+            visited.remove(*name);
+            let _ = enum_layouts;
+            ok
+        }
+        _ => false,
+    }
+}
+
+/// Returns ARM64 AAPCS64 Homogeneous Floating-Point Aggregate (HFA) register chunks
+/// for aggregates made of 1..=4 homogeneous `F32` or `F64` fields with no interior padding.
+#[cfg(target_arch = "aarch64")]
+pub fn hfa_chunks_for_type(
+    ty: &Type,
+    struct_layouts: &HashMap<String, StructLayout>,
+    enum_layouts: &EnumLayoutMap,
+) -> Option<Vec<cranelift_codegen::ir::Type>> {
+    // TODO(cross-platform): implement x86_64 SysV eightbyte SSE/integer classification and Windows x64 ABI.
+    let mut visited = HashSet::new();
+    let mut leaves = Vec::new();
+    if !collect_hfa_leaves(ty, struct_layouts, enum_layouts, &mut visited, &mut leaves) {
+        return None;
+    }
+    if leaves.is_empty() || leaves.len() > 4 {
+        return None;
+    }
+    let first = leaves[0];
+    if !leaves.iter().all(|t| *t == first) {
+        return None;
+    }
+    let (size, _) = size_and_align(ty, struct_layouts, enum_layouts);
+    if size != (leaves.len() as u32) * first.bytes() {
+        return None;
+    }
+    Some(leaves)
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn hfa_chunks_for_type(
+    _ty: &Type,
+    _struct_layouts: &HashMap<String, StructLayout>,
+    _enum_layouts: &EnumLayoutMap,
+) -> Option<Vec<cranelift_codegen::ir::Type>> {
+    // TODO(cross-platform: target_arch = "x86_64"): implement System V AMD64 eightbyte SSE/integer classification.
+    None
+}
+
+/// Returns the ABI parameter descriptor for an indirect `sret` struct return pointer.
+pub fn sret_abi_param() -> AbiParam {
+    #[cfg(target_arch = "aarch64")]
+    {
+        AbiParam::special(types::I64, cranelift_codegen::ir::ArgumentPurpose::StructReturn)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        // TODO(cross-platform): check x86_64 SysV / Windows x64 `ArgumentPurpose::StructReturn` ABI handling.
+        AbiParam::new(types::I64)
+    }
+}
+
 pub fn pass_mode_for_type(
     ty: &Type,
     force_indirect: bool,
@@ -398,6 +520,15 @@ pub fn pass_mode_for_type(
         ReprKind::Zst => PassMode::Ignore,
         ReprKind::Scalar(cl_ty) => PassMode::Direct(cl_ty),
         ReprKind::Aggregate { size, align } => {
+            if !force_indirect {
+                if let Some(hfa_chunks) = hfa_chunks_for_type(ty, struct_layouts, enum_layouts) {
+                    return PassMode::MultiReg {
+                        size,
+                        align,
+                        chunks: hfa_chunks,
+                    };
+                }
+            }
             if force_indirect || size > 16 {
                 PassMode::Indirect { size, align }
             } else {
@@ -424,7 +555,7 @@ pub fn abi_signature_for_fn(
     let ret_mode = pass_mode_for_type(ret_type, false, struct_layouts, enum_layouts);
     let has_sret = matches!(ret_mode, PassMode::Indirect { .. });
     if has_sret {
-        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(sret_abi_param());
     } else {
         match &ret_mode {
             PassMode::Ignore => {}
@@ -532,8 +663,8 @@ pub fn emit_memcpy_bytes<M: Module>(
     }
 }
 
-/// Loads `chunks.len()` `I64` registers from an aggregate stored at `src_ptr`,
-/// copying through a padded scratch stack slot if `size % 8 != 0` to avoid out-of-bounds reads.
+/// Loads `chunks.len()` register chunks (`I64`, `F32`, or `F64`) from an aggregate stored at `src_ptr`,
+/// copying through a zeroed scratch stack slot if `size < total_chunk_bytes` to avoid out-of-bounds reads.
 pub fn load_multireg_chunks<M: Module>(
     builder: &mut FunctionBuilder,
     module: &mut M,
@@ -541,13 +672,15 @@ pub fn load_multireg_chunks<M: Module>(
     size: u32,
     chunks: &[cranelift_codegen::ir::Type],
 ) -> Vec<Value> {
-    let read_base = if size % 8 == 0 && size >= (chunks.len() as u32) * 8 {
+    let total_chunk_bytes: u32 = chunks.iter().map(|t| t.bytes()).sum();
+    let read_base = if size >= total_chunk_bytes {
         src_ptr
     } else {
-        let buf_bytes = (chunks.len() as u32) * 8;
+        let buf_bytes = total_chunk_bytes.max(8);
         let (_, scratch_addr) = alloc_stack_slot(builder, buf_bytes, 8);
         let zero = builder.ins().iconst(types::I64, 0);
-        for i in 0..chunks.len() {
+        let zero_slots = (buf_bytes + 7) / 8;
+        for i in 0..zero_slots {
             builder
                 .ins()
                 .store(MemFlags::new(), zero, scratch_addr, (i * 8) as i32);
@@ -555,19 +688,21 @@ pub fn load_multireg_chunks<M: Module>(
         emit_memcpy_bytes(builder, module, scratch_addr, src_ptr, size);
         scratch_addr
     };
-    chunks
-        .iter()
-        .enumerate()
-        .map(|(i, cl_ty)| {
+    let mut offset = 0i32;
+    let mut out = Vec::with_capacity(chunks.len());
+    for cl_ty in chunks {
+        out.push(
             builder
                 .ins()
-                .load(*cl_ty, MemFlags::new(), read_base, (i * 8) as i32)
-        })
-        .collect()
+                .load(*cl_ty, MemFlags::new(), read_base, offset),
+        );
+        offset += cl_ty.bytes() as i32;
+    }
+    out
 }
 
-/// Stores `values` (`I64` register chunks) into an aggregate at `dst_ptr`,
-/// avoiding out-of-bounds writes when `size % 8 != 0`.
+/// Stores `values` (`I64`, `F32`, or `F64` register chunks) into an aggregate at `dst_ptr`,
+/// avoiding out-of-bounds writes when `size < total_val_bytes`.
 pub fn store_multireg_chunks<M: Module>(
     builder: &mut FunctionBuilder,
     module: &mut M,
@@ -575,19 +710,27 @@ pub fn store_multireg_chunks<M: Module>(
     size: u32,
     values: &[Value],
 ) {
-    if size % 8 == 0 && size >= (values.len() as u32) * 8 {
-        for (i, val) in values.iter().enumerate() {
-            builder
-                .ins()
-                .store(MemFlags::new(), *val, dst_ptr, (i * 8) as i32);
+    let total_val_bytes: u32 = values
+        .iter()
+        .map(|v| builder.func.dfg.value_type(*v).bytes())
+        .sum();
+    if size >= total_val_bytes {
+        let mut offset = 0i32;
+        for val in values {
+            let v_bytes = builder.func.dfg.value_type(*val).bytes() as i32;
+            builder.ins().store(MemFlags::new(), *val, dst_ptr, offset);
+            offset += v_bytes;
         }
     } else {
-        let buf_bytes = (values.len() as u32).max(1) * 8;
+        let buf_bytes = total_val_bytes.max(8);
         let (_, scratch_addr) = alloc_stack_slot(builder, buf_bytes, 8);
-        for (i, val) in values.iter().enumerate() {
+        let mut offset = 0i32;
+        for val in values {
+            let v_bytes = builder.func.dfg.value_type(*val).bytes() as i32;
             builder
                 .ins()
-                .store(MemFlags::new(), *val, scratch_addr, (i * 8) as i32);
+                .store(MemFlags::new(), *val, scratch_addr, offset);
+            offset += v_bytes;
         }
         emit_memcpy_bytes(builder, module, dst_ptr, scratch_addr, size);
     }

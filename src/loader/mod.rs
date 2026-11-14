@@ -6,10 +6,12 @@ pub mod files;
 
 use crate::ast::*;
 use crate::loader::derives::expand_derives;
-use crate::loader::files::load_file_recursive;
+use crate::loader::files::{load_file_recursive, load_source_str};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
+#[derive(Debug, Clone)]
 pub struct SourceFile {
     pub path: PathBuf,
     pub source: String,
@@ -17,6 +19,7 @@ pub struct SourceFile {
     pub end: usize,
 }
 
+#[derive(Debug, Clone)]
 pub struct SourceMap {
     pub files: Vec<SourceFile>,
     pub entry_index: usize,
@@ -99,27 +102,11 @@ impl SourceMap {
     }
 }
 
-pub fn load_program(entry_file: &Path) -> Result<(Program, SourceMap), String> {
-    let mut loaded_files = HashSet::new();
-    let mut source_map = SourceMap::new();
-    let mut merged_program = Program {
-        mods: Vec::new(),
-        uses: Vec::new(),
-        traits: Vec::new(),
-        trait_aliases: Vec::new(),
-        externs: Vec::new(),
-        structs: Vec::new(),
-        enums: Vec::new(),
-        impls: Vec::new(),
-        functions: Vec::new(),
-    };
+static STD_PRELUDE_CACHE: OnceLock<Result<(Program, SourceMap, HashSet<PathBuf>), String>> =
+    OnceLock::new();
 
-    let base_dir = entry_file
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-
-    let std_dir = if let Ok(env_path) = std::env::var("GDRS_STD_PATH") {
+fn resolve_std_dir() -> PathBuf {
+    if let Ok(env_path) = std::env::var("GDRS_STD_PATH") {
         PathBuf::from(env_path)
     } else if let Ok(exe_path) = std::env::current_exe() {
         let exe_dir = exe_path.parent().unwrap_or_else(|| Path::new("."));
@@ -137,7 +124,26 @@ pub fn load_program(entry_file: &Path) -> Result<(Program, SourceMap), String> {
         }
     } else {
         PathBuf::from("std")
+    }
+}
+
+fn load_std_prelude() -> Result<(Program, SourceMap, HashSet<PathBuf>), String> {
+    let mut loaded_files = HashSet::new();
+    let mut source_map = SourceMap::new();
+    let mut merged_program = Program {
+        mods: Vec::new(),
+        uses: Vec::new(),
+        traits: Vec::new(),
+        trait_aliases: Vec::new(),
+        externs: Vec::new(),
+        consts: Vec::new(),
+        structs: Vec::new(),
+        enums: Vec::new(),
+        impls: Vec::new(),
+        functions: Vec::new(),
     };
+
+    let std_dir = resolve_std_dir();
 
     let std_files = [
         ("libc.gdrs", vec!["std".to_string(), "libc".to_string()]),
@@ -170,6 +176,17 @@ pub fn load_program(entry_file: &Path) -> Result<(Program, SourceMap), String> {
         }
     }
 
+    Ok((merged_program, source_map, loaded_files))
+}
+
+pub fn load_program(entry_file: &Path) -> Result<(Program, SourceMap), String> {
+    let (mut merged_program, mut source_map, mut loaded_files) = load_std_prelude()?;
+
+    let base_dir = entry_file
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+
     source_map.entry_index = source_map.files.len();
     load_file_recursive(
         entry_file,
@@ -178,6 +195,30 @@ pub fn load_program(entry_file: &Path) -> Result<(Program, SourceMap), String> {
         &mut loaded_files,
         &mut merged_program,
         &mut source_map,
+    )?;
+
+    expand_derives(&mut merged_program);
+
+    Ok((merged_program, source_map))
+}
+
+pub fn load_program_from_str(source: &str, quiet: bool) -> Result<(Program, SourceMap), String> {
+    let cached = STD_PRELUDE_CACHE.get_or_init(load_std_prelude);
+    let (mut merged_program, mut source_map, mut loaded_files) = match cached {
+        Ok(data) => data.clone(),
+        Err(e) => return Err(e.clone()),
+    };
+
+    source_map.entry_index = source_map.files.len();
+    load_source_str(
+        source,
+        Path::new("<memory>.gdrs"),
+        Path::new("."),
+        &[],
+        &mut loaded_files,
+        &mut merged_program,
+        &mut source_map,
+        quiet,
     )?;
 
     expand_derives(&mut merged_program);
@@ -413,7 +454,27 @@ fn rewrite_expr(
             }
         }
         Expr::Call(name, args, _) => {
-            if !name.starts_with('.') {
+            if let Some((base, mut ty_args)) = crate::sanal::mono::lookup_mangled(name) {
+                for arg in &mut ty_args {
+                    rewrite_type(arg, local_types, aliases, prefix);
+                }
+                let resolved_base = if !base.starts_with('.') {
+                    if let Some(r) = resolve_name_alias(&base, aliases, local_types, prefix) {
+                        r
+                    } else if let Some((target, method)) = base.split_once('.') {
+                        if let Some(r) = resolve_name_alias(target, aliases, local_types, prefix) {
+                            format!("{}.{}", r, method)
+                        } else {
+                            base
+                        }
+                    } else {
+                        base
+                    }
+                } else {
+                    base
+                };
+                *name = crate::sanal::mono::mangle_name_update(&resolved_base, &ty_args);
+            } else if !name.starts_with('.') {
                 if let Some(r) = resolve_name_alias(name, aliases, local_types, prefix) {
                     *name = r;
                 } else if let Some((target, method)) = name.split_once('.') {
@@ -480,7 +541,7 @@ fn rewrite_expr(
             rewrite_expr(inner, local_types, aliases, prefix);
             rewrite_type(ty, local_types, aliases, prefix);
         }
-        Expr::Closure(_, body, _) => {
+        Expr::Closure(_, _, body, _) => {
             rewrite_expr(body, local_types, aliases, prefix);
         }
         Expr::Add(lhs, rhs, _)
@@ -503,6 +564,7 @@ fn rewrite_expr(
         | Expr::Or(lhs, rhs, _)
         | Expr::IndexAccess(lhs, rhs, _)
         | Expr::DerefAssign(lhs, rhs, _)
+        | Expr::CompoundAssign(_, lhs, rhs, _)
         | Expr::Range(lhs, rhs, _) => {
             rewrite_expr(lhs, local_types, aliases, prefix);
             rewrite_expr(rhs, local_types, aliases, prefix);

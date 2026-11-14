@@ -11,6 +11,13 @@ use crate::{
     },
 };
 
+fn block_tail_ty(last: Option<&TypedExpr>) -> Type {
+    match last {
+        Some(TypedExpr::Let(..)) | Some(TypedExpr::LetTuple(..)) | None => Type::Unit,
+        Some(expr) => expr.ty(),
+    }
+}
+
 pub fn type_check_block<'a>(
     scopes: &mut ScopeStack,
     errors: &mut Vec<SemanticError>,
@@ -30,10 +37,12 @@ pub fn type_check_block<'a>(
     }
     if let Some(last) = typed_stmts.last() {
         consume_tail_expr(scopes, errors, type_ctx, last);
-        check_block_escape_lifetime(scopes, last, errors);
+        if !matches!(last, TypedExpr::Let(..) | TypedExpr::LetTuple(..)) {
+            check_block_escape_lifetime(scopes, last, errors);
+        }
     }
     scopes.pop_scope();
-    let block_ty = typed_stmts.last().map(|s| s.ty()).unwrap_or(Type::Unit);
+    let block_ty = block_tail_ty(typed_stmts.last());
     Some(TypedExpr::Block(typed_stmts, block_ty, span.clone()))
 }
 
@@ -58,10 +67,12 @@ pub fn type_check_unsafe<'a>(
     }
     if let Some(last) = typed_stmts.last() {
         consume_tail_expr(scopes, errors, &unsafe_ctx, last);
-        check_block_escape_lifetime(scopes, last, errors);
+        if !matches!(last, TypedExpr::Let(..) | TypedExpr::LetTuple(..)) {
+            check_block_escape_lifetime(scopes, last, errors);
+        }
     }
     scopes.pop_scope();
-    let block_ty = typed_stmts.last().map(|s| s.ty()).unwrap_or(Type::Unit);
+    let block_ty = block_tail_ty(typed_stmts.last());
     Some(TypedExpr::Unsafe(typed_stmts, block_ty, span.clone()))
 }
 
@@ -101,6 +112,7 @@ pub fn type_check_return<'a>(
                 });
             }
             Some(ret_expr) => {
+                crate::sanal::calls::closures::check_return_closure_escape(ret_expr, type_ctx, errors);
                 if super::lifetimes::type_may_borrow(&expected_ret) {
                     check_return_ref_lifetime(scopes, ret_expr, errors);
                 }

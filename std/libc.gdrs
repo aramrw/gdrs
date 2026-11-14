@@ -3,6 +3,8 @@ use std::core::{Option}
 
 extern "C":
 	pub fn malloc(size: i64) -> *void
+	pub fn calloc(count: i64, size: i64) -> *void
+	pub fn posix_memalign(memptr: **void, alignment: i64, size: i64) -> i32
 	pub fn realloc(ptr: *void, size: i64) -> *void
 	pub fn free(ptr: *void)
 	pub fn memcpy(dest: *void, src: *void, count: i64) -> *void

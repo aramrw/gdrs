@@ -11,6 +11,18 @@ use crate::{
     },
 };
 
+/// Extracts a dotted projection path like `"p.x"` from nested `FieldAccess` / `Deref` expressions.
+pub fn expr_projection_path(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Ident(name, _) => Some(name.clone()),
+        Expr::FieldAccess(inner, field, _) => {
+            expr_projection_path(inner).map(|base| format!("{base}.{field}"))
+        }
+        Expr::Deref(inner, _) => expr_projection_path(inner),
+        _ => None,
+    }
+}
+
 pub fn type_check_field_access<'a>(
     scopes: &mut ScopeStack,
     errors: &mut Vec<SemanticError>,
@@ -47,6 +59,21 @@ pub fn type_check_field_access<'a>(
     }
 
     let t_target = type_check_expr(scopes, errors, type_ctx, target)?;
+    if let Some(base_path) = expr_projection_path(target) {
+        let full_path = format!("{base_path}.{field_name}");
+        if let Some((true, holder)) = scopes.active_borrow(&full_path) {
+            errors.push(SemanticError {
+                code: "E0502",
+                message: format!(
+                    "Cannot use `{full_path}` because it is mutably borrowed by `{holder}`"
+                ),
+                label: format!("Use of `{full_path}` while mutably borrowed"),
+                secondary_label: None,
+                help: None,
+                span: span.clone(),
+            });
+        }
+    }
     let mut field_ty = Type::Int;
 
     let target_ty = type_ctx.infer.borrow_mut().resolve(t_target.ty());
@@ -197,6 +224,21 @@ pub fn type_check_field_assign<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_target = type_check_expr(scopes, errors, type_ctx, target)?;
+    if let Some(base_path) = expr_projection_path(target) {
+        let full_path = format!("{base_path}.{field_name}");
+        if let Some((true, holder)) = scopes.active_borrow(&full_path) {
+            errors.push(SemanticError {
+                code: "E0502",
+                message: format!(
+                    "Cannot use `{full_path}` because it is mutably borrowed by `{holder}`"
+                ),
+                label: format!("Use of `{full_path}` while mutably borrowed"),
+                secondary_label: None,
+                help: None,
+                span: span.clone(),
+            });
+        }
+    }
     let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
     type_ctx.check_not_moved_from_projection(&t_val, errors);
     mark_expr_moved_if_ident(scopes, errors, &t_val);
@@ -209,7 +251,10 @@ pub fn type_check_field_assign<'a>(
         curr = inner.as_ref();
     }
     if let Expr::Ident(var_name, _) = curr {
-        if let Some((_, holder)) = scopes.active_borrow(var_name) {
+        let path_key = expr_projection_path(target)
+            .map(|p| format!("{p}.{field_name}"))
+            .unwrap_or_else(|| format!("{var_name}.{field_name}"));
+        if let Some((_, holder)) = scopes.active_borrow(&path_key) {
             errors.push(SemanticError {
                 code: "E0506",
                 message: format!(

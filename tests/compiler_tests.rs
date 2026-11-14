@@ -252,7 +252,7 @@ fn soundness_negative_call_and_borrow_checks() {
     );
     assert_err_code(
         "closure_capture",
-        "use std::vec::Vec\nfn main():\n\tlet y = 1\n\tlet v = Vec::from_slice([1])\n\tv.map(|x|: x + y)\n",
+        "fn apply(f: fn(i64) -> i64, x: i64) -> i64:\n\treturn f(x)\nfn main():\n\tlet y = 1\n\tapply(|x|: x + y, 5)\n",
         "E0434",
     );
     assert_err_code(

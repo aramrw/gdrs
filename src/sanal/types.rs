@@ -42,6 +42,7 @@ pub struct TypeCtx<'a> {
     pub extern_c_names: &'a HashMap<String, String>,
     pub trait_methods: &'a HashMap<String, Vec<(String, Vec<Type>, Type)>>,
     pub trait_impls: &'a std::collections::HashSet<(String, String)>,
+    pub const_map: &'a HashMap<String, (Type, TypedExpr, crate::ast::Visibility, Vec<String>)>,
     pub current_module: Vec<String>,
     pub enum_vis: &'a HashMap<String, (crate::ast::Visibility, Vec<String>)>,
     pub extern_vis: &'a HashMap<String, (crate::ast::Visibility, Vec<String>)>,
@@ -176,8 +177,35 @@ impl<'a> TypeCtx<'a> {
                     span: span.clone(),
                 });
             }
-            TypedExpr::FieldAccess(_, field_name, field_ty, span)
-                if self.has_drop_ownership(field_ty) =>
+            TypedExpr::Deref(inner, elem_ty, span)
+                if matches!(
+                    inner.as_ref(),
+                    TypedExpr::Call(fn_name, ..)
+                        if fn_name.ends_with("_index") || fn_name.ends_with("_index_mut")
+                ) && self.has_drop_ownership(elem_ty) =>
+            {
+                errors.push(SemanticError {
+                    code: "E0507",
+                    message: format!(
+                        "Cannot move out of indexed content of type `{elem_ty:?}`"
+                    ),
+                    label: "Cannot move out of indexed container".to_string(),
+                    secondary_label: None,
+                    help: Some(
+                        "Borrow the element instead (e.g. `&container[i]`) or `.clone()` it"
+                            .to_string(),
+                    ),
+                    span: span.clone(),
+                });
+            }
+            TypedExpr::FieldAccess(base, field_name, field_ty, span)
+                if !(field_name.starts_with("__cap_")
+                    && matches!(
+                        base.as_ref(),
+                        TypedExpr::Ident(n, Type::Obj(s), _)
+                            if n == "self" && s.starts_with("__Closure_")
+                    ))
+                    && self.has_drop_ownership(field_ty) =>
             {
                 errors.push(SemanticError {
                     code: "E0507",
@@ -407,6 +435,12 @@ impl<'a> TypeCtx<'a> {
 
     pub fn get_fn(&self, name: &str) -> Option<FuncDecl> {
         let fn_map = self.fn_map.borrow();
+        if !self.current_module.is_empty() {
+            let local_name = format!("{}_{}", self.current_module.join("_"), name);
+            if let Some(f) = fn_map.get(&local_name) {
+                return Some(f.clone());
+            }
+        }
         if let Some(f) = fn_map.get(name) {
             return Some(f.clone());
         }
@@ -513,7 +547,8 @@ pub fn type_check_expr<'a>(
         // Functions & Invocation
         Expr::Call(raw_name, args, span) => calls::type_check_call(scopes, errors, type_ctx, raw_name, args, span),
         Expr::MacroCall(name, args, span) => calls::type_check_macro_call(scopes, errors, type_ctx, name, args, span),
-        Expr::Closure(params, body, span) => calls::type_check_closure(scopes, errors, type_ctx, params, body, span),
+        Expr::Closure(is_move, params, body, span) => calls::type_check_closure(scopes, errors, type_ctx, *is_move, params, body, span),
+        Expr::CompoundAssign(op, lhs, rhs, span) => binops::type_check_compound_assign(scopes, errors, type_ctx, *op, lhs, rhs, span),
 
         // Structs, Enums, Arrays, Tuples, Indexing
         Expr::ArrayInit(elems, span) => objects::type_check_array_init(scopes, errors, type_ctx, elems, span),

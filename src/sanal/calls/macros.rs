@@ -43,7 +43,7 @@ pub fn type_check_macro_call<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     if (name == "thread" || name == "spawn") && args.len() == 2 {
-        if let Expr::Closure(params, body, c_span) = &args[0] {
+        if let Expr::Closure(_, params, body, c_span) = &args[0] {
             if let Some(t_arg1) = type_check_expr(scopes, errors, type_ctx, &args[1]) {
                 let arg_ty = t_arg1.ty();
                 if let Some((reason, help)) = check_send_type(&arg_ty, type_ctx.is_unsafe) {

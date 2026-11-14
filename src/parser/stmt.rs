@@ -2,9 +2,6 @@ use crate::ast::{Expr, Span, Token, TuplePattern, Type};
 use crate::parser::math::dot_field_segments_parser;
 use chumsky::prelude::*;
 
-// Helper type alias for your math AST variant constructors
-type ExprOp = fn(Box<Expr>, Box<Expr>, Span) -> Expr;
-
 pub fn stmt_parser<'a>(
     math: impl Parser<Token, Expr, Error = Simple<Token>> + Clone + 'a,
     type_parser: impl Parser<Token, Type, Error = Simple<Token>> + Clone + 'a,
@@ -64,10 +61,10 @@ pub fn stmt_parser<'a>(
         // Parses `=`, `+=`, `-=`, `*=`, `/=`
         let assign_op = just(Token::Assign)
             .to(None)
-            .or(just(Token::PlusEqual).to(Some(Expr::Add as ExprOp)))
-            .or(just(Token::MinusEqual).to(Some(Expr::Sub as ExprOp)))
-            .or(just(Token::StarEqual).to(Some(Expr::Mul as ExprOp)))
-            .or(just(Token::SlashEqual).to(Some(Expr::Div as ExprOp)));
+            .or(just(Token::PlusEqual).to(Some(crate::ast::AssignOp::Add)))
+            .or(just(Token::MinusEqual).to(Some(crate::ast::AssignOp::Sub)))
+            .or(just(Token::StarEqual).to(Some(crate::ast::AssignOp::Mul)))
+            .or(just(Token::SlashEqual).to(Some(crate::ast::AssignOp::Div)));
 
         let field_target_expr = path
             .clone()
@@ -88,18 +85,15 @@ pub fn stmt_parser<'a>(
             .then(math.clone())
             .map_with_span(|((target_expr, op), rhs), span| {
                 if let Expr::FieldAccess(inner_target, field, _) = target_expr {
-                    let final_rhs = match op {
-                        Some(make_expr) => {
-                            let lhs = Expr::FieldAccess(
-                                inner_target.clone(),
-                                field.clone(),
-                                span.clone(),
-                            );
-                            make_expr(Box::new(lhs), Box::new(rhs), span.clone())
-                        }
-                        None => rhs,
-                    };
-                    Expr::FieldAssign(inner_target, field, Box::new(final_rhs), span)
+                    match op {
+                        Some(cop) => Expr::CompoundAssign(
+                            cop,
+                            Box::new(Expr::FieldAccess(inner_target, field, span.clone())),
+                            Box::new(rhs),
+                            span,
+                        ),
+                        None => Expr::FieldAssign(inner_target, field, Box::new(rhs), span),
+                    }
                 } else {
                     unreachable!()
                 }
@@ -145,24 +139,14 @@ pub fn stmt_parser<'a>(
             })
             .then(assign_op.clone())
             .then(math.clone())
-            .map_with_span(|(((target_expr, idx), op), rhs), span| {
-                let final_rhs = match op {
-                    Some(make_expr) => {
-                        let lhs = Expr::IndexAccess(
-                            target_expr.clone(),
-                            idx.clone(),
-                            span.clone(),
-                        );
-                        make_expr(Box::new(lhs), Box::new(rhs), span.clone())
-                    }
-                    None => rhs,
-                };
-                Expr::IndexAssign(
-                    target_expr,
-                    idx,
-                    Box::new(final_rhs),
+            .map_with_span(|(((target_expr, idx), op), rhs), span| match op {
+                Some(cop) => Expr::CompoundAssign(
+                    cop,
+                    Box::new(Expr::IndexAccess(target_expr, idx, span.clone())),
+                    Box::new(rhs),
                     span,
-                )
+                ),
+                None => Expr::IndexAssign(target_expr, idx, Box::new(rhs), span),
             })
             .then_ignore(just(Token::Newline).or_not());
 
@@ -170,15 +154,14 @@ pub fn stmt_parser<'a>(
         let assign_stmt = select! { Token::Ident(s) => s }
             .then(assign_op.clone())
             .then(math.clone())
-            .map_with_span(|((name, op), rhs), span| {
-                let final_rhs = match op {
-                    Some(make_expr) => {
-                        let lhs = Expr::Ident(name.clone(), span.clone());
-                        make_expr(Box::new(lhs), Box::new(rhs), span.clone())
-                    }
-                    None => rhs,
-                };
-                Expr::Assign(name, Box::new(final_rhs), span)
+            .map_with_span(|((name, op), rhs), span| match op {
+                Some(cop) => Expr::CompoundAssign(
+                    cop,
+                    Box::new(Expr::Ident(name, span.clone())),
+                    Box::new(rhs),
+                    span,
+                ),
+                None => Expr::Assign(name, Box::new(rhs), span),
             })
             .then_ignore(just(Token::Newline).or_not());
 
@@ -392,15 +375,14 @@ pub fn stmt_parser<'a>(
             .ignore_then(math.clone())
             .then(assign_op.clone())
             .then(math.clone())
-            .map_with_span(|((ptr, op), rhs), span| {
-                let final_rhs = match op {
-                    Some(make_expr) => {
-                        let lhs = Expr::Deref(Box::new(ptr.clone()), span.clone());
-                        make_expr(Box::new(lhs), Box::new(rhs), span.clone())
-                    }
-                    None => rhs,
-                };
-                Expr::DerefAssign(Box::new(ptr), Box::new(final_rhs), span)
+            .map_with_span(|((ptr, op), rhs), span| match op {
+                Some(cop) => Expr::CompoundAssign(
+                    cop,
+                    Box::new(Expr::Deref(Box::new(ptr), span.clone())),
+                    Box::new(rhs),
+                    span,
+                ),
+                None => Expr::DerefAssign(Box::new(ptr), Box::new(rhs), span),
             })
             .then_ignore(just(Token::Newline).or_not());
 

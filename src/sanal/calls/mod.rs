@@ -7,7 +7,7 @@ pub mod macros;
 pub mod resolution;
 pub mod validation;
 
-pub use closures::{build_non_capturing_closure, type_check_closure};
+pub use closures::{build_closure, build_non_capturing_closure, type_check_closure};
 pub use helpers::build_substituted_method;
 pub use macros::type_check_macro_call;
 pub use resolution::resolve_call_target;
@@ -304,151 +304,15 @@ pub fn type_check_call<'a>(
         }
     }
 
-    let mut typed_args = Vec::new();
-    if !args.is_empty() {
-        let pre_call_param_tys: Option<Vec<Type>> = if !is_method_syntax && raw_name != "__call_fn_ptr" {
-            let norm = raw_name.replace("::", "_");
-            if let Some(info) = scopes.lookup(raw_name).or_else(|| scopes.lookup(&norm)) {
-                let resolved = type_ctx.infer.borrow_mut().resolve(info.ty);
-                if let Type::FnPtr(ps, _) = resolved {
-                    Some(ps.to_vec())
-                } else {
-                    None
-                }
-            } else {
-                type_ctx
-                    .get_fn(&norm)
-                    .or_else(|| type_ctx.get_fn(raw_name))
-                    .map(|f| f.params.iter().map(|p| p.ty).collect())
-            }
-        } else {
-            None
-        };
-
-        let mut arg0_ctx = type_ctx.clone();
-        if let Some(ref ps) = pre_call_param_tys {
-            if let Some(&p0) = ps.first() {
-                if !crate::sanal::compat::type_contains_generic(&p0) {
-                    arg0_ctx.current_expected_type = Some(p0);
-                }
-            }
-        }
-
-        if let Some(first_arg) = type_check_expr(scopes, errors, &arg0_ctx, &args[0]) {
-            let first_ty = type_ctx.infer.borrow_mut().resolve(first_arg.ty());
-            typed_args.push(first_arg);
-
-            let mut unwrapped_first = first_ty;
-            while let Type::Ref(inner)
-            | Type::MutRef(inner)
-            | Type::Box(inner)
-            | Type::Rc(inner)
-            | Type::Arc(inner) = unwrapped_first
-            {
-                unwrapped_first = *inner;
-            }
-
-            let elem_ty = match &unwrapped_first {
-                Type::Vec(inner) | Type::Slice(inner) | Type::Array(inner, _) => {
-                    Some((**inner).clone())
-                }
-                _ => None,
-            };
-
-            let method_param_tys: Option<Vec<Type>> = if raw_name == "__call_fn_ptr" {
-                if let Type::FnPtr(ps, _) = unwrapped_first {
-                    let mut v = vec![first_ty];
-                    v.extend_from_slice(ps);
-                    Some(v)
-                } else {
-                    None
-                }
-            } else if pre_call_param_tys.is_some() {
-                pre_call_param_tys
-            } else if let Type::Obj(tn) | Type::Enum(tn) = unwrapped_first {
-                let clean_m = raw_name.replace("::", "_");
-                let mangled = format!("{tn}_{clean_m}");
-                type_ctx
-                    .get_fn(&mangled)
-                    .map(|f| f.params.iter().map(|p| p.ty).collect())
-            } else {
-                None
-            };
-
-            for (idx, arg) in args[1..].iter().enumerate() {
-                let expected_arg_ty = method_param_tys
-                    .as_ref()
-                    .and_then(|ps| ps.get(idx + 1).copied())
-                    .filter(|t| !crate::sanal::compat::type_contains_generic(t));
-
-                let mut arg_ctx = type_ctx.clone();
-                arg_ctx.current_expected_type = expected_arg_ty;
-
-                if let Expr::Closure(params, body, c_span) = arg {
-                    let fallback_param_ty = match expected_arg_ty {
-                        Some(Type::FnPtr(ps, _)) => ps.first().copied().unwrap_or(Type::Int),
-                        _ => elem_ty.clone().unwrap_or(Type::Int),
-                    };
-                    typed_args.push(build_non_capturing_closure(
-                        scopes,
-                        errors,
-                        &arg_ctx,
-                        params,
-                        fallback_param_ty,
-                        body,
-                        c_span,
-                    ));
-                } else if let Some(t_arg) = type_check_expr(scopes, errors, &arg_ctx, arg) {
-                    typed_args.push(t_arg);
-                }
-            }
-
-            if raw_name.ends_with("push") && typed_args.len() >= 2 {
-                let recv_ty = type_ctx.infer.borrow_mut().resolve(typed_args[0].ty());
-                let recv_elem_opt = match recv_ty {
-                    Type::Vec(inner) => Some(*inner),
-                    Type::Ref(inner) | Type::MutRef(inner) => match *inner {
-                        Type::Vec(elem) => Some(*elem),
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                if let Some(recv_elem) = recv_elem_opt {
-                    let pushed_ty = type_ctx.infer.borrow_mut().resolve(typed_args[1].ty());
-                    let unify_ok = type_ctx
-                        .infer
-                        .borrow_mut()
-                        .unify(recv_elem, pushed_ty)
-                        .is_ok();
-                    if unify_ok {
-                        let updated_recv = type_ctx.infer.borrow_mut().resolve(typed_args[0].ty());
-                        if let Expr::Ident(vec_var_name, _) = &args[0] {
-                            if let Some(info) = scopes.lookup_mut(vec_var_name) {
-                                info.ty = updated_recv;
-                            }
-                        }
-                        match &mut typed_args[0] {
-                            TypedExpr::Ident(_, t_ty, _)
-                            | TypedExpr::FieldAccess(_, _, t_ty, _)
-                            | TypedExpr::Deref(_, t_ty, _) => {
-                                *t_ty = updated_recv;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let is_enum_candidate = raw_name.contains("::")
-        || matches!(raw_name, "Some" | "None" | "Ok" | "Err")
-        || raw_name.starts_with("Opt_")
-        || raw_name.starts_with("Res_")
-        || raw_name.starts_with("std_core_")
-        || raw_name
-            .rsplit_once('_')
-            .is_some_and(|(e, _)| type_ctx.contains_enum(e));
+    let is_enum_candidate = !is_method_syntax
+        && (raw_name.contains("::")
+            || matches!(raw_name, "Some" | "None" | "Ok" | "Err")
+            || raw_name.starts_with("Opt_")
+            || raw_name.starts_with("Res_")
+            || raw_name.starts_with("std_core_")
+            || raw_name
+                .rsplit_once('_')
+                .is_some_and(|(e, _)| type_ctx.contains_enum(e)));
 
     if is_enum_candidate {
         let prefer_std_option = matches!(
@@ -519,11 +383,210 @@ pub fn type_check_call<'a>(
         }
     }
 
+    let mut typed_args = Vec::new();
+    if !args.is_empty() {
+        let pre_call_param_tys: Option<Vec<Type>> = if !is_method_syntax && raw_name != "__call_fn_ptr" {
+            let norm = raw_name.replace("::", "_");
+            if let Some(info) = scopes.lookup(raw_name).or_else(|| scopes.lookup(&norm)) {
+                let resolved = type_ctx.infer.borrow_mut().resolve(info.ty);
+                if let Type::FnPtr(ps, _) = resolved {
+                    Some(ps.to_vec())
+                } else {
+                    None
+                }
+            } else {
+                type_ctx
+                    .get_fn(&norm)
+                    .or_else(|| type_ctx.get_fn(raw_name))
+                    .map(|f| f.params.iter().map(|p| p.ty).collect())
+            }
+        } else {
+            None
+        };
+
+        let mut arg0_ctx = type_ctx.clone();
+        if let Some(ref ps) = pre_call_param_tys {
+            if let Some(&p0) = ps.first() {
+                if !crate::sanal::compat::type_contains_generic(&p0) {
+                    arg0_ctx.current_expected_type = Some(p0);
+                }
+            }
+        }
+
+        let first_arg_opt = if let Expr::Closure(is_move, params, body, c_span) = &args[0] {
+            let pre_fn_decl = if !is_method_syntax && raw_name != "__call_fn_ptr" {
+                let norm = raw_name.replace("::", "_");
+                type_ctx.get_fn(&norm).or_else(|| type_ctx.get_fn(raw_name))
+            } else {
+                None
+            };
+            let fallback_tys = infer_closure_fallback_params(
+                raw_name,
+                &[],
+                0,
+                pre_call_param_tys.as_ref().and_then(|ps| ps.first().copied()),
+                None,
+                pre_fn_decl.as_ref(),
+                type_ctx,
+            );
+            Some(build_closure(
+                scopes,
+                errors,
+                &arg0_ctx,
+                *is_move,
+                params,
+                &fallback_tys,
+                body,
+                c_span,
+            ))
+        } else {
+            type_check_expr(scopes, errors, &arg0_ctx, &args[0])
+        };
+
+        if let Some(first_arg) = first_arg_opt {
+            let first_ty = type_ctx.infer.borrow_mut().resolve(first_arg.ty());
+            typed_args.push(first_arg);
+
+            let mut unwrapped_first = first_ty;
+            while let Type::Ref(inner)
+            | Type::MutRef(inner)
+            | Type::Box(inner)
+            | Type::Rc(inner)
+            | Type::Arc(inner) = unwrapped_first
+            {
+                unwrapped_first = *inner;
+            }
+
+            let elem_ty = match &unwrapped_first {
+                Type::Vec(inner) | Type::Slice(inner) | Type::Array(inner, _) => {
+                    Some((**inner).clone())
+                }
+                _ => None,
+            };
+
+            let method_param_tys: Option<Vec<Type>> = if raw_name == "__call_fn_ptr" {
+                if let Type::FnPtr(ps, _) = unwrapped_first {
+                    let mut v = vec![first_ty];
+                    v.extend_from_slice(ps);
+                    Some(v)
+                } else {
+                    None
+                }
+            } else if pre_call_param_tys.is_some() {
+                pre_call_param_tys
+            } else if let Type::Obj(tn) | Type::Enum(tn) = unwrapped_first {
+                let clean_m = raw_name.replace("::", "_");
+                let mangled = format!("{tn}_{clean_m}");
+                type_ctx
+                    .get_fn(&mangled)
+                    .map(|f| f.params.iter().map(|p| p.ty).collect())
+            } else {
+                None
+            };
+
+            for (idx, arg) in args[1..].iter().enumerate() {
+                let raw_param_ty = method_param_tys
+                    .as_ref()
+                    .and_then(|ps| ps.get(idx + 1).copied());
+                let expected_arg_ty = raw_param_ty
+                    .filter(|t| !crate::sanal::compat::type_contains_generic(t));
+
+                let mut arg_ctx = type_ctx.clone();
+                arg_ctx.current_expected_type = expected_arg_ty;
+
+                if let Expr::Closure(is_move, params, body, c_span) = arg {
+                    let target_fn_decl = if is_method_syntax {
+                        if let Type::Obj(tn) | Type::Enum(tn) = unwrapped_first {
+                            type_ctx.get_fn(&format!("{tn}_{}", raw_name.replace("::", "_")))
+                        } else {
+                            None
+                        }
+                    } else {
+                        let norm = raw_name.replace("::", "_");
+                        type_ctx.get_fn(&norm).or_else(|| type_ctx.get_fn(raw_name))
+                    };
+                    let fallback_tys = infer_closure_fallback_params(
+                        raw_name,
+                        &typed_args,
+                        idx + 1,
+                        raw_param_ty,
+                        elem_ty,
+                        target_fn_decl.as_ref(),
+                        type_ctx,
+                    );
+                    typed_args.push(build_closure(
+                        scopes,
+                        errors,
+                        &arg_ctx,
+                        *is_move,
+                        params,
+                        &fallback_tys,
+                        body,
+                        c_span,
+                    ));
+                } else if let Some(t_arg) = type_check_expr(scopes, errors, &arg_ctx, arg) {
+                    typed_args.push(t_arg);
+                }
+            }
+
+            if raw_name.ends_with("push") && typed_args.len() >= 2 {
+                let recv_ty = type_ctx.infer.borrow_mut().resolve(typed_args[0].ty());
+                let recv_elem_opt = match recv_ty {
+                    Type::Vec(inner) => Some(*inner),
+                    Type::Ref(inner) | Type::MutRef(inner) => match *inner {
+                        Type::Vec(elem) => Some(*elem),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(recv_elem) = recv_elem_opt {
+                    let pushed_ty = type_ctx.infer.borrow_mut().resolve(typed_args[1].ty());
+                    let unify_ok = type_ctx
+                        .infer
+                        .borrow_mut()
+                        .unify(recv_elem, pushed_ty)
+                        .is_ok();
+                    if unify_ok {
+                        let updated_recv = type_ctx.infer.borrow_mut().resolve(typed_args[0].ty());
+                        if let Expr::Ident(vec_var_name, _) = &args[0] {
+                            if let Some(info) = scopes.lookup_mut(vec_var_name) {
+                                info.ty = updated_recv;
+                            }
+                        }
+                        match &mut typed_args[0] {
+                            TypedExpr::Ident(_, t_ty, _)
+                            | TypedExpr::FieldAccess(_, _, t_ty, _)
+                            | TypedExpr::Deref(_, t_ty, _) => {
+                                *t_ty = updated_recv;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let name = raw_name.replace("::", "_");
 
-    // Handle indirect function pointer call `(expr)(args...)` lowered to `__call_fn_ptr`
+    // Handle indirect function pointer / closure call `(expr)(args...)` lowered to `__call_fn_ptr`
     if raw_name == "__call_fn_ptr" && !typed_args.is_empty() {
         let callee_ty = type_ctx.infer.borrow_mut().resolve(typed_args[0].ty());
+        if let Type::Obj(cname) = callee_ty {
+            if cname.starts_with("__Closure_") {
+                let callee_expr = typed_args.remove(0);
+                return dispatch_closure_obj_call(
+                    scopes,
+                    errors,
+                    type_ctx,
+                    callee_expr,
+                    cname,
+                    typed_args,
+                    span,
+                    None,
+                );
+            }
+        }
         if let Type::FnPtr(param_tys, ret_ty) = callee_ty {
             let supplied = typed_args.len() - 1;
             if supplied != param_tys.len() {
@@ -907,6 +970,98 @@ pub fn type_check_call<'a>(
         ));
     }
 
+    let intrinsic_size_or_align =
+        if let Some((base, ty_args)) = crate::sanal::mono::lookup_mangled(&raw_name) {
+            match base.as_str() {
+                "size_of" | "std::mem::size_of" | "mem::size_of" | "std_mem_size_of" => {
+                    Some((false, Some(ty_args)))
+                }
+                "align_of" | "std::mem::align_of" | "mem::align_of" | "std_mem_align_of" => {
+                    Some((true, Some(ty_args)))
+                }
+                _ => None,
+            }
+        } else {
+            match raw_name {
+                "size_of" | "std::mem::size_of" | "mem::size_of" | "std_mem_size_of" => {
+                    Some((false, None))
+                }
+                "align_of" | "std::mem::align_of" | "mem::align_of" | "std_mem_align_of" => {
+                    Some((true, None))
+                }
+                _ => None,
+            }
+        };
+    if let Some((is_align, opt_ty_args)) = intrinsic_size_or_align {
+        let fn_label = if is_align { "align_of" } else { "size_of" };
+        let target_ty = if let Some(ty_args) = opt_ty_args {
+            if !typed_args.is_empty() || ty_args.len() != 1 {
+                errors.push(SemanticError {
+                    code: "E0061",
+                    message: format!("`{fn_label}::<T>()` expects 0 arguments and 1 type parameter"),
+                    label: "Invalid intrinsic invocation".to_string(),
+                    secondary_label: None,
+                    help: Some(format!("Call `{fn_label}::<T>()` or `{fn_label}(&val)`")),
+                    span: span.clone(),
+                });
+                Type::Error
+            } else {
+                let mut resolved_ty = type_ctx.resolve_type_annotation(ty_args[0]);
+                if let Type::Obj(s) = resolved_ty {
+                    if !type_ctx.contains_struct(s) {
+                        if let Some((base, _)) = crate::sanal::mono::lookup_mangled(s) {
+                            if type_ctx.contains_enum(&base)
+                                || base.ends_with("_Option")
+                                || base.ends_with("_Result")
+                                || base == "Option"
+                                || base == "Result"
+                            {
+                                let _ = type_ctx.get_enum(s);
+                                resolved_ty = Type::Enum(s);
+                            } else {
+                                let _ = type_ctx.get_struct(s);
+                            }
+                        } else {
+                            let _ = type_ctx.get_struct(s);
+                        }
+                    }
+                } else if let Type::Enum(s) = resolved_ty {
+                    let _ = type_ctx.get_enum(s);
+                }
+                resolved_ty
+            }
+        } else if typed_args.len() == 1 {
+            let arg_ty = type_ctx.infer.borrow_mut().resolve(typed_args[0].ty());
+            match arg_ty {
+                Type::Ref(inner) | Type::MutRef(inner) => *inner,
+                other => other,
+            }
+        } else {
+            errors.push(SemanticError {
+                code: "E0061",
+                message: format!(
+                    "`{fn_label}` expects 1 argument or `::<T>()`, found {} arguments",
+                    typed_args.len()
+                ),
+                label: "Expected 1 argument or turbofish type".to_string(),
+                secondary_label: None,
+                help: Some(format!("Use `{fn_label}::<T>()` or `{fn_label}(&val)`")),
+                span: span.clone(),
+            });
+            Type::Error
+        };
+        let intrinsic_name = crate::sanal::mono::register_intrinsic_mangled(
+            if is_align { "__intrinsic_align_of" } else { "__intrinsic_size_of" },
+            target_ty,
+        );
+        return Some(TypedExpr::Call(
+            intrinsic_name,
+            Vec::new(),
+            Type::Int,
+            span.clone(),
+        ));
+    }
+
     if raw_name.ends_with(".drop") || (raw_name == "drop" && !typed_args.is_empty()) {
         errors.push(SemanticError {
             code: "E0040",
@@ -1128,8 +1283,24 @@ pub fn type_check_call<'a>(
             }
         }
         *ext_ret_ty
-    } else if let Some(var_info) = scopes.lookup(&resolved_name) {
+    } else if let Some(var_info) = scopes.lookup(&resolved_name).copied() {
         let var_ty = type_ctx.infer.borrow_mut().resolve(var_info.ty);
+        if let Type::Obj(cname) = var_ty {
+            if cname.starts_with("__Closure_") {
+                let callee_ident = TypedExpr::Ident(resolved_name.clone(), var_ty, span.clone());
+                let dispatched = dispatch_closure_obj_call(
+                    scopes,
+                    errors,
+                    type_ctx,
+                    callee_ident,
+                    cname,
+                    typed_args,
+                    span,
+                    Some((&resolved_name, var_info.is_mutable)),
+                );
+                return dispatched;
+            }
+        }
         if let Type::FnPtr(param_tys, fn_ret_ty) = var_ty {
             if param_tys.len() != typed_args.len() {
                 errors.push(SemanticError {
@@ -1192,6 +1363,27 @@ pub fn type_check_call<'a>(
         {
             if let Some((_, f_ty)) = layout.field_offsets.get(raw_name) {
                 let resolved_f_ty = type_ctx.infer.borrow_mut().resolve(*f_ty);
+                if let Type::Obj(cname) = resolved_f_ty {
+                    if cname.starts_with("__Closure_") {
+                        let recv_expr = typed_args.remove(0);
+                        let field_callee = TypedExpr::FieldAccess(
+                            Box::new(recv_expr),
+                            raw_name.to_string(),
+                            resolved_f_ty,
+                            span.clone(),
+                        );
+                        return dispatch_closure_obj_call(
+                            scopes,
+                            errors,
+                            type_ctx,
+                            field_callee,
+                            cname,
+                            typed_args,
+                            span,
+                            None,
+                        );
+                    }
+                }
                 if let Type::FnPtr(param_tys, fn_ret_ty) = resolved_f_ty {
                     let recv_expr = typed_args.remove(0);
                     let field_callee = TypedExpr::FieldAccess(
@@ -1300,5 +1492,286 @@ pub fn type_check_call<'a>(
         ret_ty,
         span.clone(),
     ))
+}
+
+fn parse_bound_fn_param_tys(bound: &str, type_ctx: &TypeCtx<'_>) -> Option<Vec<Type>> {
+    let rest = bound
+        .strip_prefix("FnOnce(")
+        .or_else(|| bound.strip_prefix("FnMut("))
+        .or_else(|| bound.strip_prefix("Fn("))?;
+    let close_idx = rest.find(')')?;
+    let args_str = &rest[..close_idx];
+    if args_str.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    let tys = args_str
+        .split(',')
+        .map(|part| match part.trim() {
+            "i64" => Type::Int,
+            "i32" => Type::I32,
+            "i16" => Type::I16,
+            "i8" => Type::I8,
+            "u64" => Type::U64,
+            "u32" => Type::U32,
+            "u16" => Type::U16,
+            "u8" => Type::U8,
+            "f64" => Type::Float,
+            "f32" => Type::F32,
+            "bool" => Type::Bool,
+            "str" => Type::Str,
+            "String" => Type::String,
+            other => {
+                if let Some(inner) = other.strip_prefix("&mut ") {
+                    let inner_ty = type_ctx.resolve_type_annotation(Type::Obj(crate::ast::intern_str(inner.trim())));
+                    Type::MutRef(crate::ast::intern_type(inner_ty))
+                } else if let Some(inner) = other.strip_prefix('&') {
+                    let inner_ty = type_ctx.resolve_type_annotation(Type::Obj(crate::ast::intern_str(inner.trim())));
+                    Type::Ref(crate::ast::intern_type(inner_ty))
+                } else {
+                    type_ctx.resolve_type_annotation(Type::Obj(crate::ast::intern_str(other)))
+                }
+            }
+        })
+        .collect();
+    Some(tys)
+}
+
+fn infer_iter_item_type(recv_ty: Type, type_ctx: &TypeCtx<'_>) -> Option<Type> {
+    let mut unwrapped = type_ctx.infer.borrow_mut().resolve(recv_ty);
+    while let Type::Ref(i) | Type::MutRef(i) | Type::Box(i) = unwrapped {
+        unwrapped = *i;
+    }
+    match unwrapped {
+        Type::Vec(e) | Type::Slice(e) | Type::Array(e, _) => Some(*e),
+        Type::Obj("Range") | Type::Obj("std_iter_Range") => Some(Type::Int),
+        Type::Obj(s) => {
+            if s.contains("VecIter_") {
+                if let Some((_, args)) = crate::sanal::mono::lookup_mangled(s) {
+                    if let Some(&first) = args.first() {
+                        return Some(first);
+                    }
+                }
+            }
+            if let Some(next_fn) = type_ctx.get_fn(&format!("{s}_next")) {
+                if let Type::Enum(opt_name) = next_fn.return_type {
+                    if let Some((_, args)) = crate::sanal::mono::lookup_mangled(opt_name) {
+                        if let Some(&item) = args.first() {
+                            return Some(item);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn infer_closure_fallback_params(
+    raw_name: &str,
+    prior_args: &[TypedExpr],
+    _arg_idx: usize,
+    raw_param_ty: Option<Type>,
+    elem_ty: Option<Type>,
+    target_fn_decl: Option<&crate::ast::FuncDecl>,
+    type_ctx: &TypeCtx<'_>,
+) -> Vec<Type> {
+    if let Some(Type::FnPtr(ps, _)) = raw_param_ty {
+        return ps.to_vec();
+    }
+    if let (Some(Type::Generic(g)), Some(decl)) = (raw_param_ty, target_fn_decl) {
+        if let Some(w) = &decl.where_clause {
+            let clean = g.trim_start_matches('$');
+            let preds = std::iter::once((&w.target_param, &w.bounds))
+                .chain(w.predicates.iter().map(|(tp, bs)| (tp, bs)));
+            for (tp, bs) in preds {
+                if tp.trim_start_matches('$') == clean {
+                    for b in bs {
+                        if let Some(ps) = parse_bound_fn_param_tys(b, type_ctx) {
+                            if !ps.iter().any(crate::sanal::compat::type_contains_generic) {
+                                return ps;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let item_ty = prior_args
+        .first()
+        .and_then(|r| infer_iter_item_type(r.ty(), type_ctx))
+        .or(elem_ty);
+    let clean_m = raw_name.strip_prefix('.').unwrap_or(raw_name);
+    match (clean_m, item_ty) {
+        ("filter", Some(it)) => vec![Type::Ref(crate::ast::intern_type(it))],
+        ("fold", Some(it)) if prior_args.len() >= 2 => {
+            vec![type_ctx.infer.borrow_mut().resolve(prior_args[1].ty()), it]
+        }
+        ("reduce", Some(it)) => vec![it, it],
+        (_, Some(it)) => vec![it],
+        _ => Vec::new(),
+    }
+}
+
+fn dispatch_closure_obj_call<'a>(
+    scopes: &mut ScopeStack,
+    errors: &mut Vec<SemanticError>,
+    type_ctx: &TypeCtx<'a>,
+    callee_expr: TypedExpr,
+    closure_name: &str,
+    mut call_args: Vec<TypedExpr>,
+    span: &Span,
+    named_var: Option<(&str, bool)>,
+) -> Option<TypedExpr> {
+    let ref_sym = format!("{closure_name}_call_ref");
+    let mut_sym = format!("{closure_name}_call_mut");
+    let once_sym = format!("{closure_name}_call_once");
+
+    let (chosen_sym, call_mode) = if let Some(f) = type_ctx.get_fn(&ref_sym) {
+        (f, 0u8) // Fn (&self)
+    } else if let Some(f) = type_ctx.get_fn(&mut_sym) {
+        (f, 1u8) // FnMut (&mut self)
+    } else if let Some(f) = type_ctx.get_fn(&once_sym) {
+        (f, 2u8) // FnOnce (self)
+    } else {
+        errors.push(SemanticError {
+            code: "E0618",
+            message: format!("Closure `{closure_name}` has no callable method"),
+            label: "Not callable".to_string(),
+            secondary_label: None,
+            help: None,
+            span: span.clone(),
+        });
+        return Some(TypedExpr::Call(once_sym, call_args, Type::Error, span.clone()));
+    };
+
+    if let Some((vname, _)) = named_var {
+        if let Some(info) = scopes.lookup(vname) {
+            if info.is_moved {
+                errors.push(SemanticError {
+                    code: "E0382",
+                    message: format!("Use of moved value '{vname}'"),
+                    label: "Closure moved in a previous FnOnce call".to_string(),
+                    secondary_label: None,
+                    help: None,
+                    span: span.clone(),
+                });
+            }
+        }
+    }
+
+    let c_ty = Type::Obj(crate::ast::intern_str(closure_name));
+    let self_arg = match call_mode {
+        0 => {
+            if let Some((vname, _)) = named_var {
+                if let Some((true, holder)) = scopes.active_borrow(vname) {
+                    errors.push(SemanticError {
+                        code: "E0502",
+                        message: format!(
+                            "Cannot call closure `{vname}` while it is mutably borrowed by `{holder}`"
+                        ),
+                        label: "Conflicting borrow".to_string(),
+                        secondary_label: None,
+                        help: None,
+                        span: span.clone(),
+                    });
+                }
+            }
+            TypedExpr::Ref(
+                Box::new(callee_expr),
+                false,
+                Type::Ref(crate::ast::intern_type(c_ty)),
+                span.clone(),
+            )
+        }
+        1 => {
+            if let Some((vname, is_mut)) = named_var {
+                if !is_mut {
+                    errors.push(SemanticError {
+                        code: "E0596",
+                        message: format!(
+                            "Cannot borrow closure `{vname}` as mutable, as it is not declared as mutable (`FnMut` closure requires `let mut {vname}`)"
+                        ),
+                        label: "Cannot borrow as mutable".to_string(),
+                        secondary_label: None,
+                        help: Some(format!("Change binding to `let mut {vname}`")),
+                        span: span.clone(),
+                    });
+                }
+                if let Some((was_mut, holder)) = scopes.active_borrow(vname) {
+                    errors.push(SemanticError {
+                        code: if was_mut { "E0499" } else { "E0502" },
+                        message: format!(
+                            "Cannot borrow `{vname}` as mutable because it is already borrowed by `{holder}`"
+                        ),
+                        label: "Conflicting mutable borrow".to_string(),
+                        secondary_label: None,
+                        help: None,
+                        span: span.clone(),
+                    });
+                }
+            }
+            TypedExpr::Ref(
+                Box::new(callee_expr),
+                true,
+                Type::MutRef(crate::ast::intern_type(c_ty)),
+                span.clone(),
+            )
+        }
+        _ => {
+            // FnOnce consumes the closure by value.
+            if let Some((vname, _)) = named_var {
+                crate::sanal::compat::check_not_borrowed_on_move(scopes, errors, vname, span);
+                scopes.mark_moved(vname);
+            }
+            callee_expr
+        }
+    };
+
+    let expected_params = &chosen_sym.params[1..];
+    if expected_params.len() != call_args.len() {
+        errors.push(SemanticError {
+            code: "E0061",
+            message: format!(
+                "Closure `{}` expects {} argument(s), found {}",
+                closure_name,
+                expected_params.len(),
+                call_args.len()
+            ),
+            label: format!("Expected {} argument(s)", expected_params.len()),
+            secondary_label: None,
+            help: None,
+            span: span.clone(),
+        });
+    } else {
+        for (p, arg) in expected_params.iter().zip(call_args.iter_mut()) {
+            if !p.ty.is_copy() && !matches!(p.ty, Type::Ref(_) | Type::MutRef(_)) {
+                type_ctx.check_not_moved_from_projection(arg, errors);
+                crate::sanal::compat::mark_expr_moved_if_ident(scopes, errors, arg);
+            }
+            let unify_res = type_ctx.infer.borrow_mut().unify(p.ty, arg.ty());
+            let rp = type_ctx.infer.borrow_mut().resolve(p.ty);
+            let ra = type_ctx.infer.borrow_mut().resolve(arg.ty());
+            if unify_res.is_err() && !crate::sanal::compat::is_type_compatible(&rp, &ra) {
+                errors.push(SemanticError {
+                    code: "E0308",
+                    message: format!(
+                        "Mismatched argument in closure call: expected `{:?}`, found `{:?}`",
+                        rp, ra
+                    ),
+                    label: format!("Expected `{:?}`", rp),
+                    secondary_label: None,
+                    help: None,
+                    span: arg.span(),
+                });
+            }
+        }
+    }
+
+    let mut full_args = Vec::with_capacity(1 + call_args.len());
+    full_args.push(self_arg);
+    full_args.extend(call_args);
+    let ret_ty = type_ctx.infer.borrow_mut().resolve(chosen_sym.return_type);
+    Some(TypedExpr::Call(chosen_sym.name, full_args, ret_ty, span.clone()))
 }
 

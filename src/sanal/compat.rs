@@ -268,7 +268,7 @@ pub fn check_not_borrowed_on_move(
             span: span.clone(),
         });
     }
-    if let Some((_, holder)) = scopes.active_borrow(name) {
+    if let Some((_, holder)) = scopes.active_borrow_including_projections(name) {
         errors.push(SemanticError {
             code: "E0505",
             message: format!("Cannot move out of `{name}` because it is borrowed by `{holder}`"),

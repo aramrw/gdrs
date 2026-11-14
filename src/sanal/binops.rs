@@ -2,7 +2,7 @@
 //! Type checking for arithmetic, bitwise, relational, and logical binary/unary operators.
 
 use crate::{
-    ast::{Expr, Span, Type, TypedExpr},
+    ast::{AssignOp, Expr, Span, Type, TypedExpr},
     sanal::{
         types::{type_check_expr, TypeCtx},
         ScopeStack, SemanticError,
@@ -196,7 +196,7 @@ fn check_equality_operands(
     }
 }
 
-fn lookup_struct_method_fn<'a>(type_ctx: &TypeCtx<'a>, struct_name: &str, method: &str) -> Option<crate::ast::FuncDecl> {
+pub(crate) fn lookup_struct_method_fn<'a>(type_ctx: &TypeCtx<'a>, struct_name: &str, method: &str) -> Option<crate::ast::FuncDecl> {
     let mangled = format!("{}_{}", struct_name, method);
     if let Some(fn_info) = type_ctx.get_fn(&mangled) {
         return Some(fn_info);
@@ -210,6 +210,122 @@ fn lookup_struct_method_fn<'a>(type_ctx: &TypeCtx<'a>, struct_name: &str, method
         }
     }
     None
+}
+
+fn extract_struct_name_from_ty(type_ctx: &TypeCtx<'_>, ty: Type) -> Option<&'static str> {
+    let resolved = type_ctx.infer.borrow_mut().probe(ty);
+    match resolved {
+        Type::Obj(s) => Some(s),
+        Type::Ref(inner) | Type::MutRef(inner) => match *inner {
+            Type::Obj(s) => Some(s),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub(crate) fn auto_borrow_op_arg_if_ref(
+    param_ty: Type,
+    arg: &mut TypedExpr,
+    scopes: &ScopeStack,
+    errors: &mut Vec<SemanticError>,
+    type_ctx: &TypeCtx<'_>,
+) {
+    let resolved_param = type_ctx.infer.borrow_mut().probe(param_ty);
+    let resolved_arg = type_ctx.infer.borrow_mut().probe(arg.ty());
+    if let Type::Ref(expected) = resolved_param {
+        if !matches!(resolved_arg, Type::Ref(_) | Type::MutRef(_))
+            && crate::sanal::compat::is_type_compatible(&expected, &resolved_arg)
+        {
+            if let Some(root_var) = crate::sanal::compat::extract_root_var(arg) {
+                if let Some((true, holder)) = scopes.active_borrow(root_var) {
+                    errors.push(SemanticError {
+                        code: "E0502",
+                        message: format!(
+                            "Cannot borrow `{root_var}` as immutable because it is also borrowed as mutable by `{holder}`"
+                        ),
+                        label: "Immutable borrow occurs here".to_string(),
+                        secondary_label: None,
+                        help: None,
+                        span: arg.span(),
+                    });
+                }
+            }
+            let arg_span = arg.span();
+            *arg = TypedExpr::Ref(
+                Box::new(arg.clone()),
+                false,
+                Type::Ref(expected),
+                arg_span,
+            );
+        }
+    }
+}
+
+fn finish_overloaded_op_call<'a>(
+    fn_info: crate::ast::FuncDecl,
+    mut args: Vec<TypedExpr>,
+    scopes: &mut ScopeStack,
+    errors: &mut Vec<SemanticError>,
+    type_ctx: &TypeCtx<'a>,
+    span: &Span,
+) -> TypedExpr {
+    if args.len() == 2 && fn_info.params.len() == 2 {
+        auto_borrow_op_arg_if_ref(fn_info.params[1].ty, &mut args[1], scopes, errors, type_ctx);
+    }
+    crate::sanal::calls::validation::validate_call_arguments(
+        &fn_info,
+        &mut args,
+        true,
+        &fn_info.name,
+        scopes,
+        errors,
+        type_ctx,
+        span,
+    );
+    let ret_ty = type_ctx.infer.borrow_mut().resolve(fn_info.return_type);
+    TypedExpr::Call(fn_info.name.clone(), args, ret_ty, span.clone())
+}
+
+fn try_type_check_overloaded_binop<'a>(
+    t_lhs: &TypedExpr,
+    t_rhs: &TypedExpr,
+    method: &str,
+    scopes: &mut ScopeStack,
+    errors: &mut Vec<SemanticError>,
+    type_ctx: &TypeCtx<'a>,
+    span: &Span,
+) -> Option<TypedExpr> {
+    let struct_name = extract_struct_name_from_ty(type_ctx, t_lhs.ty())?;
+    let fn_info = lookup_struct_method_fn(type_ctx, struct_name, method)?;
+    Some(finish_overloaded_op_call(
+        fn_info,
+        vec![t_lhs.clone(), t_rhs.clone()],
+        scopes,
+        errors,
+        type_ctx,
+        span,
+    ))
+}
+
+fn try_type_check_overloaded_unop<'a>(
+    t_val: &TypedExpr,
+    method: &str,
+    scopes: &mut ScopeStack,
+    errors: &mut Vec<SemanticError>,
+    type_ctx: &TypeCtx<'a>,
+    span: &Span,
+) -> Option<TypedExpr> {
+    let struct_name = extract_struct_name_from_ty(type_ctx, t_val.ty())?;
+    let fn_info = lookup_struct_method_fn(type_ctx, struct_name, method)?;
+    Some(finish_overloaded_op_call(
+        fn_info,
+        vec![t_val.clone()],
+        scopes,
+        errors,
+        type_ctx,
+        span,
+    ))
 }
 
 pub fn type_check_add<'a>(
@@ -234,15 +350,10 @@ pub fn type_check_add<'a>(
         let ty = t_rhs.ty();
         return Some(TypedExpr::Add(Box::new(t_lhs), Box::new(t_rhs), ty, span.clone()));
     }
-    if let Type::Obj(struct_name) = t_lhs.ty() {
-        if let Some(fn_info) = lookup_struct_method_fn(type_ctx, struct_name, "add") {
-            return Some(TypedExpr::Call(
-                fn_info.name.clone(),
-                vec![t_lhs, t_rhs],
-                fn_info.return_type,
-                span.clone(),
-            ));
-        }
+    if let Some(call) =
+        try_type_check_overloaded_binop(&t_lhs, &t_rhs, "add", scopes, errors, type_ctx, span)
+    {
+        return Some(call);
     }
     let ty = check_binary_op("+", &t_lhs, &t_rhs, true, type_ctx, span, errors);
     Some(TypedExpr::Add(
@@ -271,15 +382,10 @@ pub fn type_check_sub<'a>(
         let ty = t_lhs.ty();
         return Some(TypedExpr::Sub(Box::new(t_lhs), Box::new(t_rhs), ty, span.clone()));
     }
-    if let Type::Obj(struct_name) = t_lhs.ty() {
-        if let Some(fn_info) = lookup_struct_method_fn(type_ctx, struct_name, "sub") {
-            return Some(TypedExpr::Call(
-                fn_info.name.clone(),
-                vec![t_lhs, t_rhs],
-                fn_info.return_type,
-                span.clone(),
-            ));
-        }
+    if let Some(call) =
+        try_type_check_overloaded_binop(&t_lhs, &t_rhs, "sub", scopes, errors, type_ctx, span)
+    {
+        return Some(call);
     }
     let ty = check_binary_op("-", &t_lhs, &t_rhs, true, type_ctx, span, errors);
     Some(TypedExpr::Sub(
@@ -304,15 +410,10 @@ pub fn type_check_mul<'a>(
     if crate::sanal::compat::is_diverging_expr(&t_rhs) {
         scopes.restore_moves(&pre_rhs_moves);
     }
-    if let Type::Obj(struct_name) = t_lhs.ty() {
-        if let Some(fn_info) = lookup_struct_method_fn(type_ctx, struct_name, "mul") {
-            return Some(TypedExpr::Call(
-                fn_info.name.clone(),
-                vec![t_lhs, t_rhs],
-                fn_info.return_type,
-                span.clone(),
-            ));
-        }
+    if let Some(call) =
+        try_type_check_overloaded_binop(&t_lhs, &t_rhs, "mul", scopes, errors, type_ctx, span)
+    {
+        return Some(call);
     }
     let ty = check_binary_op("*", &t_lhs, &t_rhs, true, type_ctx, span, errors);
     Some(TypedExpr::Mul(
@@ -337,18 +438,44 @@ pub fn type_check_div<'a>(
     if crate::sanal::compat::is_diverging_expr(&t_rhs) {
         scopes.restore_moves(&pre_rhs_moves);
     }
-    if let Type::Obj(struct_name) = t_lhs.ty() {
-        if let Some(fn_info) = lookup_struct_method_fn(type_ctx, struct_name, "div") {
-            return Some(TypedExpr::Call(
-                fn_info.name.clone(),
-                vec![t_lhs, t_rhs],
-                fn_info.return_type,
-                span.clone(),
-            ));
-        }
+    if let Some(call) =
+        try_type_check_overloaded_binop(&t_lhs, &t_rhs, "div", scopes, errors, type_ctx, span)
+    {
+        return Some(call);
     }
     let ty = check_binary_op("/", &t_lhs, &t_rhs, true, type_ctx, span, errors);
     Some(TypedExpr::Div(
+        Box::new(t_lhs),
+        Box::new(t_rhs),
+        ty,
+        span.clone(),
+    ))
+}
+
+fn type_check_bitwise_binop<'a>(
+    scopes: &mut ScopeStack,
+    errors: &mut Vec<SemanticError>,
+    type_ctx: &TypeCtx<'a>,
+    op_str: &str,
+    method: &str,
+    ctor: fn(Box<TypedExpr>, Box<TypedExpr>, Type, Span) -> TypedExpr,
+    lhs: &Expr,
+    rhs: &Expr,
+    span: &Span,
+) -> Option<TypedExpr> {
+    let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
+    let pre_rhs_moves = scopes.snapshot_moves();
+    let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+        scopes.restore_moves(&pre_rhs_moves);
+    }
+    if let Some(call) =
+        try_type_check_overloaded_binop(&t_lhs, &t_rhs, method, scopes, errors, type_ctx, span)
+    {
+        return Some(call);
+    }
+    let ty = check_binary_op(op_str, &t_lhs, &t_rhs, false, type_ctx, span, errors);
+    Some(ctor(
         Box::new(t_lhs),
         Box::new(t_rhs),
         ty,
@@ -364,19 +491,17 @@ pub fn type_check_pipe<'a>(
     rhs: &Expr,
     span: &Span,
 ) -> Option<TypedExpr> {
-    let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
-    let pre_rhs_moves = scopes.snapshot_moves();
-    let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
-    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
-        scopes.restore_moves(&pre_rhs_moves);
-    }
-    let ty = check_binary_op("|", &t_lhs, &t_rhs, false, type_ctx, span, errors);
-    Some(TypedExpr::Pipe(
-        Box::new(t_lhs),
-        Box::new(t_rhs),
-        ty,
-        span.clone(),
-    ))
+    type_check_bitwise_binop(
+        scopes,
+        errors,
+        type_ctx,
+        "|",
+        "bitor",
+        TypedExpr::Pipe,
+        lhs,
+        rhs,
+        span,
+    )
 }
 
 pub fn type_check_ampersand<'a>(
@@ -387,19 +512,17 @@ pub fn type_check_ampersand<'a>(
     rhs: &Expr,
     span: &Span,
 ) -> Option<TypedExpr> {
-    let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
-    let pre_rhs_moves = scopes.snapshot_moves();
-    let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
-    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
-        scopes.restore_moves(&pre_rhs_moves);
-    }
-    let ty = check_binary_op("&", &t_lhs, &t_rhs, false, type_ctx, span, errors);
-    Some(TypedExpr::Ampersand(
-        Box::new(t_lhs),
-        Box::new(t_rhs),
-        ty,
-        span.clone(),
-    ))
+    type_check_bitwise_binop(
+        scopes,
+        errors,
+        type_ctx,
+        "&",
+        "bitand",
+        TypedExpr::Ampersand,
+        lhs,
+        rhs,
+        span,
+    )
 }
 
 pub fn type_check_caret<'a>(
@@ -410,19 +533,17 @@ pub fn type_check_caret<'a>(
     rhs: &Expr,
     span: &Span,
 ) -> Option<TypedExpr> {
-    let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
-    let pre_rhs_moves = scopes.snapshot_moves();
-    let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
-    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
-        scopes.restore_moves(&pre_rhs_moves);
-    }
-    let ty = check_binary_op("^", &t_lhs, &t_rhs, false, type_ctx, span, errors);
-    Some(TypedExpr::Caret(
-        Box::new(t_lhs),
-        Box::new(t_rhs),
-        ty,
-        span.clone(),
-    ))
+    type_check_bitwise_binop(
+        scopes,
+        errors,
+        type_ctx,
+        "^",
+        "bitxor",
+        TypedExpr::Caret,
+        lhs,
+        rhs,
+        span,
+    )
 }
 
 pub fn type_check_shl<'a>(
@@ -433,19 +554,17 @@ pub fn type_check_shl<'a>(
     rhs: &Expr,
     span: &Span,
 ) -> Option<TypedExpr> {
-    let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
-    let pre_rhs_moves = scopes.snapshot_moves();
-    let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
-    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
-        scopes.restore_moves(&pre_rhs_moves);
-    }
-    let ty = check_binary_op("<<", &t_lhs, &t_rhs, false, type_ctx, span, errors);
-    Some(TypedExpr::Shl(
-        Box::new(t_lhs),
-        Box::new(t_rhs),
-        ty,
-        span.clone(),
-    ))
+    type_check_bitwise_binop(
+        scopes,
+        errors,
+        type_ctx,
+        "<<",
+        "shl",
+        TypedExpr::Shl,
+        lhs,
+        rhs,
+        span,
+    )
 }
 
 pub fn type_check_shr<'a>(
@@ -456,19 +575,17 @@ pub fn type_check_shr<'a>(
     rhs: &Expr,
     span: &Span,
 ) -> Option<TypedExpr> {
-    let t_lhs = type_check_expr(scopes, errors, type_ctx, lhs)?;
-    let pre_rhs_moves = scopes.snapshot_moves();
-    let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
-    if crate::sanal::compat::is_diverging_expr(&t_rhs) {
-        scopes.restore_moves(&pre_rhs_moves);
-    }
-    let ty = check_binary_op(">>", &t_lhs, &t_rhs, false, type_ctx, span, errors);
-    Some(TypedExpr::Shr(
-        Box::new(t_lhs),
-        Box::new(t_rhs),
-        ty,
-        span.clone(),
-    ))
+    type_check_bitwise_binop(
+        scopes,
+        errors,
+        type_ctx,
+        ">>",
+        "shr",
+        TypedExpr::Shr,
+        lhs,
+        rhs,
+        span,
+    )
 }
 
 pub fn type_check_mod<'a>(
@@ -484,6 +601,11 @@ pub fn type_check_mod<'a>(
     let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
     if crate::sanal::compat::is_diverging_expr(&t_rhs) {
         scopes.restore_moves(&pre_rhs_moves);
+    }
+    if let Some(call) =
+        try_type_check_overloaded_binop(&t_lhs, &t_rhs, "rem", scopes, errors, type_ctx, span)
+    {
+        return Some(call);
     }
     let ty = check_binary_op("%", &t_lhs, &t_rhs, true, type_ctx, span, errors);
     Some(TypedExpr::Mod(
@@ -502,6 +624,11 @@ pub fn type_check_neg<'a>(
     span: &Span,
 ) -> Option<TypedExpr> {
     let t_val = type_check_expr(scopes, errors, type_ctx, val)?;
+    if let Some(call) =
+        try_type_check_overloaded_unop(&t_val, "neg", scopes, errors, type_ctx, span)
+    {
+        return Some(call);
+    }
     let ty = type_ctx.infer.borrow_mut().probe(t_val.ty());
 
     if !matches!(ty, Type::Int | Type::I32 | Type::Float | Type::F32 | Type::Generic(_) | Type::Infer(_)) {
@@ -839,4 +966,184 @@ pub fn type_check_or<'a>(
         Box::new(t_rhs),
         span.clone(),
     ))
+}
+
+fn check_compound_assign_lhs_mutability<'a>(
+    lhs: &Expr,
+    t_lhs: &TypedExpr,
+    scopes: &mut ScopeStack,
+    errors: &mut Vec<SemanticError>,
+    type_ctx: &TypeCtx<'a>,
+    span: &Span,
+) {
+    let lhs_ty = type_ctx.infer.borrow_mut().probe(t_lhs.ty());
+    if matches!(lhs_ty, Type::Ref(_)) {
+        errors.push(SemanticError {
+            code: "E0596",
+            message: "Cannot use compound assignment through an immutable reference".to_string(),
+            label: "Immutable reference".to_string(),
+            secondary_label: None,
+            help: None,
+            span: span.clone(),
+        });
+        return;
+    }
+
+    if let Some(root_var) = crate::sanal::compat::extract_root_var(t_lhs) {
+        let borrow_path = crate::sanal::objects::fields::expr_projection_path(lhs)
+            .unwrap_or_else(|| root_var.to_string());
+        if let Some((_, holder)) = scopes.active_borrow_including_projections(&borrow_path) {
+            errors.push(SemanticError {
+                code: "E0506",
+                message: format!(
+                    "Cannot mutate `{borrow_path}` because it is borrowed by `{holder}`"
+                ),
+                label: "Mutation occurs while borrowed".to_string(),
+                secondary_label: None,
+                help: None,
+                span: span.clone(),
+            });
+        }
+        let is_mut_through_ref = matches!(lhs_ty, Type::MutRef(_))
+            || matches!(t_lhs, TypedExpr::Deref(inner, _, _) if matches!(type_ctx.infer.borrow_mut().probe(inner.ty()), Type::MutRef(_)));
+        if !is_mut_through_ref {
+            if let Some(info) = scopes.lookup(root_var) {
+                let is_root_mut_ref = matches!(
+                    type_ctx.infer.borrow_mut().probe(info.ty),
+                    Type::MutRef(_)
+                );
+                if !info.is_mutable && !is_root_mut_ref {
+                    errors.push(SemanticError {
+                        code: "E0382",
+                        message: format!(
+                            "Cannot mutate immutable variable `{root_var}` via compound assignment"
+                        ),
+                        label: format!("Variable `{root_var}` is immutable"),
+                        secondary_label: None,
+                        help: Some(format!("Consider declaring `{root_var}` as `let mut {root_var}`")),
+                        span: span.clone(),
+                    });
+                }
+            }
+        }
+        scopes.mark_active(root_var);
+    }
+}
+
+/// Type checks compound assignment (`+=`, `-=`, `*=`, `/=`), preferring an
+/// overloaded `{Add,Sub,Mul,Div}Assign` method on structs before falling back
+/// to desugared primitive assignment.
+pub fn type_check_compound_assign<'a>(
+    scopes: &mut ScopeStack,
+    errors: &mut Vec<SemanticError>,
+    type_ctx: &TypeCtx<'a>,
+    op: AssignOp,
+    lhs: &Expr,
+    rhs: &Expr,
+    span: &Span,
+) -> Option<TypedExpr> {
+    let (method, bin_ctor): (&str, fn(Box<Expr>, Box<Expr>, Span) -> Expr) = match op {
+        AssignOp::Add => ("add_assign", Expr::Add),
+        AssignOp::Sub => ("sub_assign", Expr::Sub),
+        AssignOp::Mul => ("mul_assign", Expr::Mul),
+        AssignOp::Div => ("div_assign", Expr::Div),
+    };
+
+    let saved_moves = scopes.snapshot_moves();
+    let mut probe_errors = Vec::new();
+    let probe_lhs = type_check_expr(scopes, &mut probe_errors, type_ctx, lhs);
+    let overloaded_fn = probe_lhs
+        .as_ref()
+        .and_then(|tl| extract_struct_name_from_ty(type_ctx, tl.ty()))
+        .and_then(|sname| lookup_struct_method_fn(type_ctx, sname, method));
+
+    if let (Some(mut t_lhs), Some(fn_info)) = (probe_lhs, overloaded_fn) {
+        errors.extend(probe_errors);
+        let pre_rhs_moves = scopes.snapshot_moves();
+        let t_rhs = type_check_expr(scopes, errors, type_ctx, rhs)?;
+        if crate::sanal::compat::is_diverging_expr(&t_rhs) {
+            scopes.restore_moves(&pre_rhs_moves);
+        }
+
+        if let Some(first_param) = fn_info.params.first() {
+            let expected_self = type_ctx.infer.borrow_mut().probe(first_param.ty);
+            let actual_lhs = type_ctx.infer.borrow_mut().probe(t_lhs.ty());
+            if matches!(expected_self, Type::MutRef(_)) {
+                check_compound_assign_lhs_mutability(lhs, &t_lhs, scopes, errors, type_ctx, span);
+                if !matches!(actual_lhs, Type::MutRef(_) | Type::Ref(_)) {
+                    let lhs_span = t_lhs.span();
+                    t_lhs = TypedExpr::Ref(
+                        Box::new(t_lhs),
+                        true,
+                        Type::MutRef(crate::ast::intern_type(actual_lhs)),
+                        lhs_span,
+                    );
+                }
+            } else if matches!(expected_self, Type::Ref(_))
+                && !matches!(actual_lhs, Type::MutRef(_) | Type::Ref(_))
+            {
+                let lhs_span = t_lhs.span();
+                t_lhs = TypedExpr::Ref(
+                    Box::new(t_lhs),
+                    false,
+                    Type::Ref(crate::ast::intern_type(actual_lhs)),
+                    lhs_span,
+                );
+            }
+        }
+
+        return Some(finish_overloaded_op_call(
+            fn_info,
+            vec![t_lhs, t_rhs],
+            scopes,
+            errors,
+            type_ctx,
+            span,
+        ));
+    }
+
+    scopes.restore_moves(&saved_moves);
+    let desugared_rhs = bin_ctor(Box::new(lhs.clone()), Box::new(rhs.clone()), span.clone());
+    match lhs {
+        Expr::Ident(name, _) => {
+            crate::sanal::vars::type_check_assign(scopes, errors, type_ctx, name, &desugared_rhs, span)
+        }
+        Expr::FieldAccess(obj, field, _) => crate::sanal::objects::type_check_field_assign(
+            scopes,
+            errors,
+            type_ctx,
+            obj,
+            field,
+            &desugared_rhs,
+            span,
+        ),
+        Expr::IndexAccess(target, idx, _) => crate::sanal::objects::indexing::type_check_index_assign(
+            scopes,
+            errors,
+            type_ctx,
+            target,
+            idx,
+            &desugared_rhs,
+            span,
+        ),
+        Expr::Deref(inner, _) => crate::sanal::refs::type_check_deref_assign(
+            scopes,
+            errors,
+            type_ctx,
+            inner,
+            &desugared_rhs,
+            span,
+        ),
+        _ => {
+            errors.push(SemanticError {
+                code: "E0070",
+                message: "Invalid left-hand side of compound assignment".to_string(),
+                label: "Expected assignable place".to_string(),
+                secondary_label: None,
+                help: None,
+                span: span.clone(),
+            });
+            None
+        }
+    }
 }

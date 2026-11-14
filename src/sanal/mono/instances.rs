@@ -129,6 +129,7 @@ pub fn monomorphize_struct(
     }
 
     let mangled_name = mangle_name(&decl.name, type_args);
+    populate_iter_adapter_env(&mut env, &decl.name, &mangled_name, type_args, &fn_map.borrow());
 
     let mut total_size = 0u32;
     let mut field_offsets = HashMap::new();
@@ -264,32 +265,56 @@ pub fn monomorphize_struct(
                     } else {
                         let tn_str = tn.to_string();
                         if let Some((base_s, reg_tys)) = lookup_mangled(&tn_str) {
-                            let clean_b = base_s.split('_').last().unwrap_or(&base_s);
-                            monomorphize_struct(
-                                mono,
-                                clean_b,
-                                &reg_tys,
-                                struct_map,
-                                enum_map,
-                                fn_map,
-                                worklist,
-                            );
+                            if !reg_tys.iter().any(|t| {
+                                crate::sanal::compat::type_contains_generic(t)
+                                    || crate::sanal::compat::type_contains_infer(t)
+                            }) {
+                                let clean_b = base_s.split('_').last().unwrap_or(&base_s);
+                                monomorphize_struct(
+                                    mono,
+                                    clean_b,
+                                    &reg_tys,
+                                    struct_map,
+                                    enum_map,
+                                    fn_map,
+                                    worklist,
+                                );
+                            }
                         } else if let Some((b_name, suffix)) = tn_str.rsplit_once('_') {
                             let sub_tys: Vec<Type> = suffix
                                 .split('_')
                                 .map(suffix_part_to_type)
                                 .collect();
-                            let clean_b = b_name.split('_').last().unwrap_or(b_name);
-                            monomorphize_struct(
-                                mono,
-                                clean_b,
-                                &sub_tys,
-                                struct_map,
-                                enum_map,
-                                fn_map,
-                                worklist,
-                            );
+                            if !sub_tys.iter().any(|t| {
+                                crate::sanal::compat::type_contains_generic(t)
+                                    || crate::sanal::compat::type_contains_infer(t)
+                            }) {
+                                let clean_b = b_name.split('_').last().unwrap_or(b_name);
+                                monomorphize_struct(
+                                    mono,
+                                    clean_b,
+                                    &sub_tys,
+                                    struct_map,
+                                    enum_map,
+                                    fn_map,
+                                    worklist,
+                                );
+                            }
                         }
+                    }
+                } else if let Type::Vec(elem_ty) = ret_ty {
+                    if !crate::sanal::compat::type_contains_generic(&elem_ty)
+                        && !crate::sanal::compat::type_contains_infer(&elem_ty)
+                    {
+                        monomorphize_struct(
+                            mono,
+                            "std_vec_Vec",
+                            &[*elem_ty],
+                            struct_map,
+                            enum_map,
+                            fn_map,
+                            worklist,
+                        );
                     }
                 }
                 if let Type::Enum(mangled_enum) = ret_ty {
@@ -415,7 +440,8 @@ fn rewrite_self_obj_init(expr: Expr, decl_name: &str, mangled_name: &str) -> Exp
         Expr::Ref(inner, is_mut, span) => Expr::Ref(rwb(inner), is_mut, span),
         Expr::Deref(inner, span) => Expr::Deref(rwb(inner), span),
         Expr::DerefAssign(p, v, span) => Expr::DerefAssign(rwb(p), rwb(v), span),
-        Expr::Closure(p, body, span) => Expr::Closure(p, rwb(body), span),
+        Expr::CompoundAssign(op, l, r, span) => Expr::CompoundAssign(op, rwb(l), rwb(r), span),
+        Expr::Closure(is_move, p, body, span) => Expr::Closure(is_move, p, rwb(body), span),
         Expr::Cast(inner, ty, span) => Expr::Cast(rwb(inner), ty, span),
         Expr::Range(s, e, span) => Expr::Range(rwb(s), rwb(e), span),
     }
@@ -468,6 +494,7 @@ pub fn monomorphize_enum(
     }
 
     let mangled_name = mangle_name(&decl.name, type_args);
+    populate_iter_adapter_env(&mut env, &decl.name, &mangled_name, type_args, &fn_map.borrow());
     let static_mangled_name = intern_str(&mangled_name);
 
     let mut variant_map = HashMap::new();
@@ -672,7 +699,7 @@ pub fn monomorphize_fn(
     base_name: &str,
     arg_types: &[Type],
     fn_map: &RefCell<HashMap<String, FuncDecl>>,
-    _struct_map: &RefCell<HashMap<String, StructLayout>>,
+    struct_map: &RefCell<HashMap<String, StructLayout>>,
     enum_map: &RefCell<HashMap<String, (&'static str, HashMap<String, (i64, Vec<Type>)>)>>,
     worklist: &RefCell<Vec<FuncDecl>>,
 ) -> Option<String> {
@@ -736,6 +763,7 @@ pub fn monomorphize_fn(
         .collect();
     let ret_ty = substitute_type(decl.return_type, &env);
 
+    let mut rewrite_ret_obj: Option<(String, String)> = None;
     if let Type::Enum(mangled_enum) = ret_ty {
         let m_str = mangled_enum.to_string();
         if m_str.starts_with("std_core_Option_") || m_str.starts_with("std_core_Result_") {
@@ -748,12 +776,44 @@ pub fn monomorphize_fn(
                 monomorphize_enum(mono, base_e, &reg_tys, enum_map, fn_map, worklist);
             }
         }
+    } else if let Type::Obj(mangled_obj) = ret_ty {
+        if let Some((base_s, reg_tys)) = lookup_mangled(mangled_obj) {
+            if !reg_tys.iter().any(|t| {
+                crate::sanal::compat::type_contains_generic(t)
+                    || crate::sanal::compat::type_contains_infer(t)
+            }) {
+                if let Some(actual_mangled) = monomorphize_struct(
+                    mono,
+                    &base_s,
+                    &reg_tys,
+                    struct_map,
+                    enum_map,
+                    fn_map,
+                    worklist,
+                ) {
+                    rewrite_ret_obj = Some((base_s, actual_mangled));
+                }
+            }
+        }
+    } else if let Type::Vec(elem_ty) = ret_ty {
+        if !crate::sanal::compat::type_contains_generic(&elem_ty)
+            && !crate::sanal::compat::type_contains_infer(&elem_ty)
+        {
+            monomorphize_struct(mono, "std_vec_Vec", &[*elem_ty], struct_map, enum_map, fn_map, worklist);
+        }
     }
 
     let body: Vec<Expr> = decl
         .body
         .iter()
-        .map(|e| substitute_expr(e, &env))
+        .map(|e| {
+            let sub = substitute_expr(e, &env);
+            if let Some((ref base_s, ref actual_mangled)) = rewrite_ret_obj {
+                rewrite_self_obj_init(sub, base_s, actual_mangled)
+            } else {
+                sub
+            }
+        })
         .collect();
 
     let specialized_func = FuncDecl {
@@ -774,4 +834,86 @@ pub fn monomorphize_fn(
     worklist.borrow_mut().push(specialized_func);
 
     Some(mangled_name)
+}
+
+fn infer_iter_output_type(iter_ty: Type, fn_map: &HashMap<String, FuncDecl>) -> Option<Type> {
+    match iter_ty {
+        Type::Obj("Range") | Type::Obj("std_iter_Range") => Some(Type::Int),
+        Type::Obj(s) => {
+            if s.contains("VecIter_") {
+                if let Some((_, args)) = lookup_mangled(s) {
+                    if let Some(&first) = args.first() {
+                        return Some(first);
+                    }
+                }
+            }
+            if let Some(f) = fn_map.get(&format!("{s}_next")) {
+                if let Type::Enum(opt_name) = f.return_type {
+                    if let Some((_, args)) = lookup_mangled(opt_name) {
+                        if let Some(&item) = args.first() {
+                            return Some(item);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn infer_callable_output_type(fn_ty: Type, fn_map: &HashMap<String, FuncDecl>) -> Option<Type> {
+    match fn_ty {
+        Type::FnPtr(_, ret) => Some(*ret),
+        Type::Obj(cname) => fn_map
+            .get(&format!("{cname}_call_once"))
+            .or_else(|| fn_map.get(&format!("{cname}_call_mut")))
+            .or_else(|| fn_map.get(&format!("{cname}_call_ref")))
+            .map(|f| f.return_type),
+        _ => None,
+    }
+}
+
+fn populate_iter_adapter_env(
+    env: &mut HashMap<String, Type>,
+    decl_name: &str,
+    mangled_name: &str,
+    type_args: &[Type],
+    fn_map: &HashMap<String, FuncDecl>,
+) {
+    let self_ty = Type::Obj(intern_str(mangled_name));
+    env.insert("Self".to_string(), self_ty);
+
+    let short = decl_name.rsplit_once('_').map(|(_, s)| s).unwrap_or(decl_name);
+    if type_args.len() >= 2 {
+        match short {
+            "Map" => {
+                if let Some(out_ty) = infer_callable_output_type(type_args[1], fn_map) {
+                    env.insert("U".to_string(), out_ty);
+                    env.insert("$U".to_string(), out_ty);
+                    env.insert("T".to_string(), out_ty);
+                    env.insert("$T".to_string(), out_ty);
+                }
+            }
+            "Filter" => {
+                if let Some(item_ty) = infer_iter_output_type(type_args[0], fn_map) {
+                    env.insert("T".to_string(), item_ty);
+                    env.insert("$T".to_string(), item_ty);
+                }
+            }
+            "FilterMap" => {
+                if let Some(Type::Enum(opt_name)) = infer_callable_output_type(type_args[1], fn_map) {
+                    if let Some((_, args)) = lookup_mangled(opt_name) {
+                        if let Some(&inner_ty) = args.first() {
+                            env.insert("U".to_string(), inner_ty);
+                            env.insert("$U".to_string(), inner_ty);
+                            env.insert("T".to_string(), inner_ty);
+                            env.insert("$T".to_string(), inner_ty);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }

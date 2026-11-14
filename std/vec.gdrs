@@ -1,6 +1,8 @@
 // std/vec.gdrs - Heap allocated Vec collection using libc
 use std::libc::{malloc, realloc, free}
 use std::core::{Option, Drop}
+use std::mem::size_of
+use std::iter::{Map, Filter, FilterMap}
 
 pub obj Vec:
 	ptr: *u8
@@ -29,7 +31,7 @@ impl Vec:
 		if capacity <= 0:
 			return Vec{ ptr: 0 as *u8, len: 0, cap: 0 }
 		unsafe:
-			let elem_size = ((0 as *$T) + 1) as i64
+			let elem_size = size_of::<$T>()
 			if elem_size == 0:
 				return Vec{ ptr: 0 as *u8, len: 0, cap: 9223372036854775807 }
 			if capacity > (9223372036854775807 / elem_size):
@@ -42,11 +44,20 @@ impl Vec:
 	pub fn capacity(&self) -> i64:
 		return self.cap
 
+	pub fn as_ptr(&self) -> *$T:
+		return self.ptr as *$T
+
+	pub fn as_mut_ptr(&mut self) -> *$T:
+		return self.ptr as *$T
+
+	pub fn from_raw_parts(ptr: *$T, len: i64, cap: i64) -> Vec:
+		return Vec{ ptr: ptr as *u8, len: len, cap: cap }
+
 	pub fn from_slice(slice: [$T]) -> Vec:
 		if slice.len <= 0:
 			return Vec::new()
 		unsafe:
-			let elem_size = ((0 as *$T) + 1) as i64
+			let elem_size = size_of::<$T>()
 			let mut v = Vec{ ptr: 0 as *u8, len: 0, cap: 0 }
 			if elem_size == 0:
 				v.cap = 9223372036854775807
@@ -66,7 +77,7 @@ impl Vec:
 
 	pub fn push(&mut self, elem: $T):
 		unsafe:
-			let elem_size = ((0 as *$T) + 1) as i64
+			let elem_size = size_of::<$T>()
 			if elem_size == 0:
 				if self.cap == 0:
 					self.cap = 9223372036854775807
@@ -123,4 +134,42 @@ impl VecIter:
 				let slot = (self.vec_ptr as *$T) + idx
 				return Option::Some(*slot)
 		return Option::None
+
+	pub fn map(self, f: $F) -> Map<Self, $F>:
+		return Map{ iter: self, func: f }
+
+	pub fn filter(self, pred: $P) -> Filter<Self, $P>:
+		return Filter{ iter: self, pred: pred }
+
+	pub fn filter_map(self, f: $F) -> FilterMap<Self, $F>:
+		return FilterMap{ iter: self, func: f }
+
+	pub fn fold(mut self, init: $Acc, f: $F) -> $Acc:
+		let mut acc = init
+		while true:
+			if let Option::Some(x) = self.next():
+				acc = f(acc, x)
+			else:
+				return acc
+		return acc
+
+	pub fn reduce(mut self, f: $F) -> Option<$T>:
+		if let Option::Some(first) = self.next():
+			let mut acc = first
+			while true:
+				if let Option::Some(x) = self.next():
+					acc = f(acc, x)
+				else:
+					return Option::Some(acc)
+			return Option::Some(acc)
+		return Option::None
+
+	pub fn collect(mut self) -> Vec<$T>:
+		let mut out = Vec::new()
+		while true:
+			if let Option::Some(x) = self.next():
+				out.push(x)
+			else:
+				return out
+		return out
 

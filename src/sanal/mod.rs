@@ -37,12 +37,303 @@ pub(crate) fn type_contains_ref(ty: &Type) -> bool {
 }
 
 use crate::{
-    ast::{intern_str, FuncDecl, Param, Program, Span, Type, TypedExpr, TypedFuncDecl, TypedProgram},
+    ast::{
+        intern_str, is_visible, Expr, FuncDecl, Param, Program, Span, Type, TypedExpr,
+        TypedFuncDecl, TypedProgram, Visibility,
+    },
     sanal::mono::{extract_generic_params_enum, extract_generic_params_struct, Monomorphizer},
     sanal::types::{type_check_expr, TypeCtx},
 };
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+#[derive(Clone, Debug)]
+enum ConstVal {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+}
+
+type ConstMapEntry = (Type, TypedExpr, Visibility, Vec<String>);
+
+fn extract_const_val(expr: &TypedExpr) -> Option<ConstVal> {
+    match expr {
+        TypedExpr::Int(v, _) => Some(ConstVal::Int(*v)),
+        TypedExpr::Float(f, _) => Some(ConstVal::Float(*f)),
+        TypedExpr::Bool(b, _) => Some(ConstVal::Bool(*b)),
+        TypedExpr::String(s, _) => Some(ConstVal::Str(s.clone())),
+        TypedExpr::CastI32(inner, _)
+        | TypedExpr::CastF32(inner, _)
+        | TypedExpr::Cast(inner, _, _) => extract_const_val(inner),
+        _ => None,
+    }
+}
+
+fn eval_const_expr(
+    expr: &Expr,
+    const_map: &HashMap<String, ConstMapEntry>,
+    enum_names: &HashSet<String>,
+    decl_mod: &[String],
+    errors: &mut Vec<SemanticError>,
+) -> Option<ConstVal> {
+    match expr {
+        Expr::Int(v, _) => Some(ConstVal::Int(*v)),
+        Expr::Float(f, _) => Some(ConstVal::Float(*f)),
+        Expr::Bool(b, _) => Some(ConstVal::Bool(*b)),
+        Expr::String(s, _) => Some(ConstVal::Str(s.clone())),
+        Expr::Ident(name, span) => {
+            let normalized = name.replace("::", "_");
+            let local_key = if !decl_mod.is_empty() {
+                Some(format!("{}_{}", decl_mod.join("_"), name))
+            } else {
+                None
+            };
+            let found = local_key
+                .as_ref()
+                .and_then(|k| const_map.get(k))
+                .or_else(|| const_map.get(name))
+                .or_else(|| const_map.get(&normalized));
+            let Some((_, val_expr, vis, target_mod)) = found else {
+                errors.push(SemanticError {
+                    code: "E0425",
+                    message: format!("Undefined constant `{name}` in constant expression"),
+                    label: "Constant not found".to_string(),
+                    secondary_label: None,
+                    help: None,
+                    span: span.clone(),
+                });
+                return None;
+            };
+            if !is_visible(*vis, target_mod, decl_mod) {
+                errors.push(SemanticError {
+                    code: "E0603",
+                    message: format!("Constant `{name}` is private"),
+                    label: "Private constant".to_string(),
+                    secondary_label: None,
+                    help: Some(format!("Mark `{name}` with `pub const` in its defining module")),
+                    span: span.clone(),
+                });
+                return None;
+            }
+            extract_const_val(val_expr)
+        }
+        Expr::Neg(inner, span) => {
+            match eval_const_expr(inner, const_map, enum_names, decl_mod, errors)? {
+                ConstVal::Int(v) => Some(ConstVal::Int(v.wrapping_neg())),
+                ConstVal::Float(f) => Some(ConstVal::Float(-f)),
+                other => {
+                    errors.push(SemanticError {
+                        code: "E0308",
+                        message: format!("Cannot negate constant `{other:?}`"),
+                        label: "Invalid negation in constant".to_string(),
+                        secondary_label: None,
+                        help: None,
+                        span: span.clone(),
+                    });
+                    None
+                }
+            }
+        }
+        Expr::Not(inner, span) => {
+            match eval_const_expr(inner, const_map, enum_names, decl_mod, errors)? {
+                ConstVal::Bool(b) => Some(ConstVal::Bool(!b)),
+                other => {
+                    errors.push(SemanticError {
+                        code: "E0308",
+                        message: format!("Cannot apply `!` to constant `{other:?}`"),
+                        label: "Expected bool in constant".to_string(),
+                        secondary_label: None,
+                        help: None,
+                        span: span.clone(),
+                    });
+                    None
+                }
+            }
+        }
+        Expr::Cast(inner, target_ty, span) => {
+            let val = eval_const_expr(inner, const_map, enum_names, decl_mod, errors)?;
+            let ty = resolve_type(*target_ty, enum_names, span.clone(), errors);
+            match (val, ty) {
+                (ConstVal::Int(v), Type::Float | Type::F32) => Some(ConstVal::Float(v as f64)),
+                (
+                    ConstVal::Int(v),
+                    Type::Int | Type::I32 | Type::I16 | Type::I8 | Type::U64 | Type::U32 | Type::U16 | Type::U8,
+                ) => Some(ConstVal::Int(v)),
+                (ConstVal::Int(v), Type::Bool) => Some(ConstVal::Bool(v != 0)),
+                (ConstVal::Float(f), Type::Float | Type::F32) => Some(ConstVal::Float(f)),
+                (
+                    ConstVal::Float(f),
+                    Type::Int | Type::I32 | Type::I16 | Type::I8 | Type::U64 | Type::U32 | Type::U16 | Type::U8,
+                ) => Some(ConstVal::Int(f as i64)),
+                (
+                    ConstVal::Bool(b),
+                    Type::Int | Type::I32 | Type::I16 | Type::I8 | Type::U64 | Type::U32 | Type::U16 | Type::U8,
+                ) => Some(ConstVal::Int(if b { 1 } else { 0 })),
+                (ConstVal::Bool(b), Type::Bool) => Some(ConstVal::Bool(b)),
+                (v, t) => {
+                    errors.push(SemanticError {
+                        code: "E0308",
+                        message: format!("Unsupported constant cast `{v:?}` as `{t:?}`"),
+                        label: "Invalid constant cast".to_string(),
+                        secondary_label: None,
+                        help: None,
+                        span: span.clone(),
+                    });
+                    None
+                }
+            }
+        }
+        Expr::Add(l, r, s)
+        | Expr::Sub(l, r, s)
+        | Expr::Mul(l, r, s)
+        | Expr::Div(l, r, s)
+        | Expr::Mod(l, r, s)
+        | Expr::Shl(l, r, s)
+        | Expr::Shr(l, r, s)
+        | Expr::Ampersand(l, r, s)
+        | Expr::Pipe(l, r, s)
+        | Expr::Caret(l, r, s)
+        | Expr::Equal(l, r, s)
+        | Expr::NotEqual(l, r, s)
+        | Expr::LessThan(l, r, s)
+        | Expr::LessEqual(l, r, s)
+        | Expr::GreaterThan(l, r, s)
+        | Expr::GreaterEqual(l, r, s)
+        | Expr::And(l, r, s)
+        | Expr::Or(l, r, s) => {
+            let lv = eval_const_expr(l, const_map, enum_names, decl_mod, errors)?;
+            let rv = eval_const_expr(r, const_map, enum_names, decl_mod, errors)?;
+            match (expr, lv, rv) {
+                (Expr::Add(..), ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Int(a.wrapping_add(b))),
+                (Expr::Sub(..), ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Int(a.wrapping_sub(b))),
+                (Expr::Mul(..), ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Int(a.wrapping_mul(b))),
+                (Expr::Div(..), ConstVal::Int(a), ConstVal::Int(b)) => {
+                    if b == 0 {
+                        errors.push(SemanticError {
+                            code: "E0080",
+                            message: "Attempted to divide by zero in constant expression".to_string(),
+                            label: "Division by zero".to_string(),
+                            secondary_label: None,
+                            help: None,
+                            span: s.clone(),
+                        });
+                        None
+                    } else {
+                        Some(ConstVal::Int(a.wrapping_div(b)))
+                    }
+                }
+                (Expr::Mod(..), ConstVal::Int(a), ConstVal::Int(b)) => {
+                    if b == 0 {
+                        errors.push(SemanticError {
+                            code: "E0080",
+                            message: "Attempted remainder by zero in constant expression".to_string(),
+                            label: "Modulo by zero".to_string(),
+                            secondary_label: None,
+                            help: None,
+                            span: s.clone(),
+                        });
+                        None
+                    } else {
+                        Some(ConstVal::Int(a.wrapping_rem(b)))
+                    }
+                }
+                (Expr::Shl(..), ConstVal::Int(a), ConstVal::Int(b)) => {
+                    Some(ConstVal::Int(a.wrapping_shl(b as u32)))
+                }
+                (Expr::Shr(..), ConstVal::Int(a), ConstVal::Int(b)) => {
+                    Some(ConstVal::Int(a.wrapping_shr(b as u32)))
+                }
+                (Expr::Ampersand(..), ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Int(a & b)),
+                (Expr::Pipe(..), ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Int(a | b)),
+                (Expr::Caret(..), ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Int(a ^ b)),
+                (Expr::Add(..), ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Float(a + b)),
+                (Expr::Sub(..), ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Float(a - b)),
+                (Expr::Mul(..), ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Float(a * b)),
+                (Expr::Div(..), ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Float(a / b)),
+                (Expr::Mod(..), ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Float(a % b)),
+                (Expr::Equal(..), ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a == b)),
+                (Expr::NotEqual(..), ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a != b)),
+                (Expr::LessThan(..), ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a < b)),
+                (Expr::LessEqual(..), ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a <= b)),
+                (Expr::GreaterThan(..), ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a > b)),
+                (Expr::GreaterEqual(..), ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a >= b)),
+                (Expr::Equal(..), ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a == b)),
+                (Expr::NotEqual(..), ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a != b)),
+                (Expr::LessThan(..), ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a < b)),
+                (Expr::LessEqual(..), ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a <= b)),
+                (Expr::GreaterThan(..), ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a > b)),
+                (Expr::GreaterEqual(..), ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a >= b)),
+                (Expr::And(..), ConstVal::Bool(a), ConstVal::Bool(b)) => Some(ConstVal::Bool(a && b)),
+                (Expr::Or(..), ConstVal::Bool(a), ConstVal::Bool(b)) => Some(ConstVal::Bool(a || b)),
+                (Expr::Equal(..), ConstVal::Bool(a), ConstVal::Bool(b)) => Some(ConstVal::Bool(a == b)),
+                (Expr::NotEqual(..), ConstVal::Bool(a), ConstVal::Bool(b)) => Some(ConstVal::Bool(a != b)),
+                (_, l_other, r_other) => {
+                    errors.push(SemanticError {
+                        code: "E0308",
+                        message: format!("Incompatible operand types `{l_other:?}` and `{r_other:?}` in constant expression"),
+                        label: "Invalid constant binary operation".to_string(),
+                        secondary_label: None,
+                        help: None,
+                        span: s.clone(),
+                    });
+                    None
+                }
+            }
+        }
+        _ => {
+            errors.push(SemanticError {
+                code: "E0015",
+                message: "Expression in top-level `const` is not a compile-time constant".to_string(),
+                label: "Expected constant expression".to_string(),
+                secondary_label: None,
+                help: None,
+                span: expr.span(),
+            });
+            None
+        }
+    }
+}
+
+fn const_val_to_typed_expr(
+    val: ConstVal,
+    expected_ty: Type,
+    span: Span,
+    errors: &mut Vec<SemanticError>,
+) -> Option<TypedExpr> {
+    match (val, expected_ty) {
+        (ConstVal::Int(n), Type::Int) => Some(TypedExpr::Int(n, span)),
+        (ConstVal::Int(n), Type::I32) => {
+            Some(TypedExpr::CastI32(Box::new(TypedExpr::Int(n, span.clone())), span))
+        }
+        (
+            ConstVal::Int(n),
+            Type::I8 | Type::I16 | Type::U8 | Type::U16 | Type::U32 | Type::U64,
+        ) => Some(TypedExpr::Cast(
+            Box::new(TypedExpr::Int(n, span.clone())),
+            expected_ty,
+            span,
+        )),
+        (ConstVal::Float(f), Type::Float) => Some(TypedExpr::Float(f, span)),
+        (ConstVal::Float(f), Type::F32) => Some(TypedExpr::CastF32(
+            Box::new(TypedExpr::Float(f as f32 as f64, span.clone())),
+            span,
+        )),
+        (ConstVal::Bool(b), Type::Bool) => Some(TypedExpr::Bool(b, span)),
+        (ConstVal::Str(s), Type::Str) => Some(TypedExpr::String(s, span)),
+        (other, ty) => {
+            errors.push(SemanticError {
+                code: "E0308",
+                message: format!("Mismatched `const` type: expected `{ty:?}`, found `{other:?}`"),
+                label: format!("Expected `{ty:?}`"),
+                secondary_label: None,
+                help: None,
+                span,
+            });
+            None
+        }
+    }
+}
 
 // A custom struct to hold the error message, label, error code, optional help message, AND where it happened
 #[derive(Debug)]
@@ -265,11 +556,6 @@ pub fn check_semantics(
         }
         let target_ty = resolve_type(Type::Obj(intern_str(&impl_block.target_type)), &enum_names, 0..1, &mut errors);
         for method in &impl_block.methods {
-            let is_generic = method.params.iter().any(|p| matches!(p.ty, Type::Generic(_)))
-                || matches!(method.return_type, Type::Generic(_));
-            if is_generic {
-                continue;
-            }
             let mangled_name = format!("{}_{}", impl_block.target_type, method.name);
             let mut params = Vec::new();
             for p in &method.params {
@@ -281,13 +567,15 @@ pub fn check_semantics(
                         span: p.span.clone(),
                     });
                 } else {
-                    params.push(p.clone());
+                    let mut cp = p.clone();
+                    cp.ty = substitute_self_type(cp.ty, target_ty);
+                    params.push(cp);
                 }
             }
             all_functions.push(FuncDecl {
                 name: mangled_name,
                 params,
-                return_type: method.return_type,
+                return_type: substitute_self_type(method.return_type, target_ty),
                 where_clause: method.where_clause.clone(),
                 body: method.body.clone(),
                 is_track_caller: method.is_track_caller,
@@ -346,7 +634,13 @@ pub fn check_semantics(
             .or_else(|| func.body.first().map(|e| e.span()))
             .unwrap_or(0..1);
         func.return_type = resolve_type(func.return_type, &enum_names, f_span.clone(), &mut errors);
-        if type_contains_ref(&func.return_type) {
+        let is_index_ref_method = (func.name.ends_with("_index")
+            || func.name.ends_with("_index_mut"))
+            && func
+                .params
+                .first()
+                .is_some_and(|p| p.name == "self" && matches!(p.ty, Type::Ref(_) | Type::MutRef(_)));
+        if type_contains_ref(&func.return_type) && !is_index_ref_method {
             errors.push(SemanticError {
                 code: "E0106",
                 message: format!(
@@ -412,6 +706,16 @@ pub fn check_semantics(
         }
     }
 
+    let mut const_map: HashMap<String, ConstMapEntry> = HashMap::new();
+    for c in &program.consts {
+        let resolved_ty = resolve_type(c.ty, &enum_names, c.span.clone(), &mut errors);
+        if let Some(c_val) = eval_const_expr(&c.value, &const_map, &enum_names, &c.module_path, &mut errors) {
+            if let Some(typed_val) = const_val_to_typed_expr(c_val, resolved_ty, c.span.clone(), &mut errors) {
+                const_map.insert(c.name.clone(), (resolved_ty, typed_val, c.vis, c.module_path.clone()));
+            }
+        }
+    }
+
     for u in &program.uses {
         let target = &u.resolved_target;
         if target.is_empty() {
@@ -432,6 +736,8 @@ pub fn check_semantics(
             vis_info = Some((t.vis, t.module_path.clone()));
         } else if let Some(ta) = program.trait_aliases.iter().find(|ta| ta.name == *target) {
             vis_info = Some((ta.vis, ta.module_path.clone()));
+        } else if let Some((_, _, vis, m_path)) = const_map.get(target) {
+            vis_info = Some((*vis, m_path.clone()));
         }
 
         if let Some((vis, decl_mod)) = vis_info {
@@ -599,6 +905,7 @@ pub fn check_semantics(
         extern_c_names: &extern_c_names,
         trait_methods: &trait_methods,
         trait_impls: &trait_impls,
+        const_map: &const_map,
         current_module: Vec::new(),
         enum_vis: &enum_vis_map,
         extern_vis: &extern_vis_map,
@@ -718,6 +1025,7 @@ pub fn check_semantics(
         if resolved_return_type != Type::Unit && !compat::definitely_returns(&typed_body) {
             if let Some(last) = typed_body.last() {
                 compat::consume_tail_expr(&mut scope_stack, &mut errors, &fn_ctx, last);
+                calls::closures::check_return_closure_escape(last, &fn_ctx, &mut errors);
                 if control_flow::lifetimes::type_may_borrow(&resolved_return_type) {
                     control_flow::check_return_ref_lifetime(&scope_stack, last, &mut errors);
                 }

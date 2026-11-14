@@ -481,19 +481,34 @@ pub fn validate_call_arguments<'a>(
                     && unify_res.is_err()
                     && !crate::sanal::compat::is_type_compatible(&resolved_param, &resolved_arg)
                 {
-                    errors.push(SemanticError {
-                        code: "E0308",
-                        message: format!(
-                            "Mismatched type for parameter `{}` in call to `{resolved_name}`: expected `{:?}`, found `{:?}`",
-                            param.name,
-                            resolved_param,
-                            resolved_arg
-                        ),
-                        label: format!("Expected `{:?}`", resolved_param),
-                        secondary_label: None,
-                        help: None,
-                        span: arg.span(),
-                    });
+                    if matches!(resolved_param, Type::FnPtr(..))
+                        && matches!(resolved_arg, Type::Obj(cname) if cname.starts_with("__Closure_"))
+                    {
+                        errors.push(SemanticError {
+                            code: "E0434",
+                            message: format!(
+                                "Cannot coerce capturing closure `{resolved_arg:?}` to function pointer `{resolved_param:?}` in call to `{resolved_name}`"
+                            ),
+                            label: "Closures can only be coerced to `fn` pointers if they capture no variables".to_string(),
+                            secondary_label: None,
+                            help: Some("Use a non-capturing closure or parameterize over `where F: Fn(...) -> ...`".to_string()),
+                            span: arg.span(),
+                        });
+                    } else {
+                        errors.push(SemanticError {
+                            code: "E0308",
+                            message: format!(
+                                "Mismatched type for parameter `{}` in call to `{resolved_name}`: expected `{:?}`, found `{:?}`",
+                                param.name,
+                                resolved_param,
+                                resolved_arg
+                            ),
+                            label: format!("Expected `{:?}`", resolved_param),
+                            secondary_label: None,
+                            help: None,
+                            span: arg.span(),
+                        });
+                    }
                 }
             }
         }

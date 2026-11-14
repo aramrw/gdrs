@@ -87,13 +87,40 @@ pub fn type_satisfies_bound(
             }
             return !matches!(ty, Type::Rc(_) | Type::Ref(_) | Type::MutRef(_) | Type::Ptr(_));
         }
-        "Add" | "Sub" | "Mul" | "Div" => {
-            if ty.is_numeric() {
+        "Add" | "Sub" | "Mul" | "Div" | "Rem" | "Neg" | "BitAnd" | "BitOr" | "BitXor" | "Shl"
+        | "Shr" | "AddAssign" | "SubAssign" | "MulAssign" | "DivAssign" => {
+            if ty.is_numeric() && !matches!(clean_bound, "AddAssign" | "SubAssign" | "MulAssign" | "DivAssign") {
                 return true;
             }
             if let Some(tname) = type_name_opt {
-                let m = clean_bound.to_lowercase();
+                let m = match clean_bound {
+                    "AddAssign" => "add_assign".to_string(),
+                    "SubAssign" => "sub_assign".to_string(),
+                    "MulAssign" => "mul_assign".to_string(),
+                    "DivAssign" => "div_assign".to_string(),
+                    other => other.to_lowercase(),
+                };
                 if fn_map.contains_key(&format!("{tname}_{m}")) {
+                    return true;
+                }
+            }
+        }
+        "Index" => {
+            if matches!(ty, Type::Array(..) | Type::Slice(_) | Type::Vec(_)) {
+                return true;
+            }
+            if let Some(tname) = type_name_opt {
+                if fn_map.contains_key(&format!("{tname}_index")) {
+                    return true;
+                }
+            }
+        }
+        "IndexMut" => {
+            if matches!(ty, Type::Array(..) | Type::Slice(_) | Type::Vec(_)) {
+                return true;
+            }
+            if let Some(tname) = type_name_opt {
+                if fn_map.contains_key(&format!("{tname}_index_mut")) {
                     return true;
                 }
             }
@@ -217,7 +244,39 @@ pub fn type_satisfies_bound(
                 return type_satisfies_bound(*inner, "Eq", trait_methods, trait_impls, fn_map);
             }
         }
-        _ => {}
+        _ => {
+            // Check closure trait bounds: `Fn(Args) -> Ret`, `FnMut(Args) -> Ret`, `FnOnce(Args) -> Ret`
+            if let Some((trait_prefix, rest)) = bound
+                .strip_prefix("FnOnce")
+                .map(|r| ("FnOnce", r))
+                .or_else(|| bound.strip_prefix("FnMut").map(|r| ("FnMut", r)))
+                .or_else(|| bound.strip_prefix("Fn").map(|r| ("Fn", r)))
+            {
+                if rest.starts_with('(') {
+                    if let Type::FnPtr(..) = ty {
+                        return true;
+                    }
+                    if let Some(tname) = type_name_opt {
+                        let ok = match trait_prefix {
+                            "Fn" => fn_map.contains_key(&format!("{tname}_call_ref")),
+                            "FnMut" => {
+                                fn_map.contains_key(&format!("{tname}_call_mut"))
+                                    || fn_map.contains_key(&format!("{tname}_call_ref"))
+                            }
+                            _ => {
+                                fn_map.contains_key(&format!("{tname}_call_once"))
+                                    || fn_map.contains_key(&format!("{tname}_call_mut"))
+                                    || fn_map.contains_key(&format!("{tname}_call_ref"))
+                            }
+                        };
+                        if ok {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            }
+        }
     }
 
     let Some(tname) = type_name_opt else {
@@ -260,28 +319,37 @@ pub fn check_where_clause_bounds(
     let Some(w) = where_clause else {
         return;
     };
-    let clean = w.target_param.trim_start_matches('$');
-    let Some(&concrete_ty) = env.get(clean).or_else(|| env.get(&w.target_param)) else {
-        return;
-    };
-    if crate::sanal::compat::type_contains_generic(&concrete_ty)
-        || crate::sanal::compat::type_contains_infer(&concrete_ty)
-    {
-        return;
+    let mut all_preds = Vec::with_capacity(1 + w.predicates.len());
+    all_preds.push((&w.target_param, &w.bounds));
+    for (tp, bs) in &w.predicates {
+        all_preds.push((tp, bs));
     }
     let mut m = mono.borrow_mut();
-    for bound in &w.bounds {
-        if !type_satisfies_bound(concrete_ty, bound, &m.trait_methods, &m.trait_impls, fn_map) {
-            m.bound_violations.push(crate::sanal::SemanticError {
-                code: "E0277",
-                message: format!(
-                    "The trait bound `{concrete_ty:?}: {bound}` is not satisfied for `{item_desc}`"
-                ),
-                label: format!("`{concrete_ty:?}` does not implement `{bound}`"),
-                secondary_label: None,
-                help: Some(format!("Implement `{bound}` for `{concrete_ty:?}` or use a type that satisfies `where {}: {bound}`", w.target_param)),
-                span: w.span.clone(),
-            });
+    for (target_param, bounds) in all_preds {
+        let clean = target_param.trim_start_matches('$');
+        let Some(&concrete_ty) = env.get(clean).or_else(|| env.get(target_param)) else {
+            continue;
+        };
+        if crate::sanal::compat::type_contains_generic(&concrete_ty)
+            || crate::sanal::compat::type_contains_infer(&concrete_ty)
+        {
+            continue;
+        }
+        for bound in bounds {
+            if !type_satisfies_bound(concrete_ty, bound, &m.trait_methods, &m.trait_impls, fn_map) {
+                m.bound_violations.push(crate::sanal::SemanticError {
+                    code: "E0277",
+                    message: format!(
+                        "The trait bound `{concrete_ty:?}: {bound}` is not satisfied for `{item_desc}`"
+                    ),
+                    label: format!("`{concrete_ty:?}` does not implement `{bound}`"),
+                    secondary_label: None,
+                    help: Some(format!(
+                        "Implement `{bound}` for `{concrete_ty:?}` or use a type that satisfies `where {target_param}: {bound}`"
+                    )),
+                    span: w.span.clone(),
+                });
+            }
         }
     }
 }

@@ -59,6 +59,19 @@ pub fn compile_call<M: Module>(
         return builder.ins().iconst(types::I64, 0);
     }
 
+    if let Some((base, ty_args)) = crate::sanal::mono::lookup_mangled(name) {
+        if (base == "__intrinsic_size_of" || base == "__intrinsic_align_of") && ty_args.len() == 1
+        {
+            let (sz, al) = crate::codegen::layout::size_and_align(
+                &ty_args[0],
+                &cg.meta.struct_layouts,
+                cg.meta.enum_layouts,
+            );
+            let out_val = if base == "__intrinsic_align_of" { al } else { sz };
+            return builder.ins().iconst(types::I64, out_val as i64);
+        }
+    }
+
     // Handle `Box::new(val)` with heap allocation
     if name == "box_new" && args.len() == 1 {
         let val = compile_expr(builder, &args[0], cg, module);

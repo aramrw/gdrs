@@ -13,6 +13,8 @@ pub enum Token {
     Let,
     #[token("mut")]
     Mut,
+    #[token("const")]
+    Const,
     #[token("=")]
     Assign,
     #[token("+")]
@@ -81,6 +83,8 @@ pub enum Token {
     Continue,
     #[token("else")]
     Else,
+    #[token("move")]
+    Move,
 
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Ident(String),
@@ -303,6 +307,7 @@ impl Type {
             | Type::Slice(_)
             | Type::FnPtr(_, _) => true,
             Type::Tuple(tys) => tys.iter().all(|t| t.is_copy()),
+            Type::Array(elem, _) => elem.is_copy(),
             _ => false,
         }
     }
@@ -532,9 +537,18 @@ pub enum Expr {
     Ref(Box<Expr>, bool, Span),
     Deref(Box<Expr>, Span),
     DerefAssign(Box<Expr>, Box<Expr>, Span),
-    Closure(Vec<String>, Box<Expr>, Span),
+    Closure(bool, Vec<String>, Box<Expr>, Span),
+    CompoundAssign(AssignOp, Box<Expr>, Box<Expr>, Span),
     Cast(Box<Expr>, Type, Span),
     Range(Box<Expr>, Box<Expr>, Span),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
 }
 
 #[derive(Debug, Clone)]
@@ -605,7 +619,8 @@ impl Expr {
             Expr::Ref(_, _, s) => s.clone(),
             Expr::Deref(_, s) => s.clone(),
             Expr::DerefAssign(_, _, s) => s.clone(),
-            Expr::Closure(_, _, s) => s.clone(),
+            Expr::Closure(_, _, _, s) => s.clone(),
+            Expr::CompoundAssign(_, _, _, s) => s.clone(),
             Expr::Cast(_, _, s) => s.clone(),
             Expr::Range(_, _, s) => s.clone(),
             Expr::Try(_, s) => s.clone(),
@@ -852,6 +867,7 @@ pub struct TraitAliasDecl {
 pub struct WhereClause {
     pub target_param: String,
     pub bounds: Vec<String>,
+    pub predicates: Vec<(String, Vec<String>)>,
     pub span: Span,
 }
 
@@ -873,13 +889,24 @@ pub struct ExternDecl {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub struct ConstDecl {
+    pub name: String,
+    pub ty: Type,
+    pub value: Expr,
+    pub vis: Visibility,
+    pub module_path: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct Program {
     pub mods: Vec<ModDecl>,
     pub uses: Vec<UseDecl>,
     pub traits: Vec<TraitDecl>,
     pub trait_aliases: Vec<TraitAliasDecl>,
     pub externs: Vec<ExternDecl>,
+    pub consts: Vec<ConstDecl>,
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
     pub impls: Vec<ImplDecl>,

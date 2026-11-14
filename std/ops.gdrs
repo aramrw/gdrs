@@ -5,3 +5,52 @@ pub trait Add:
 pub trait Sub:
 	fn sub(self, other: $T) -> $T
 	where T: Sub:
+
+pub trait Mul:
+	fn mul(self, other: $T) -> $T
+	where T: Mul:
+
+pub trait Div:
+	fn div(self, other: $T) -> $T
+	where T: Div:
+
+pub trait Rem:
+	fn rem(self, other: $T) -> $T
+	where T: Rem:
+
+pub trait Neg:
+	fn neg(self) -> $T
+	where T: Neg:
+
+pub trait BitAnd:
+	fn bitand(self, other: $T) -> $T
+
+pub trait BitOr:
+	fn bitor(self, other: $T) -> $T
+
+pub trait BitXor:
+	fn bitxor(self, other: $T) -> $T
+
+pub trait Shl:
+	fn shl(self, other: $T) -> $T
+
+pub trait Shr:
+	fn shr(self, other: $T) -> $T
+
+pub trait AddAssign:
+	fn add_assign(&mut self, other: $Rhs)
+
+pub trait SubAssign:
+	fn sub_assign(&mut self, other: $Rhs)
+
+pub trait MulAssign:
+	fn mul_assign(&mut self, other: $Rhs)
+
+pub trait DivAssign:
+	fn div_assign(&mut self, other: $Rhs)
+
+pub trait Index:
+	fn index(&self, idx: $Idx) -> &$Output
+
+pub trait IndexMut:
+	fn index_mut(&mut self, idx: $Idx) -> &mut $Output

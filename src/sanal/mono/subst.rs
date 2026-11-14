@@ -4,7 +4,10 @@
 use std::{cell::RefCell, collections::HashMap};
 use crate::{
     ast::{intern_str, intern_type, EnumDecl, Expr, MatchArm, StructDecl, Type},
-    sanal::mono::{lookup_mangled, mangle_name, type_suffix, Monomorphizer},
+    sanal::mono::{
+        lookup_mangled, mangle_name, mangle_name_update, register_intrinsic_mangled, type_suffix,
+        Monomorphizer,
+    },
 };
 
 pub fn extract_generic_params_struct(decl: &StructDecl, mono: &RefCell<Monomorphizer>) -> Vec<String> {
@@ -18,7 +21,12 @@ pub fn extract_generic_params_struct(decl: &StructDecl, mono: &RefCell<Monomorph
     for field in &decl.fields {
         collect_generics_from_type(&field.ty, &mut params);
     }
-    if params.is_empty() {
+    if params.is_empty()
+        && matches!(
+            decl.name.as_str(),
+            "std_vec_Vec" | "Vec" | "std_vec_VecIter" | "VecIter"
+        )
+    {
         let impls = mono.borrow().impl_templates.clone();
         for impl_block in &impls {
             if impl_block.target_type == decl.name
@@ -29,6 +37,9 @@ pub fn extract_generic_params_struct(decl: &StructDecl, mono: &RefCell<Monomorph
                         collect_generics_from_type(&p.ty, &mut params);
                     }
                     collect_generics_from_type(&m.return_type, &mut params);
+                    if params.contains(&"T".to_string()) {
+                        return vec!["T".to_string()];
+                    }
                 }
             }
         }
@@ -125,6 +136,11 @@ pub fn substitute_type(ty: Type, env: &HashMap<String, Type>) -> Type {
         }
         Type::Obj(name) | Type::Enum(name) => {
             let s_name = name.to_string();
+            if s_name == "Self" || s_name.ends_with("_Self") {
+                if let Some(&sub) = env.get("Self") {
+                    return sub;
+                }
+            }
             if let Some((base, args)) = lookup_mangled(&s_name) {
                 if !env.is_empty() {
                     let sub_args: Vec<Type> = args.into_iter().map(|a| substitute_type(a, env)).collect();
@@ -309,12 +325,34 @@ pub fn substitute_expr(expr: &Expr, env: &HashMap<String, Type>) -> Expr {
         ),
         Expr::Call(name, args, span) => {
             let mut unique_vals = Vec::new();
-            for val in env.values() {
+            for (k, val) in env {
+                if k == "Self" {
+                    continue;
+                }
                 if !unique_vals.contains(val) {
                     unique_vals.push(*val);
                 }
             }
-            let new_name = if !unique_vals.is_empty() {
+            let new_name = if let Some((base, ty_args)) = lookup_mangled(name) {
+                let sub_ty_args: Vec<Type> =
+                    ty_args.iter().map(|t| substitute_type(*t, env)).collect();
+                if matches!(
+                    base.as_str(),
+                    "size_of"
+                        | "std::mem::size_of"
+                        | "mem::size_of"
+                        | "std_mem_size_of"
+                        | "align_of"
+                        | "std::mem::align_of"
+                        | "mem::align_of"
+                        | "std_mem_align_of"
+                ) && sub_ty_args.len() == 1
+                {
+                    register_intrinsic_mangled(&base, sub_ty_args[0])
+                } else {
+                    mangle_name_update(&base, &sub_ty_args)
+                }
+            } else if !unique_vals.is_empty() {
                 let (dot_prefix, stripped) = if let Some(rest) = name.strip_prefix('.') {
                     (".", rest)
                 } else {
@@ -322,7 +360,13 @@ pub fn substitute_expr(expr: &Expr, env: &HashMap<String, Type>) -> Expr {
                 };
                 if stripped.starts_with("Vec::") || stripped.starts_with("Vec.") || stripped == "Vec::new" || stripped == "Vec.new" {
                     let method = stripped.rsplit("::").next().unwrap_or(stripped).rsplit('.').next().unwrap_or(stripped);
-                    format!("{dot_prefix}{}_{method}", mangle_name("Vec", &unique_vals))
+                    if let Some(&t_ty) = env.get("T") {
+                        format!("{dot_prefix}{}_{method}", mangle_name("Vec", &[t_ty]))
+                    } else if unique_vals.len() == 1 {
+                        format!("{dot_prefix}{}_{method}", mangle_name("Vec", &unique_vals))
+                    } else {
+                        name.clone()
+                    }
                 } else {
                     name.clone()
                 }
@@ -338,18 +382,25 @@ pub fn substitute_expr(expr: &Expr, env: &HashMap<String, Type>) -> Expr {
         Expr::Try(inner, span) => Expr::Try(Box::new(substitute_expr(inner, env)), span.clone()),
         Expr::ObjInit(name, fields, span) => {
             let mut unique_vals = Vec::new();
-            for val in env.values() {
+            for (k, val) in env {
+                if k == "Self" {
+                    continue;
+                }
                 if !unique_vals.contains(val) {
                     unique_vals.push(*val);
                 }
             }
-            let new_name = if !unique_vals.is_empty() {
-                let clean = name.split('_').last().unwrap_or(name);
-                if clean == "Vec" || clean == "Option" || clean == "Result" {
+            let clean = name.split('_').last().unwrap_or(name);
+            let new_name = if clean == "Vec" {
+                if let Some(&t_ty) = env.get("T") {
+                    mangle_name(name, &[t_ty])
+                } else if !unique_vals.is_empty() {
                     mangle_name(name, &unique_vals)
                 } else {
                     name.clone()
                 }
+            } else if !unique_vals.is_empty() && (clean == "Option" || clean == "Result") {
+                mangle_name(name, &unique_vals)
             } else {
                 name.clone()
             };
@@ -421,7 +472,14 @@ pub fn substitute_expr(expr: &Expr, env: &HashMap<String, Type>) -> Expr {
             Box::new(substitute_expr(val, env)),
             span.clone(),
         ),
-        Expr::Closure(params, body, span) => Expr::Closure(
+        Expr::CompoundAssign(op, lhs, rhs, span) => Expr::CompoundAssign(
+            *op,
+            Box::new(substitute_expr(lhs, env)),
+            Box::new(substitute_expr(rhs, env)),
+            span.clone(),
+        ),
+        Expr::Closure(is_move, params, body, span) => Expr::Closure(
+            *is_move,
             params.clone(),
             Box::new(substitute_expr(body, env)),
             span.clone(),

@@ -9,7 +9,7 @@ pub mod templates;
 
 pub use bounds::{check_where_clause_bounds, type_satisfies_bound};
 pub use instances::{monomorphize_enum, monomorphize_fn, monomorphize_struct};
-pub use mangle::{lookup_mangled, mangle_name, type_suffix};
+pub use mangle::{lookup_mangled, mangle_name, mangle_name_update, register_intrinsic_mangled, type_suffix};
 pub use subst::{
     collect_generics_from_type, extract_generic_params_enum, extract_generic_params_struct,
     substitute_expr, substitute_type,

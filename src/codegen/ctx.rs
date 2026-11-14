@@ -25,6 +25,7 @@ pub struct ProgramMeta<'a> {
     pub trait_methods: HashMap<String, Vec<String>>,
     pub trait_consuming_methods: HashSet<(String, String)>,
     pub track_caller_fns: HashSet<String>,
+    pub closure_unpacked_call_once_fns: HashSet<String>,
     pub source_map: &'a crate::loader::SourceMap,
 }
 
@@ -42,6 +43,8 @@ impl<'a> ProgramMeta<'a> {
         let mut fn_return_types = HashMap::new();
         let mut known_drop_fns = HashSet::new();
         let mut track_caller_fns = HashSet::new();
+        let mut closure_unpacked_call_once_fns = HashSet::new();
+        let all_fn_names: HashSet<&str> = program.functions.iter().map(|f| f.name.as_str()).collect();
 
         for func in &program.functions {
             if func.name.ends_with("_drop") {
@@ -49,6 +52,12 @@ impl<'a> ProgramMeta<'a> {
             }
             if func.is_track_caller {
                 track_caller_fns.insert(func.name.clone());
+            }
+            if func.name.starts_with("__Closure_") && func.name.ends_with("_call_once") {
+                let mut_name = func.name.replacen("_call_once", "_call_mut", 1);
+                if !all_fn_names.contains(mut_name.as_str()) {
+                    closure_unpacked_call_once_fns.insert(func.name.clone());
+                }
             }
         }
 
@@ -102,6 +111,24 @@ impl<'a> ProgramMeta<'a> {
             fn_move_params.insert(func.name.clone(), moves);
         }
 
+        for ext in &program.externs {
+            for ef in &ext.functions {
+                let p_tys: Vec<Type> = ef.params.iter().map(|p| p.ty).collect();
+                fn_param_types
+                    .entry(ef.c_name.clone())
+                    .or_insert_with(|| p_tys.clone());
+                fn_return_types
+                    .entry(ef.c_name.clone())
+                    .or_insert(ef.return_type);
+                fn_param_types
+                    .entry(ef.name.clone())
+                    .or_insert(p_tys);
+                fn_return_types
+                    .entry(ef.name.clone())
+                    .or_insert(ef.return_type);
+            }
+        }
+
         let mut trait_methods = HashMap::new();
         let mut trait_consuming_methods = HashSet::new();
         for t in &program.traits {
@@ -133,6 +160,7 @@ impl<'a> ProgramMeta<'a> {
             trait_methods,
             trait_consuming_methods,
             track_caller_fns,
+            closure_unpacked_call_once_fns,
             source_map,
         }
     }

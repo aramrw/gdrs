@@ -9,6 +9,22 @@ use crate::{
 pub(crate) fn substitute_self_type(ty: Type, target_ty: Type) -> Type {
     match ty {
         Type::Obj("Self") => target_ty,
+        Type::Obj(name) | Type::Enum(name) => {
+            if let Some((base, args)) = crate::sanal::mono::lookup_mangled(name) {
+                let sub_args: Vec<Type> = args
+                    .into_iter()
+                    .map(|a| substitute_self_type(a, target_ty))
+                    .collect();
+                let remangled = crate::sanal::mono::mangle_name(&base, &sub_args);
+                if matches!(ty, Type::Enum(_)) {
+                    Type::Enum(intern_str(&remangled))
+                } else {
+                    Type::Obj(intern_str(&remangled))
+                }
+            } else {
+                ty
+            }
+        }
         Type::Ref(inner) => Type::Ref(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),
         Type::MutRef(inner) => Type::MutRef(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),
         Type::Ptr(inner) => Type::Ptr(crate::ast::intern_type(substitute_self_type(*inner, target_ty))),

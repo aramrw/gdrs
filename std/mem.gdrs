@@ -1,4 +1,19 @@
 // std/mem.gdrs - Memory management helpers
+use std::libc::{posix_memalign}
 
 pub fn drop(val: $T):
 	return
+
+pub fn size_of() -> i64:
+	return 0
+
+pub fn align_of() -> i64:
+	return 0
+
+pub fn alloc_aligned(size: i64, align: i64) -> *void:
+	let mut out: *void = 0 as *void
+	unsafe:
+		let rc = posix_memalign(&mut out as **void, align, size)
+		if rc != (0 as i32):
+			return 0 as *void
+	return out

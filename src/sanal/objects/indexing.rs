@@ -185,6 +185,81 @@ pub fn type_check_index_access<'a>(
         ));
     }
 
+    if let Type::Obj(s) = target_ty {
+        if let Some(fn_info) = crate::sanal::binops::lookup_struct_method_fn(type_ctx, s, "index")
+        {
+            let mut self_arg = t_target.clone();
+            if let Some(first_param) = fn_info.params.first() {
+                let expected_self = type_ctx.infer.borrow_mut().probe(first_param.ty);
+                let actual_self = type_ctx.infer.borrow_mut().probe(self_arg.ty());
+                if matches!(expected_self, Type::Ref(_)) {
+                    if let Some(root_var) = crate::sanal::compat::extract_root_var(&self_arg) {
+                        if let Some((true, holder)) = scopes.active_borrow(root_var) {
+                            errors.push(SemanticError {
+                                code: "E0502",
+                                message: format!(
+                                    "Cannot borrow `{root_var}` as immutable because it is also borrowed as mutable by `{holder}`"
+                                ),
+                                label: "Immutable borrow occurs here".to_string(),
+                                secondary_label: None,
+                                help: None,
+                                span: self_arg.span(),
+                            });
+                        }
+                    }
+                    let arg_span = self_arg.span();
+                    if matches!(actual_self, Type::MutRef(_)) {
+                        if let Type::MutRef(inner) = actual_self {
+                            let derefed = TypedExpr::Deref(Box::new(self_arg), *inner, arg_span.clone());
+                            self_arg = TypedExpr::Ref(
+                                Box::new(derefed),
+                                false,
+                                Type::Ref(inner),
+                                arg_span,
+                            );
+                        }
+                    } else if !matches!(actual_self, Type::Ref(_)) {
+                        self_arg = TypedExpr::Ref(
+                            Box::new(self_arg),
+                            false,
+                            Type::Ref(crate::ast::intern_type(target_ty)),
+                            arg_span,
+                        );
+                    }
+                }
+            }
+            let mut idx_arg = t_idx.clone();
+            if fn_info.params.len() >= 2 {
+                crate::sanal::binops::auto_borrow_op_arg_if_ref(
+                    fn_info.params[1].ty,
+                    &mut idx_arg,
+                    scopes,
+                    errors,
+                    type_ctx,
+                );
+            }
+            let mut call_args = vec![self_arg, idx_arg];
+            crate::sanal::calls::validation::validate_call_arguments(
+                &fn_info,
+                &mut call_args,
+                true,
+                &fn_info.name,
+                scopes,
+                errors,
+                type_ctx,
+                span,
+            );
+            let ret_ty = type_ctx.infer.borrow_mut().resolve(fn_info.return_type);
+            let call_expr = TypedExpr::Call(fn_info.name.clone(), call_args, ret_ty, span.clone());
+            return match ret_ty {
+                Type::Ref(inner) | Type::MutRef(inner) => {
+                    Some(TypedExpr::Deref(Box::new(call_expr), *inner, span.clone()))
+                }
+                _ => Some(call_expr),
+            };
+        }
+    }
+
     if matches!(resolved_idx_ty, Type::Infer(_)) {
         let _ = type_ctx.infer.borrow_mut().unify(Type::Int, resolved_idx_ty);
     } else if !resolved_idx_ty.is_integer() {
@@ -285,6 +360,96 @@ pub fn type_check_index_assign<'a>(
         }
     }
 
+    let mut clean_target_ty = type_ctx.infer.borrow_mut().resolve(t_target.ty());
+    while let Type::Ref(inner) | Type::MutRef(inner) | Type::Box(inner) = clean_target_ty {
+        clean_target_ty = *inner;
+    }
+
+    if let Type::Obj(s) = clean_target_ty {
+        if let Some(fn_info) =
+            crate::sanal::binops::lookup_struct_method_fn(type_ctx, s, "index_mut")
+        {
+            let mut self_arg = t_target;
+            if let Some(first_param) = fn_info.params.first() {
+                let expected_self = type_ctx.infer.borrow_mut().probe(first_param.ty);
+                let actual_self = type_ctx.infer.borrow_mut().probe(self_arg.ty());
+                if matches!(expected_self, Type::MutRef(_))
+                    && !matches!(actual_self, Type::Ref(_) | Type::MutRef(_))
+                {
+                    let arg_span = self_arg.span();
+                    self_arg = TypedExpr::Ref(
+                        Box::new(self_arg),
+                        true,
+                        Type::MutRef(crate::ast::intern_type(actual_self)),
+                        arg_span,
+                    );
+                }
+            }
+            let mut idx_arg = t_idx;
+            if fn_info.params.len() >= 2 {
+                crate::sanal::binops::auto_borrow_op_arg_if_ref(
+                    fn_info.params[1].ty,
+                    &mut idx_arg,
+                    scopes,
+                    errors,
+                    type_ctx,
+                );
+            }
+            let mut call_args = vec![self_arg, idx_arg];
+            crate::sanal::calls::validation::validate_call_arguments(
+                &fn_info,
+                &mut call_args,
+                true,
+                &fn_info.name,
+                scopes,
+                errors,
+                type_ctx,
+                span,
+            );
+            let ret_ty = type_ctx.infer.borrow_mut().resolve(fn_info.return_type);
+            let out_ty = match ret_ty {
+                Type::MutRef(inner) => Some(*inner),
+                other => {
+                    errors.push(SemanticError {
+                        code: "E0308",
+                        message: format!(
+                            "`IndexMut::index_mut` must return `&mut Output`, found `{other:?}`"
+                        ),
+                        label: "Invalid `index_mut` return type".into(),
+                        secondary_label: None,
+                        help: None,
+                        span: span.clone(),
+                    });
+                    None
+                }
+            };
+            if let Some(elem_ty) = out_ty {
+                let unify_res = type_ctx.infer.borrow_mut().unify(elem_ty, t_val.ty());
+                let resolved_elem = type_ctx.infer.borrow_mut().resolve(elem_ty);
+                let resolved_val = type_ctx.infer.borrow_mut().resolve(t_val.ty());
+                if unify_res.is_err() && !is_type_compatible(&resolved_elem, &resolved_val) {
+                    errors.push(SemanticError {
+                        code: "E0308",
+                        message: format!(
+                            "Cannot assign type `{:?}` to indexed target holding `{:?}`",
+                            resolved_val, resolved_elem
+                        ),
+                        label: "Type mismatch".into(),
+                        secondary_label: None,
+                        help: None,
+                        span: t_val.span().clone(),
+                    });
+                }
+            }
+            let call_expr = TypedExpr::Call(fn_info.name.clone(), call_args, ret_ty, span.clone());
+            return Some(TypedExpr::DerefAssign(
+                Box::new(call_expr),
+                Box::new(t_val),
+                span.clone(),
+            ));
+        }
+    }
+
     let resolved_idx_ty = type_ctx.infer.borrow_mut().probe(t_idx.ty());
     if matches!(resolved_idx_ty, Type::Infer(_)) {
         let _ = type_ctx.infer.borrow_mut().unify(Type::Int, resolved_idx_ty);
@@ -297,11 +462,6 @@ pub fn type_check_index_assign<'a>(
             help: None,
             span: t_idx.span().clone(),
         });
-    }
-
-    let mut clean_target_ty = type_ctx.infer.borrow_mut().resolve(t_target.ty());
-    while let Type::Ref(inner) | Type::MutRef(inner) | Type::Box(inner) = clean_target_ty {
-        clean_target_ty = *inner;
     }
     let opt_elem_ty = match clean_target_ty {
         Type::Array(e_ty, _) | Type::Slice(e_ty) | Type::Vec(e_ty) => Some(*e_ty),

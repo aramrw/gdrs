@@ -160,13 +160,16 @@ impl ScopeStack {
         None
     }
 
-    /// Returns `Some((is_mut, holder_name))` if `target` currently has any active local borrow.
-    /// Prefers returning a mutable borrow if one exists.
+    /// Returns `Some((is_mut, holder_name))` if `target` or any ancestor path of `target`
+    /// currently has an active local borrow. Prefers returning a mutable borrow if one exists.
     pub fn active_borrow(&self, target: &str) -> Option<(bool, String)> {
         let mut imm_holder: Option<String> = None;
         for scope_borrows in &self.borrows {
             for (holder, t, is_mut) in scope_borrows {
-                if t == target {
+                let matches = t == target
+                    || (target.starts_with(t.as_str())
+                        && target.as_bytes().get(t.len()) == Some(&b'.'));
+                if matches {
                     if *is_mut {
                         return Some((true, holder.clone()));
                     }
@@ -177,6 +180,42 @@ impl ScopeStack {
             }
         }
         imm_holder.map(|h| (false, h))
+    }
+
+    /// Returns `Some((is_mut, holder_name))` if `target` or any field projection inside `target`
+    /// (e.g. `p.x` when checking `p`) currently has an active local borrow.
+    pub fn active_borrow_including_projections(&self, target: &str) -> Option<(bool, String)> {
+        let mut imm_holder: Option<String> = None;
+        for scope_borrows in &self.borrows {
+            for (holder, t, is_mut) in scope_borrows {
+                let matches = t == target
+                    || (t.starts_with(target) && t.as_bytes().get(target.len()) == Some(&b'.'))
+                    || (target.starts_with(t.as_str())
+                        && target.as_bytes().get(t.len()) == Some(&b'.'));
+                if matches {
+                    if *is_mut {
+                        return Some((true, holder.clone()));
+                    }
+                    if imm_holder.is_none() {
+                        imm_holder = Some(holder.clone());
+                    }
+                }
+            }
+        }
+        imm_holder.map(|h| (false, h))
+    }
+
+    /// Returns all active `(target_path, is_mut)` borrows held by `holder`.
+    pub fn borrows_for_holder(&self, holder: &str) -> Vec<(String, bool)> {
+        let mut out = Vec::new();
+        for scope_borrows in &self.borrows {
+            for (h, target, is_mut) in scope_borrows {
+                if h == holder {
+                    out.push((target.clone(), *is_mut));
+                }
+            }
+        }
+        out
     }
 
     /// Snapshots move flags across all active scopes for flow-sensitive branching.

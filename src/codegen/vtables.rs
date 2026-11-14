@@ -9,7 +9,8 @@ use cranelift_module::{DataDescription, FuncId, FuncOrDataId, Linkage, Module};
 use crate::ast::Type;
 use crate::codegen::ctx::ProgramMeta;
 use crate::codegen::layout::{
-    abi_signature_for_fn, alloc_stack_slot, emit_memcpy_bytes, load_multireg_chunks, PassMode,
+    abi_signature_for_fn, alloc_stack_slot, emit_memcpy_bytes, load_multireg_chunks,
+    sret_abi_param, PassMode,
 };
 
 fn build_vtable_byval_thunk<M: Module>(
@@ -34,7 +35,7 @@ fn build_vtable_byval_thunk<M: Module>(
     };
     let sret_count = usize::from(has_sret);
     if has_sret {
-        thunk_sig.params.push(AbiParam::new(types::I64));
+        thunk_sig.params.push(sret_abi_param());
     }
     thunk_sig.params.push(AbiParam::new(types::I64)); // data_ptr
     for p in callee_sig.params.iter().skip(sret_count + p0_chunk_count) {

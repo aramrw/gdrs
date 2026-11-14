@@ -7,6 +7,29 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+fn file_declares_symbol(source: &str, sym: &str) -> bool {
+    let raw_tokens: Vec<(Token, Span)> = Token::lexer(source)
+        .spanned()
+        .filter_map(|(res, span)| res.ok().map(|t| (t, span)))
+        .collect();
+    let processed = inject_indentation(raw_tokens);
+    let eof = source.len()..source.len();
+    let Ok(prog) = parser().parse(chumsky::Stream::from_iter(eof, processed.into_iter())) else {
+        return false;
+    };
+    prog.structs.iter().any(|s| s.name == sym)
+        || prog.enums.iter().any(|e| e.name == sym)
+        || prog.functions.iter().any(|f| f.name == sym)
+        || prog.traits.iter().any(|t| t.name == sym)
+        || prog.trait_aliases.iter().any(|ta| ta.name == sym)
+        || prog.consts.iter().any(|c| c.name == sym)
+        || prog.externs.iter().any(|ext| ext.functions.iter().any(|ef| ef.name == sym))
+        || prog.uses.iter().any(|u| {
+            u.vis == Visibility::Pub
+                && u.alias.as_deref().or_else(|| u.path.last().map(|s| s.as_str())) == Some(sym)
+        })
+}
+
 
 pub fn load_file_recursive(
     file_path: &Path,
@@ -27,9 +50,32 @@ pub fn load_file_recursive(
     let source = fs::read_to_string(&canonical)
         .map_err(|e| format!("Failed to read file '{}': {}", canonical.display(), e))?;
 
-    let base_offset = source_map.add_file(canonical.clone(), source.clone());
+    load_source_str(
+        &source,
+        &canonical,
+        base_dir,
+        mod_prefix,
+        loaded_files,
+        merged_program,
+        source_map,
+        false,
+    )
+}
 
-    let raw_tokens: Vec<(Token, Span)> = Token::lexer(&source)
+pub fn load_source_str(
+    source: &str,
+    canonical: &Path,
+    base_dir: &Path,
+    mod_prefix: &[String],
+    loaded_files: &mut HashSet<PathBuf>,
+    merged_program: &mut Program,
+    source_map: &mut crate::loader::SourceMap,
+    quiet: bool,
+) -> Result<(), String> {
+    let canonical = canonical.to_path_buf();
+    let base_offset = source_map.add_file(canonical.clone(), source.to_string());
+
+    let raw_tokens: Vec<(Token, Span)> = Token::lexer(source)
         .spanned()
         .filter_map(|(res, span)| match res {
             Ok(token) => Some((token, (span.start + base_offset)..(span.end + base_offset))),
@@ -45,7 +91,9 @@ pub fn load_file_recursive(
     let program = match parser().parse(stream) {
         Ok(prog) => prog,
         Err(errs) => {
-            crate::diagnostics::print_syntax_errors(&canonical, &source, base_offset, errs);
+            if !quiet {
+                crate::diagnostics::print_syntax_errors(&canonical, source, base_offset, errs);
+            }
             return Err(format!("Parse error in '{}'", canonical.display()));
         }
     };
@@ -62,6 +110,15 @@ pub fn load_file_recursive(
     }
     for e in &program.enums {
         local_types.insert(e.name.clone());
+    }
+    for t in &program.traits {
+        local_types.insert(t.name.clone());
+    }
+    for ta in &program.trait_aliases {
+        local_types.insert(ta.name.clone());
+    }
+    for c in &program.consts {
+        local_types.insert(c.name.clone());
     }
 
     // Process `use` declarations in this file
@@ -127,15 +184,7 @@ pub fn load_file_recursive(
                                     let path = entry.path();
                                     if path.extension().map_or(false, |ext| ext == "gdrs") {
                                         if let Ok(content) = std::fs::read_to_string(&path) {
-                                            let pat_obj = format!("obj {sym}");
-                                            let pat_enum = format!("enum {sym}");
-                                            let pat_fn = format!("fn {sym}");
-                                            let pat_trait = format!("trait {sym}");
-                                            if content.contains(&pat_obj)
-                                                || content.contains(&pat_enum)
-                                                || content.contains(&pat_fn)
-                                                || content.contains(&pat_trait)
-                                            {
+                                            if file_declares_symbol(&content, sym) {
                                                 let file_stem = path.file_stem().unwrap().to_string_lossy().to_string();
                                                 let mut prefix = mod_parts.to_vec();
                                                 if dir.to_string_lossy().contains("std/") && prefix.first().map(|s| s.as_str()) != Some("std") {
@@ -169,7 +218,15 @@ pub fn load_file_recursive(
             let resolved_target = if matched_len < u.path.len() {
                 let sym = &u.path[matched_len];
                 let alias = u.alias.as_ref().unwrap_or(sym);
-                let target = format!("{}{}", sub_prefix_str, sym);
+                let mut target = format!("{}{}", sub_prefix_str, sym);
+                if let Some(reexport) = merged_program.uses.iter().find(|ru| {
+                    ru.vis == Visibility::Pub
+                        && ru.module_path == sub_prefix
+                        && ru.alias.as_deref().or_else(|| ru.path.last().map(|s| s.as_str()))
+                            == Some(sym.as_str())
+                }) {
+                    target = reexport.resolved_target.clone();
+                }
                 use_aliases.insert(alias.clone(), target.clone());
                 target
             } else {
@@ -201,6 +258,16 @@ pub fn load_file_recursive(
             ta.name = format!("{}{}", prefix_str, ta.name);
         }
         merged_program.trait_aliases.push(ta);
+    }
+
+    for mut c in program.consts {
+        c.module_path = mod_prefix.to_vec();
+        if !prefix_str.is_empty() {
+            c.name = format!("{}{}", prefix_str, c.name);
+        }
+        rewrite_type(&mut c.ty, &local_types, &use_aliases, &prefix_str);
+        rewrite_expr(&mut c.value, &local_types, &use_aliases, &prefix_str);
+        merged_program.consts.push(c);
     }
 
     for mut ext in program.externs {

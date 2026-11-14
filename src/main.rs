@@ -1,10 +1,4 @@
-mod ast;
-mod cli;
-mod codegen;
-mod diagnostics;
-mod loader;
-mod parser;
-mod sanal;
+use gdrs::{cli, codegen, diagnostics, loader, sanal};
 
 use crate::cli::{Cli, Commands};
 use clap::Parser as ClapParser;

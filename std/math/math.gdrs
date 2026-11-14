@@ -2,6 +2,22 @@
 use ops::Add
 use ops::Sub
 
+pub const PI: f64 = 3.14159265358979323846
+pub const E: f64 = 2.71828182845904523536
+pub const EPSILON: f64 = 0.0000000000000002220446049250313
+pub const INFINITY: f64 = 1.0 / 0.0
+pub const NEG_INFINITY: f64 = -1.0 / 0.0
+pub const NAN: f64 = 0.0 / 0.0
+
+pub fn is_nan(x: f64) -> bool:
+	return x != x
+
+pub fn is_infinite(x: f64) -> bool:
+	return x == INFINITY || x == NEG_INFINITY
+
+pub fn is_finite(x: f64) -> bool:
+	return x == x && x != INFINITY && x != NEG_INFINITY
+
 extern "C":
 	fn c_exp(x: f64) -> f64
 	fn c_sqrt(x: f64) -> f64

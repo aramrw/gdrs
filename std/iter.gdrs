@@ -1,8 +1,22 @@
-// std/iter.gdrs - Standard iterator trait and Range iterator
+// std/iter.gdrs - Standard iterator trait, Range iterator, and lazy adapters
+use std::core::Option
+use std::vec::Vec
 
 pub obj Range:
 	pub start: i64
 	pub end: i64
+
+pub obj Map:
+	pub iter: $I
+	pub func: $F
+
+pub obj Filter:
+	pub iter: $I
+	pub pred: $P
+
+pub obj FilterMap:
+	pub iter: $I
+	pub func: $F
 
 pub trait Iterator:
 	fn next(&mut self) -> Option<i64>
@@ -23,4 +37,200 @@ impl Range:
 			self.start = self.start + 1
 			return Option::Some(val)
 		return Option::None
+
+	pub fn map(self, f: $F) -> Map<Self, $F>:
+		return Map{ iter: self, func: f }
+
+	pub fn filter(self, pred: $P) -> Filter<Self, $P>:
+		return Filter{ iter: self, pred: pred }
+
+	pub fn filter_map(self, f: $F) -> FilterMap<Self, $F>:
+		return FilterMap{ iter: self, func: f }
+
+	pub fn fold(mut self, init: $Acc, f: $F) -> $Acc:
+		let mut acc = init
+		while true:
+			if let Option::Some(x) = self.next():
+				acc = f(acc, x)
+			else:
+				return acc
+		return acc
+
+	pub fn reduce(mut self, f: $F) -> Option<i64>:
+		if let Option::Some(first) = self.next():
+			let mut acc = first
+			while true:
+				if let Option::Some(x) = self.next():
+					acc = f(acc, x)
+				else:
+					return Option::Some(acc)
+			return Option::Some(acc)
+		return Option::None
+
+	pub fn collect(mut self) -> Vec<i64>:
+		let mut out: Vec<i64> = Vec::new()
+		while true:
+			if let Option::Some(x) = self.next():
+				out.push(x)
+			else:
+				return out
+		return out
+
+impl Map:
+	pub fn into_iter(self) -> Self:
+		return self
+
+	pub fn iter(self) -> Self:
+		return self
+
+	pub fn next(&mut self) -> Option<$U>:
+		if let Option::Some(val) = self.iter.next():
+			return Option::Some((self.func)(val))
+		return Option::None
+
+	pub fn map(self, f: $G) -> Map<Self, $G>:
+		return Map{ iter: self, func: f }
+
+	pub fn filter(self, pred: $P) -> Filter<Self, $P>:
+		return Filter{ iter: self, pred: pred }
+
+	pub fn filter_map(self, f: $G) -> FilterMap<Self, $G>:
+		return FilterMap{ iter: self, func: f }
+
+	pub fn fold(mut self, init: $Acc, f: $G) -> $Acc:
+		let mut acc = init
+		while true:
+			if let Option::Some(x) = self.next():
+				acc = f(acc, x)
+			else:
+				return acc
+		return acc
+
+	pub fn reduce(mut self, f: $G) -> Option<$U>:
+		if let Option::Some(first) = self.next():
+			let mut acc = first
+			while true:
+				if let Option::Some(x) = self.next():
+					acc = f(acc, x)
+				else:
+					return Option::Some(acc)
+			return Option::Some(acc)
+		return Option::None
+
+	pub fn collect(mut self) -> Vec<$T>:
+		let mut out = Vec::new()
+		while true:
+			if let Option::Some(x) = self.next():
+				out.push(x)
+			else:
+				return out
+		return out
+
+impl Filter:
+	pub fn into_iter(self) -> Self:
+		return self
+
+	pub fn iter(self) -> Self:
+		return self
+
+	pub fn next(&mut self) -> Option<$T>:
+		while true:
+			if let Option::Some(val) = self.iter.next():
+				if (self.pred)(&val):
+					return Option::Some(val)
+			else:
+				return Option::None
+		return Option::None
+
+	pub fn map(self, f: $F) -> Map<Self, $F>:
+		return Map{ iter: self, func: f }
+
+	pub fn filter(self, pred: $Q) -> Filter<Self, $Q>:
+		return Filter{ iter: self, pred: pred }
+
+	pub fn filter_map(self, f: $F) -> FilterMap<Self, $F>:
+		return FilterMap{ iter: self, func: f }
+
+	pub fn fold(mut self, init: $Acc, f: $F) -> $Acc:
+		let mut acc = init
+		while true:
+			if let Option::Some(x) = self.next():
+				acc = f(acc, x)
+			else:
+				return acc
+		return acc
+
+	pub fn reduce(mut self, f: $F) -> Option<$T>:
+		if let Option::Some(first) = self.next():
+			let mut acc = first
+			while true:
+				if let Option::Some(x) = self.next():
+					acc = f(acc, x)
+				else:
+					return Option::Some(acc)
+			return Option::Some(acc)
+		return Option::None
+
+	pub fn collect(mut self) -> Vec<$T>:
+		let mut out = Vec::new()
+		while true:
+			if let Option::Some(x) = self.next():
+				out.push(x)
+			else:
+				return out
+		return out
+
+impl FilterMap:
+	pub fn into_iter(self) -> Self:
+		return self
+
+	pub fn iter(self) -> Self:
+		return self
+
+	pub fn next(&mut self) -> Option<$U>:
+		while true:
+			if let Option::Some(val) = self.iter.next():
+				if let Option::Some(mapped) = (self.func)(val):
+					return Option::Some(mapped)
+			else:
+				return Option::None
+		return Option::None
+
+	pub fn map(self, f: $G) -> Map<Self, $G>:
+		return Map{ iter: self, func: f }
+
+	pub fn filter(self, pred: $P) -> Filter<Self, $P>:
+		return Filter{ iter: self, pred: pred }
+
+	pub fn filter_map(self, f: $G) -> FilterMap<Self, $G>:
+		return FilterMap{ iter: self, func: f }
+
+	pub fn fold(mut self, init: $Acc, f: $G) -> $Acc:
+		let mut acc = init
+		while true:
+			if let Option::Some(x) = self.next():
+				acc = f(acc, x)
+			else:
+				return acc
+		return acc
+
+	pub fn reduce(mut self, f: $G) -> Option<$U>:
+		if let Option::Some(first) = self.next():
+			let mut acc = first
+			while true:
+				if let Option::Some(x) = self.next():
+					acc = f(acc, x)
+				else:
+					return Option::Some(acc)
+			return Option::Some(acc)
+		return Option::None
+
+	pub fn collect(mut self) -> Vec<$T>:
+		let mut out = Vec::new()
+		while true:
+			if let Option::Some(x) = self.next():
+				out.push(x)
+			else:
+				return out
+		return out
 

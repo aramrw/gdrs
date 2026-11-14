@@ -252,8 +252,50 @@ pub fn type_check_enum_construct<'a>(
     args: &[Expr],
     span: &Span,
 ) -> Option<TypedExpr> {
-    let expected_payloads: Option<Vec<Type>> = type_ctx
-        .get_enum(enum_name)
+    let mut found_enum = type_ctx.get_enum(enum_name);
+
+    let opt_template = if found_enum.is_none() {
+        let template_name = if enum_name.starts_with("std_core_Option")
+            || enum_name.starts_with("Opt")
+            || enum_name.starts_with("Option")
+        {
+            "std_core_Option"
+        } else if enum_name.starts_with("std_core_Result")
+            || enum_name.starts_with("Res")
+            || enum_name.starts_with("Result")
+        {
+            "std_core_Result"
+        } else {
+            enum_name.split('_').next().unwrap_or(enum_name)
+        };
+
+        let mono = type_ctx.mono.borrow();
+        mono.enum_templates
+            .get(template_name)
+            .or_else(|| mono.enum_templates.get(enum_name))
+            .or_else(|| {
+                mono.enum_templates
+                    .iter()
+                    .find(|(k, _)| k.as_str() == enum_name || k.ends_with(&format!("_{enum_name}")))
+                    .map(|(_, v)| v)
+            })
+            .cloned()
+    } else {
+        None
+    };
+
+    let is_known_variant = found_enum
+        .as_ref()
+        .is_some_and(|(_, variants)| variants.contains_key(variant_name))
+        || opt_template
+            .as_ref()
+            .is_some_and(|decl| decl.variants.iter().any(|v| v.name == variant_name));
+    if !is_known_variant {
+        return None;
+    }
+
+    let expected_payloads: Option<Vec<Type>> = found_enum
+        .as_ref()
         .and_then(|(_, variants)| variants.get(variant_name).map(|(_, tys)| tys.clone()));
 
     let mut typed_args = Vec::new();
@@ -267,32 +309,7 @@ pub fn type_check_enum_construct<'a>(
         }
     }
 
-    let mut found_enum = type_ctx.get_enum(enum_name);
-
-    if found_enum.is_none() {
-        let template_name = if enum_name.starts_with("std_core_Option") || enum_name.starts_with("Opt") || enum_name.starts_with("Option") {
-            "std_core_Option"
-        } else if enum_name.starts_with("std_core_Result") || enum_name.starts_with("Res") || enum_name.starts_with("Result") {
-            "std_core_Result"
-        } else {
-            enum_name.split('_').next().unwrap_or(enum_name)
-        };
-
-        let opt_template = {
-            let mono = type_ctx.mono.borrow();
-            mono.enum_templates
-                .get(template_name)
-                .or_else(|| mono.enum_templates.get(enum_name))
-                .or_else(|| {
-                    mono.enum_templates
-                        .iter()
-                        .find(|(k, _)| k.as_str() == enum_name || k.ends_with(&format!("_{enum_name}")))
-                        .map(|(_, v)| v)
-                })
-                .cloned()
-        };
-
-        if let Some(decl) = opt_template {
+    if let Some(decl) = opt_template {
             let generic_params = crate::sanal::mono::extract_generic_params_enum(&decl);
             let (param_env, param_tys) = {
                 let mut infer = type_ctx.infer.borrow_mut();
@@ -354,7 +371,6 @@ pub fn type_check_enum_construct<'a>(
                 let partial_mangled = crate::sanal::mono::mangle_name(&decl.name, &mono_params);
                 found_enum = type_ctx.get_enum(&partial_mangled);
             }
-        }
     }
 
     if let Some((static_name, variants)) = found_enum {

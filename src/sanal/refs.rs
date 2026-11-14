@@ -30,6 +30,8 @@ pub fn type_check_ref<'a>(
     }
     let mut suppress_ident_borrow_err = false;
     if let Expr::Ident(var_name, _) = curr {
+        let borrow_path = crate::sanal::objects::fields::expr_projection_path(inner)
+            .unwrap_or_else(|| var_name.clone());
         if is_mut {
             if let Some(info) = scopes.lookup(var_name) {
                 if !info.is_mutable && !matches!(info.ty, Type::MutRef(_) | Type::Ptr(_)) {
@@ -43,7 +45,7 @@ pub fn type_check_ref<'a>(
                     });
                 }
             }
-            if let Some((was_mut, holder)) = scopes.active_borrow(var_name) {
+            if let Some((was_mut, holder)) = scopes.active_borrow_including_projections(&borrow_path) {
                 suppress_ident_borrow_err = true;
                 errors.push(SemanticError {
                     code: if was_mut { "E0499" } else { "E0502" },
@@ -61,7 +63,34 @@ pub fn type_check_ref<'a>(
         }
     }
     let errs_before = errors.len();
-    let t_inner = type_check_expr(scopes, errors, type_ctx, inner)?;
+    let t_inner = if let Expr::Deref(ptr_expr, d_span) = inner {
+        let t_ptr = type_check_expr(scopes, errors, type_ctx, ptr_expr)?;
+        let ptr_ty = type_ctx.infer.borrow_mut().probe(t_ptr.ty());
+        let inner_ty_opt = match ptr_ty {
+            Type::Ptr(i) | Type::Box(i) | Type::MutRef(i) => Some(*i),
+            Type::Ref(i) | Type::Rc(i) | Type::Arc(i) => {
+                if is_mut {
+                    errors.push(SemanticError {
+                        code: "E0596",
+                        message: format!("Cannot mutably reborrow through immutable/shared `{ptr_ty:?}`"),
+                        label: "Immutable reference".to_string(),
+                        secondary_label: None,
+                        help: None,
+                        span: span.clone(),
+                    });
+                }
+                Some(*i)
+            }
+            _ => None,
+        };
+        if let Some(deref_ty) = inner_ty_opt {
+            TypedExpr::Deref(Box::new(t_ptr), deref_ty, d_span.clone())
+        } else {
+            type_check_expr(scopes, errors, type_ctx, inner)?
+        }
+    } else {
+        type_check_expr(scopes, errors, type_ctx, inner)?
+    };
     if suppress_ident_borrow_err && errors.len() > errs_before {
         // Avoid duplicate E0502 emitted by type_check_ident for the same expression
         if errors.last().is_some_and(|e| e.code == "E0502") {
