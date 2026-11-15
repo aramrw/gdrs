@@ -36,6 +36,7 @@ pub struct ProgramMeta<'a> {
     pub trait_consuming_methods: HashSet<(String, String)>,
     pub track_caller_fns: HashSet<String>,
     pub closure_unpacked_call_once_fns: HashSet<String>,
+    pub static_globals: HashMap<String, (Type, bool)>,
     pub source_map: &'a crate::loader::SourceMap,
 }
 
@@ -160,6 +161,11 @@ impl<'a> ProgramMeta<'a> {
             trait_methods.insert(t.name.clone(), names);
         }
 
+        let mut static_globals = HashMap::new();
+        for st in &program.statics {
+            static_globals.insert(st.name.clone(), (st.ty, st.is_mut));
+        }
+
         Self {
             struct_layouts,
             enum_layouts: &program.enum_layouts,
@@ -172,6 +178,7 @@ impl<'a> ProgramMeta<'a> {
             trait_consuming_methods,
             track_caller_fns,
             closure_unpacked_call_once_fns,
+            static_globals,
             source_map,
         }
     }

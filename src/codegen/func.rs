@@ -155,7 +155,7 @@ pub fn compile_func<M: Module>(
     let func_id = match module.get_name(export_name) {
         Some(cranelift_module::FuncOrDataId::Func(id)) => id,
         _ => module
-            .declare_function(export_name, Linkage::Export, &sig)
+            .declare_function(export_name, Linkage::Local, &sig)
             .unwrap(),
     };
 
@@ -360,6 +360,7 @@ fn collect_addr_taken_expr(expr: &TypedExpr, out: &mut std::collections::HashSet
         TypedExpr::Neg(inner, _, _)
         | TypedExpr::Not(inner, _)
         | TypedExpr::Assign(_, inner, _)
+        | TypedExpr::StaticAssign(_, inner, _)
         | TypedExpr::Let(_, _, inner, _, _)
         | TypedExpr::LetTuple(_, _, inner, _)
         | TypedExpr::LetStruct(_, _, inner, _)
@@ -435,6 +436,7 @@ fn collect_addr_taken_expr(expr: &TypedExpr, out: &mut std::collections::HashSet
         TypedExpr::Int(..)
         | TypedExpr::Float(..)
         | TypedExpr::Ident(..)
+        | TypedExpr::StaticRef(..)
         | TypedExpr::Bool(..)
         | TypedExpr::String(..)
         | TypedExpr::Continue(..) => {}

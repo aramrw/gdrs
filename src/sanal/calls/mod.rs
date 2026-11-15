@@ -750,6 +750,22 @@ pub fn type_check_call<'a>(
     }
 
     let mut resolved_name = name.clone();
+    if !is_method_syntax
+        && !type_ctx.current_module.is_empty()
+        && !type_ctx.contains_fn(&resolved_name)
+        && !type_ctx.extern_signatures.contains_key(&resolved_name)
+    {
+        let mod_prefix = type_ctx.current_module.join("_");
+        let cand = format!("{mod_prefix}_{name}");
+        if type_ctx.contains_fn(&cand) || type_ctx.extern_signatures.contains_key(&cand) {
+            resolved_name = cand;
+        } else if let Some((base, t_args)) = crate::sanal::mono::lookup_mangled(&name) {
+            let cand_base = format!("{mod_prefix}_{base}");
+            if type_ctx.contains_fn(&cand_base) {
+                resolved_name = crate::sanal::mono::mangle_name_update(&cand_base, &t_args);
+            }
+        }
+    }
     let is_direct_concrete_fn = !is_method_syntax
         && (type_ctx.extern_signatures.contains_key(&name)
             || type_ctx.fn_map.borrow().get(&name).is_some_and(|f| {
@@ -1260,7 +1276,10 @@ pub fn type_check_call<'a>(
             }
         }
 
-        if resolved_name.ends_with("from_slice") && !typed_args.is_empty() {
+        if (resolved_name.starts_with("std_vec_Vec_") || resolved_name.starts_with("Vec_"))
+            && resolved_name.ends_with("from_slice")
+            && !typed_args.is_empty()
+        {
             let mut arg_ty = type_ctx.infer.borrow_mut().resolve(typed_args[0].ty());
             while let Type::Ref(inner) | Type::MutRef(inner) = arg_ty {
                 arg_ty = *inner;

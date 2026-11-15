@@ -481,7 +481,7 @@ fn finalize_typed_expr(
         | TypedExpr::String(..)
         | TypedExpr::Continue(..) => {}
 
-        TypedExpr::Ident(_, ty, _) => {
+        TypedExpr::Ident(_, ty, _) | TypedExpr::StaticRef(_, ty, _) => {
             resolve_and_record_type(ty, infer, type_ctx, reported_infers, errors, &span);
         }
 
@@ -577,7 +577,7 @@ fn finalize_typed_expr(
             resolve_and_record_type(ty, infer, type_ctx, reported_infers, errors, &span);
         }
 
-        TypedExpr::Assign(_, val, _) => {
+        TypedExpr::Assign(_, val, _) | TypedExpr::StaticAssign(_, val, _) => {
             finalize_typed_expr(val, infer, type_ctx, reported_infers, errors);
         }
 

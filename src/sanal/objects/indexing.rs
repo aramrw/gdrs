@@ -359,6 +359,7 @@ pub fn type_check_index_assign<'a>(
             }
         }
     }
+    type_ctx.check_static_lvalue_mutable(&t_target, "E0594", errors, span);
 
     let mut clean_target_ty = type_ctx.infer.borrow_mut().resolve(t_target.ty());
     while let Type::Ref(inner) | Type::MutRef(inner) | Type::Box(inner) = clean_target_ty {

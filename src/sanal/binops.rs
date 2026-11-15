@@ -1069,6 +1069,8 @@ fn check_compound_assign_lhs_mutability<'a>(
             }
         }
         scopes.mark_active(root_var);
+    } else {
+        type_ctx.check_static_lvalue_mutable(t_lhs, "E0596", errors, span);
     }
 }
 

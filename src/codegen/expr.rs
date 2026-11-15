@@ -8,10 +8,12 @@ static STR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 use cranelift_codegen::ir::types;
 use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
-use cranelift_module::{DataDescription, Linkage, Module};
+use cranelift_module::{DataDescription, FuncOrDataId, Linkage, Module};
 
 use crate::ast::{Type, TypedExpr};
-use crate::codegen::assign::{compile_assign, compile_let, compile_let_struct, compile_let_tuple};
+use crate::codegen::assign::{
+    compile_assign, compile_let, compile_let_struct, compile_let_tuple, compile_static_assign,
+};
 use crate::codegen::branching::{compile_if, compile_if_else, compile_match, expr_is_terminator};
 use crate::codegen::ctx::CodegenCtx;
 use crate::codegen::layout::{emit_memcpy_bytes, ReprKind};
@@ -117,12 +119,28 @@ pub(crate) fn compile_string_constant<M: Module>(
 
     let name = format!("__str_{}", STR_COUNTER.fetch_add(1, Ordering::SeqCst));
     let data_id = module
-        .declare_data(&name, Linkage::Export, true, false)
+        .declare_data(&name, Linkage::Local, false, false)
         .unwrap();
     module.define_data(data_id, &data_ctx).unwrap();
 
     let local_data = module.declare_data_in_func(data_id, builder.func);
     builder.ins().symbol_value(types::I64, local_data)
+}
+
+pub(crate) fn emit_static_addr<M: Module>(
+    builder: &mut FunctionBuilder,
+    sym: &str,
+    is_mut: bool,
+    module: &mut M,
+) -> Value {
+    let data_id = match module.get_name(sym) {
+        Some(FuncOrDataId::Data(id)) => id,
+        _ => module
+            .declare_data(sym, Linkage::Import, is_mut, false)
+            .unwrap(),
+    };
+    let local_gv = module.declare_data_in_func(data_id, builder.func);
+    builder.ins().symbol_value(types::I64, local_gv)
 }
 
 /// Recursively compiles a `TypedExpr` into a Cranelift IR `Value`.
@@ -220,6 +238,27 @@ pub fn compile_expr<M: Module>(
         }
         TypedExpr::Assign(name, value, _) => {
             compile_assign(builder, value, cg, module, name)
+        }
+        TypedExpr::StaticAssign(name, value, _) => {
+            compile_static_assign(builder, value, cg, module, name)
+        }
+        TypedExpr::StaticRef(name, ty, _) => {
+            let is_mut = cg
+                .meta
+                .static_globals
+                .get(name)
+                .map(|(_, m)| *m)
+                .unwrap_or(false);
+            let addr = emit_static_addr(builder, name, is_mut, module);
+            match crate::codegen::layout::repr_kind(
+                ty,
+                &cg.meta.struct_layouts,
+                cg.meta.enum_layouts,
+            ) {
+                ReprKind::Zst => builder.ins().iconst(types::I64, 0),
+                ReprKind::Aggregate { .. } => addr,
+                ReprKind::Scalar(cl_ty) => builder.ins().load(cl_ty, MemFlags::new(), addr, 0),
+            }
         }
 
         TypedExpr::Ident(name, ty, _) => {

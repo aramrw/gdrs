@@ -92,6 +92,10 @@ This document captures the architectural decisions, tradeoffs vs. Rust, codebase
 3. **`let ... else:` Diverging Pattern Bindings**
    - Support `let Option::Some(x) = expr else: return ...` to prevent rightward indentation drift in error/option handling.
 
+4. **Parameterized Trait `impl`s & Scoped Conversion Traits (`From<T>` / `Into<T>`)**
+   - Key trait dispatch by `(SelfType, TraitName, TraitTypeArgs)` so `impl<T> From<T> for Wrapper` / multiple `From<A>`, `From<B>` impls on the same type don't collide.
+   - Add scoped target-type inference for expected-type call sites (like `let x: Wrapper = y.into()`), while intentionally skipping Rust's universal blanket `impl<T, U> Into<U> for T where U: From<T>` unless full coherence/bidirectional inference is justified.
+
 ---
 
 ### Priority 3: Higher-Level Polish, Release Flag & Build System (`gpm`)

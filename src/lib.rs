@@ -4,6 +4,7 @@ pub mod codegen;
 pub mod diagnostics;
 pub mod loader;
 pub mod parser;
+pub mod rlib;
 pub mod sanal;
 
 use std::collections::HashMap;

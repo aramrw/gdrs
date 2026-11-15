@@ -44,7 +44,7 @@ fn build_vtable_byval_thunk<M: Module>(
     thunk_sig.returns = callee_sig.returns.clone();
 
     let thunk_id = module
-        .declare_function(&thunk_sym, Linkage::Export, &thunk_sig)
+        .declare_function(&thunk_sym, Linkage::Local, &thunk_sig)
         .expect("Failed to declare vtable thunk");
 
     let mut ctx = module.make_context();
@@ -171,7 +171,7 @@ pub fn get_or_build_vtable<M: Module>(
             }
 
             let id = module
-                .declare_data(&vtable_sym, Linkage::Export, true, false)
+                .declare_data(&vtable_sym, Linkage::Local, true, false)
                 .expect("Failed to declare static vtable");
             module
                 .define_data(id, &data_desc)

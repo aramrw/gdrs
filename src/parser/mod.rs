@@ -769,6 +769,25 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             span,
         });
 
+    let static_decl = opt_vis
+        .clone()
+        .then_ignore(just(Token::Static))
+        .then(just(Token::Mut).or_not())
+        .then(select! { Token::Ident(n) => n })
+        .then_ignore(just(Token::Colon))
+        .then(type_parser.clone())
+        .then_ignore(just(Token::Assign))
+        .then(math.clone())
+        .map_with_span(|((((vis, is_mut), name), ty), value), span| StaticDecl {
+            name,
+            ty,
+            is_mut: is_mut.is_some(),
+            value,
+            vis,
+            module_path: Vec::new(),
+            span,
+        });
+
     let item = just(Token::Newline)
         .repeated()
         .ignore_then(
@@ -779,6 +798,7 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
                 .or(trait_alias_decl.map(Item::TraitAlias))
                 .or(extern_decl.map(Item::Extern))
                 .or(const_decl.map(Item::Const))
+                .or(static_decl.map(Item::Static))
                 .or(function.map(Item::Func))
                 .or(obj_decl.map(Item::Struct))
                 .or(enum_decl.map(Item::Enum))
@@ -794,6 +814,7 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
         let mut trait_aliases = Vec::new();
         let mut externs = Vec::new();
         let mut consts = Vec::new();
+        let mut statics = Vec::new();
         let mut structs = Vec::new();
         let mut enums = Vec::new();
         let mut impls = Vec::new();
@@ -806,6 +827,7 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
                 Item::TraitAlias(ta) => trait_aliases.push(ta),
                 Item::Extern(ext) => externs.push(ext),
                 Item::Const(c) => consts.push(c),
+                Item::Static(st) => statics.push(st),
                 Item::Func(f) => functions.push(f),
                 Item::Struct(s) => structs.push(s),
                 Item::Enum(e) => enums.push(e),
@@ -819,10 +841,12 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
             trait_aliases,
             externs,
             consts,
+            statics,
             structs,
             enums,
             impls,
             functions,
+            extern_crate_names: std::collections::HashSet::new(),
         }
     })
     .boxed()
@@ -835,6 +859,7 @@ enum Item {
     TraitAlias(TraitAliasDecl),
     Extern(ExternDecl),
     Const(ConstDecl),
+    Static(StaticDecl),
     Func(FuncDecl),
     Struct(StructDecl),
     Enum(EnumDecl),

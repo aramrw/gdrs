@@ -55,7 +55,7 @@ pub fn resolve_or_synthesize_drop_fn<M: Module>(
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         let func_id = module
-            .declare_function(&synth_name, Linkage::Export, &sig)
+            .declare_function(&synth_name, Linkage::Local, &sig)
             .ok()?;
 
         let mut ctx = module.make_context();
@@ -116,7 +116,7 @@ pub fn resolve_or_synthesize_drop_fn<M: Module>(
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         let func_id = module
-            .declare_function(synth_name, Linkage::Export, &sig)
+            .declare_function(synth_name, Linkage::Local, &sig)
             .ok()?;
 
         let mut ctx = module.make_context();
@@ -177,7 +177,7 @@ pub fn resolve_or_synthesize_drop_fn<M: Module>(
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         let func_id = module
-            .declare_function(synth_name, Linkage::Export, &sig)
+            .declare_function(synth_name, Linkage::Local, &sig)
             .ok()?;
 
         let mut ctx = module.make_context();
@@ -237,7 +237,7 @@ pub fn resolve_or_synthesize_drop_fn<M: Module>(
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         let func_id = module
-            .declare_function(&synth_name, Linkage::Export, &sig)
+            .declare_function(&synth_name, Linkage::Local, &sig)
             .ok()?;
 
         let mut ctx = module.make_context();
@@ -354,7 +354,7 @@ pub fn resolve_or_synthesize_drop_fn<M: Module>(
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         let func_id = module
-            .declare_function(&synth_name, Linkage::Export, &sig)
+            .declare_function(&synth_name, Linkage::Local, &sig)
             .ok()?;
 
         let mut ctx = module.make_context();
@@ -470,7 +470,7 @@ pub fn resolve_or_synthesize_drop_fn<M: Module>(
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         let func_id = module
-            .declare_function(&synth_name, Linkage::Export, &sig)
+            .declare_function(&synth_name, Linkage::Local, &sig)
             .ok()?;
 
         let mut ctx = module.make_context();
@@ -565,7 +565,7 @@ pub fn resolve_or_synthesize_drop_fn<M: Module>(
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         let func_id = module
-            .declare_function(&synth_name, Linkage::Export, &sig)
+            .declare_function(&synth_name, Linkage::Local, &sig)
             .ok()?;
 
         let mut ctx = module.make_context();
@@ -650,7 +650,7 @@ pub fn resolve_or_synthesize_drop_fn<M: Module>(
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
     let func_id = module
-        .declare_function(&synth_name, Linkage::Export, &sig)
+        .declare_function(&synth_name, Linkage::Local, &sig)
         .ok()?;
 
     let mut ctx = module.make_context();

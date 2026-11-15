@@ -18,7 +18,19 @@ pub fn compile_ref<M: Module>(
     module: &mut M,
 ) -> Value {
     match inner_expr {
+        TypedExpr::StaticRef(name, _, _) => {
+            let is_mut = cg
+                .meta
+                .static_globals
+                .get(name)
+                .map(|(_, m)| *m)
+                .unwrap_or(false);
+            crate::codegen::expr::emit_static_addr(builder, name, is_mut, module)
+        }
         TypedExpr::Ident(name, ty, _) => {
+            if matches!(ty, Type::DynTrait(_)) {
+                return compile_expr(builder, inner_expr, cg, module);
+            }
             if let Some(&(slot, _)) = cg.var_slots.get(name) {
                 return builder.ins().stack_addr(types::I64, slot, 0);
             }
@@ -35,6 +47,7 @@ pub fn compile_ref<M: Module>(
                         | Type::Array(_, _)
                         | Type::Ref(_)
                         | Type::MutRef(_)
+                        | Type::DynTrait(_)
                 )
             {
                 val

@@ -352,7 +352,7 @@ fn emit_struct_to_debug_cstr<M: Module>(
         fn_sig.params.push(AbiParam::new(types::I64));
         fn_sig.returns.push(AbiParam::new(types::I64));
         let fid = module
-            .declare_function(&synth_name, Linkage::Export, &fn_sig)
+            .declare_function(&synth_name, Linkage::Local, &fn_sig)
             .unwrap();
         let mut ctx = module.make_context();
         ctx.func.signature = fn_sig;
@@ -542,7 +542,7 @@ fn emit_enum_to_debug_cstr<M: Module>(
         fn_sig.params.push(AbiParam::new(types::I64));
         fn_sig.returns.push(AbiParam::new(types::I64));
         let fid = module
-            .declare_function(&synth_name, Linkage::Export, &fn_sig)
+            .declare_function(&synth_name, Linkage::Local, &fn_sig)
             .unwrap();
         let mut ctx = module.make_context();
         ctx.func.signature = fn_sig;

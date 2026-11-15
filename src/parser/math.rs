@@ -520,7 +520,11 @@ pub fn math_parser<'a>(
 
         let assign_op = super::assign_op_parser();
 
-        let simple_assign_stmt = select! { Token::Ident(s) => s }
+        let assign_target_ident = select! { Token::Ident(s) => s }
+            .separated_by(just(Token::ColonColon))
+            .at_least(1)
+            .map(|parts: Vec<String>| parts.join("::"));
+        let simple_assign_stmt = assign_target_ident
             .then(assign_op.clone())
             .then(math.clone())
             .map_with_span(|((name, op), rhs), span: Span| match op {
@@ -916,14 +920,27 @@ pub fn math_parser<'a>(
         let loop_expr = just(Token::Loop)
             .ignore_then(just(Token::Colon))
             .ignore_then(just(Token::Newline).or_not())
-            .ignore_then(expr_subblock)
+            .ignore_then(expr_subblock.clone())
             .map_with_span(|body, span: Span| Expr::Loop(Box::new(body), span));
+
+        let unsafe_expr = just(Token::Unsafe)
+            .ignore_then(just(Token::Colon))
+            .ignore_then(just(Token::Newline).or_not())
+            .ignore_then(expr_subblock)
+            .map_with_span(|body, span: Span| {
+                let stmts = match body {
+                    Expr::Block(stmts, _) => stmts,
+                    other => vec![other],
+                };
+                Expr::Unsafe(stmts, span)
+            });
 
         let atom = closure_block
             .or(closure_expr)
             .or(if_expr)
             .or(match_expr)
             .or(loop_expr)
+            .or(unsafe_expr)
             .or(string)
             .or(float_lit)
             .or(int)

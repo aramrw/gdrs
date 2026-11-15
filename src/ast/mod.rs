@@ -15,6 +15,8 @@ pub enum Token {
     Mut,
     #[token("const")]
     Const,
+    #[token("static")]
+    Static,
     #[token("=")]
     Assign,
     #[token("+")]
@@ -790,6 +792,8 @@ pub enum TypedExpr {
     Block(Vec<TypedExpr>, Type, Span),
     Unsafe(Vec<TypedExpr>, Type, Span),
     Assign(String, Box<TypedExpr>, Span),
+    StaticRef(String, Type, Span),
+    StaticAssign(String, Box<TypedExpr>, Span),
     While(Box<TypedExpr>, Box<TypedExpr>, Span),
     Loop(Box<TypedExpr>, Type, Span),
     If(Box<TypedExpr>, Box<TypedExpr>, Span),
@@ -853,6 +857,7 @@ impl TypedExpr {
 
             TypedExpr::String(..) => Type::Str,
             TypedExpr::Ident(_, ty, _)
+            | TypedExpr::StaticRef(_, ty, _)
             | TypedExpr::Let(_, _, _, ty, _)
             | TypedExpr::LetTuple(_, ty, _, _)
             | TypedExpr::LetStruct(_, ty, _, _)
@@ -882,6 +887,7 @@ impl TypedExpr {
             TypedExpr::CastF32(..) => Type::F32,
             TypedExpr::CastI32(..) => Type::I32,
             TypedExpr::Assign(..)
+            | TypedExpr::StaticAssign(..)
             | TypedExpr::While(..)
             | TypedExpr::If(..)
             | TypedExpr::Return(..)
@@ -897,7 +903,7 @@ impl TypedExpr {
         match self {
             TypedExpr::Int(_, s) => s.clone(),
             TypedExpr::Float(_, s) => s.clone(),
-            TypedExpr::Ident(_, _, s) => s.clone(),
+            TypedExpr::Ident(_, _, s) | TypedExpr::StaticRef(_, _, s) => s.clone(),
             TypedExpr::Bool(_, s) => s.clone(),
             TypedExpr::String(_, s) => s.clone(),
             TypedExpr::Add(_, _, _, s)
@@ -924,7 +930,7 @@ impl TypedExpr {
             TypedExpr::LetStruct(_, _, _, s) => s.clone(),
             TypedExpr::Block(_, _, s) => s.clone(),
             TypedExpr::Unsafe(_, _, s) => s.clone(),
-            TypedExpr::Assign(_, _, s) => s.clone(),
+            TypedExpr::Assign(_, _, s) | TypedExpr::StaticAssign(_, _, s) => s.clone(),
             TypedExpr::While(_, _, s) => s.clone(),
             TypedExpr::Loop(_, _, s) => s.clone(),
             TypedExpr::If(_, _, s) => s.clone(),
@@ -1025,6 +1031,38 @@ pub struct ConstDecl {
 }
 
 #[derive(Debug, Clone)]
+pub struct StaticDecl {
+    pub name: String,
+    pub ty: Type,
+    pub is_mut: bool,
+    pub value: Expr,
+    pub vis: Visibility,
+    pub module_path: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum StaticInitVal {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+    Tuple(Vec<StaticInitVal>),
+    Array(Vec<StaticInitVal>),
+    Struct(String, Vec<(String, StaticInitVal)>),
+}
+
+#[derive(Debug, Clone)]
+pub struct TypedStaticDecl {
+    pub name: String,
+    pub ty: Type,
+    pub is_mut: bool,
+    pub init: StaticInitVal,
+    pub vis: Visibility,
+    pub module_path: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Program {
     pub mods: Vec<ModDecl>,
     pub uses: Vec<UseDecl>,
@@ -1032,10 +1070,12 @@ pub struct Program {
     pub trait_aliases: Vec<TraitAliasDecl>,
     pub externs: Vec<ExternDecl>,
     pub consts: Vec<ConstDecl>,
+    pub statics: Vec<StaticDecl>,
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
     pub impls: Vec<ImplDecl>,
     pub functions: Vec<FuncDecl>,
+    pub extern_crate_names: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1056,11 +1096,14 @@ pub struct TypedProgram {
     pub traits: Vec<TraitDecl>,
     pub trait_aliases: Vec<TraitAliasDecl>,
     pub externs: Vec<ExternDecl>,
+    pub statics: Vec<TypedStaticDecl>,
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
     pub impls: Vec<ImplDecl>,
     pub functions: Vec<TypedFuncDecl>,
     pub enum_layouts: std::collections::HashMap<String, Vec<(String, i64, Vec<Type>)>>,
+    pub extern_crate_names: std::collections::HashSet<String>,
+    pub extern_import_fns: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]

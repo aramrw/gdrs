@@ -246,6 +246,19 @@ pub fn extract_root_ident_with_ty(mut expr: &TypedExpr) -> Option<(&str, Type)> 
     }
 }
 
+/// Returns true if an lvalue expression is rooted in a `'static` global (`static` / `static mut`).
+pub fn is_static_place(mut expr: &TypedExpr) -> bool {
+    loop {
+        if matches!(expr, TypedExpr::StaticRef(..)) {
+            return true;
+        }
+        let Some(next) = unwrap_lvalue_step(expr) else {
+            return false;
+        };
+        expr = next;
+    }
+}
+
 /// Checks and applies tail consumption (projection move check + move/borrow check on `Ident`)
 /// when a non-`Unit`, non-diverging expression is yielded out of a block, branch, or function.
 pub fn consume_tail_expr<'a>(
@@ -305,6 +318,24 @@ pub fn mark_expr_moved_if_ident(
             if !ty.is_copy() {
                 check_not_borrowed_on_move(scopes, errors, name, span);
                 scopes.mark_moved(name);
+            }
+        }
+        TypedExpr::StaticRef(name, ty, span) => {
+            if !ty.is_copy() {
+                errors.push(SemanticError {
+                    code: "E0507",
+                    message: format!(
+                        "Cannot move out of static item `{}`",
+                        name.rsplit('_').next().unwrap_or(name)
+                    ),
+                    label: "Cannot move out of static item".to_string(),
+                    secondary_label: None,
+                    help: Some(
+                        "Borrow the static item (`&...` / `&mut ...`) or use a `Copy` type"
+                            .to_string(),
+                    ),
+                    span: span.clone(),
+                });
             }
         }
         TypedExpr::Deref(inner, ty, span) if matches!(inner.ty(), Type::Box(_)) => {

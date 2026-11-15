@@ -23,6 +23,7 @@ fn file_declares_symbol(source: &str, sym: &str) -> bool {
         || prog.traits.iter().any(|t| t.name == sym)
         || prog.trait_aliases.iter().any(|ta| ta.name == sym)
         || prog.consts.iter().any(|c| c.name == sym)
+        || prog.statics.iter().any(|s| s.name == sym)
         || prog.externs.iter().any(|ext| ext.functions.iter().any(|ef| ef.name == sym))
         || prog.uses.iter().any(|u| {
             u.vis == Visibility::Pub
@@ -31,6 +32,14 @@ fn file_declares_symbol(source: &str, sym: &str) -> bool {
 }
 
 
+pub struct LoaderContext<'a> {
+    pub root_mod_prefix: &'a [String],
+    pub extern_aliases: &'a HashMap<String, String>,
+    pub bundled_mod_prefixes: &'a HashSet<Vec<String>>,
+    pub recorded_sources: &'a mut Vec<crate::rlib::RlibSourceFile>,
+    pub record_sources: bool,
+}
+
 pub fn load_file_recursive(
     file_path: &Path,
     base_dir: &Path,
@@ -38,6 +47,26 @@ pub fn load_file_recursive(
     loaded_files: &mut HashSet<PathBuf>,
     merged_program: &mut Program,
     source_map: &mut crate::loader::SourceMap,
+) -> Result<(), String> {
+    load_file_recursive_with_ctx(
+        file_path,
+        base_dir,
+        mod_prefix,
+        loaded_files,
+        merged_program,
+        source_map,
+        None,
+    )
+}
+
+pub fn load_file_recursive_with_ctx(
+    file_path: &Path,
+    base_dir: &Path,
+    mod_prefix: &[String],
+    loaded_files: &mut HashSet<PathBuf>,
+    merged_program: &mut Program,
+    source_map: &mut crate::loader::SourceMap,
+    ctx: Option<&mut LoaderContext<'_>>,
 ) -> Result<(), String> {
     let canonical = fs::canonicalize(file_path)
         .map_err(|e| format!("Failed to find module file '{}': {}", file_path.display(), e))?;
@@ -50,7 +79,7 @@ pub fn load_file_recursive(
     let source = fs::read_to_string(&canonical)
         .map_err(|e| format!("Failed to read file '{}': {}", canonical.display(), e))?;
 
-    load_source_str(
+    load_source_str_with_ctx(
         &source,
         &canonical,
         base_dir,
@@ -59,6 +88,7 @@ pub fn load_file_recursive(
         merged_program,
         source_map,
         false,
+        ctx,
     )
 }
 
@@ -72,7 +102,44 @@ pub fn load_source_str(
     source_map: &mut crate::loader::SourceMap,
     quiet: bool,
 ) -> Result<(), String> {
+    load_source_str_with_ctx(
+        source,
+        canonical,
+        base_dir,
+        mod_prefix,
+        loaded_files,
+        merged_program,
+        source_map,
+        quiet,
+        None,
+    )
+}
+
+pub fn load_source_str_with_ctx(
+    source: &str,
+    canonical: &Path,
+    base_dir: &Path,
+    mod_prefix: &[String],
+    loaded_files: &mut HashSet<PathBuf>,
+    merged_program: &mut Program,
+    source_map: &mut crate::loader::SourceMap,
+    quiet: bool,
+    mut ctx: Option<&mut LoaderContext<'_>>,
+) -> Result<(), String> {
     let canonical = canonical.to_path_buf();
+    if let Some(ref mut c) = ctx {
+        if c.record_sources {
+            let rel_name = canonical
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "lib.gdrs".to_string());
+            c.recorded_sources.push(crate::rlib::RlibSourceFile {
+                rel_name,
+                mod_prefix: mod_prefix.to_vec(),
+                source: source.to_string(),
+            });
+        }
+    }
     let base_offset = source_map.add_file(canonical.clone(), source.to_string());
 
     let raw_tokens: Vec<(Token, Span)> = Token::lexer(source)
@@ -120,12 +187,87 @@ pub fn load_source_str(
     for c in &program.consts {
         local_types.insert(c.name.clone());
     }
+    for st in &program.statics {
+        local_types.insert(st.name.clone());
+    }
 
     // Process `use` declarations in this file
     let mut use_aliases = HashMap::new();
+    if let Some(ref c) = ctx {
+        for (alias, crate_name) in c.extern_aliases {
+            use_aliases.insert(alias.clone(), crate_name.clone());
+        }
+    }
     for u in &program.uses {
         if u.path.is_empty() {
             continue;
+        }
+
+        if let Some(ext_crate) = ctx.as_ref().and_then(|c| c.extern_aliases.get(&u.path[0])) {
+            let resolved_target = if u.path.len() == 1 {
+                let alias = u.alias.as_ref().unwrap_or(&u.path[0]);
+                use_aliases.insert(alias.clone(), ext_crate.clone());
+                ext_crate.clone()
+            } else {
+                let mut target = format!("{}_{}", ext_crate, u.path[1..].join("_"));
+                let sym = u.path.last().unwrap();
+                let mod_sub = if u.path.len() == 2 {
+                    vec![ext_crate.clone()]
+                } else {
+                    let mut p = vec![ext_crate.clone()];
+                    p.extend_from_slice(&u.path[1..u.path.len() - 1]);
+                    p
+                };
+                if let Some(reexport) = merged_program.uses.iter().find(|ru| {
+                    ru.vis == Visibility::Pub
+                        && ru.module_path == mod_sub
+                        && ru.alias.as_deref().or_else(|| ru.path.last().map(|s| s.as_str()))
+                            == Some(sym.as_str())
+                }) {
+                    target = reexport.resolved_target.clone();
+                }
+                let alias = u.alias.as_ref().unwrap_or(sym);
+                use_aliases.insert(alias.clone(), target.clone());
+                target
+            };
+            let mut recorded_use = u.clone();
+            recorded_use.module_path = mod_prefix.to_vec();
+            recorded_use.resolved_target = resolved_target;
+            merged_program.uses.push(recorded_use);
+            continue;
+        }
+
+        if let Some(ref c) = ctx {
+            let mut matched_bundled: Option<(Vec<String>, usize)> = None;
+            for i in (1..=u.path.len()).rev() {
+                let mut cand_prefix = c.root_mod_prefix.to_vec();
+                cand_prefix.extend_from_slice(&u.path[0..i]);
+                if c.bundled_mod_prefixes.contains(&cand_prefix) {
+                    matched_bundled = Some((cand_prefix, i));
+                    break;
+                }
+            }
+            if let Some((sub_prefix, matched_len)) = matched_bundled {
+                let sub_prefix_str = format!("{}_", sub_prefix.join("_"));
+                let resolved_target = if matched_len < u.path.len() {
+                    let sym = &u.path[matched_len];
+                    let alias = u.alias.as_ref().unwrap_or(sym);
+                    let target = format!("{}{}", sub_prefix_str, sym);
+                    use_aliases.insert(alias.clone(), target.clone());
+                    target
+                } else {
+                    let sym = u.path.last().unwrap();
+                    let alias = u.alias.as_ref().unwrap_or(sym);
+                    let target = sub_prefix_str.trim_end_matches('_').to_string();
+                    use_aliases.insert(alias.clone(), target.clone());
+                    target
+                };
+                let mut recorded_use = u.clone();
+                recorded_use.module_path = mod_prefix.to_vec();
+                recorded_use.resolved_target = resolved_target;
+                merged_program.uses.push(recorded_use);
+                continue;
+            }
         }
 
         let mut found_file: Option<(PathBuf, Vec<String>, usize)> = None;
@@ -133,18 +275,30 @@ pub fn load_source_str(
             let mod_parts = &u.path[0..i];
             let rel_path = format!("{}.gdrs", mod_parts.join("/"));
 
+            let std_dir = crate::loader::resolve_std_dir();
             let candidates = vec![
                 base_dir.join(&rel_path),
                 Path::new(".").join(&rel_path),
-                Path::new("std").join(format!("{}.gdrs", mod_parts[1..].join("/"))),
-                Path::new("std").join(&rel_path),
+                std_dir.join(format!("{}.gdrs", mod_parts[1..].join("/"))),
+                std_dir.join(&rel_path),
             ];
 
             for cand in candidates {
                 if cand.exists() {
+                    let is_std_cand = cand.to_string_lossy().contains("std/");
                     let mut prefix = mod_parts.to_vec();
-                    if cand.to_string_lossy().contains("std/") && prefix.first().map(|s| s.as_str()) != Some("std") {
+                    if is_std_cand && prefix.first().map(|s| s.as_str()) != Some("std") {
                         prefix.insert(0, "std".to_string());
+                    } else if !is_std_cand {
+                        if let Some(ref c) = ctx {
+                            if !c.root_mod_prefix.is_empty()
+                                && !prefix.starts_with(c.root_mod_prefix)
+                            {
+                                let mut full = c.root_mod_prefix.to_vec();
+                                full.extend(prefix);
+                                prefix = full;
+                            }
+                        }
                     }
                     found_file = Some((cand, prefix, i));
                     break;
@@ -170,9 +324,20 @@ pub fn load_source_str(
                         if i == u.path.len() {
                             let self_file = dir.join(format!("{}.gdrs", dir.file_name().unwrap().to_string_lossy()));
                             if self_file.is_file() {
+                                let is_std_dir = dir.to_string_lossy().contains("std/");
                                 let mut prefix = mod_parts.to_vec();
-                                if dir.to_string_lossy().contains("std/") && prefix.first().map(|s| s.as_str()) != Some("std") {
+                                if is_std_dir && prefix.first().map(|s| s.as_str()) != Some("std") {
                                     prefix.insert(0, "std".to_string());
+                                } else if !is_std_dir {
+                                    if let Some(ref c) = ctx {
+                                        if !c.root_mod_prefix.is_empty()
+                                            && !prefix.starts_with(c.root_mod_prefix)
+                                        {
+                                            let mut full = c.root_mod_prefix.to_vec();
+                                            full.extend(prefix);
+                                            prefix = full;
+                                        }
+                                    }
                                 }
                                 found_file = Some((self_file, prefix, i));
                                 break;
@@ -186,9 +351,20 @@ pub fn load_source_str(
                                         if let Ok(content) = std::fs::read_to_string(&path) {
                                             if file_declares_symbol(&content, sym) {
                                                 let file_stem = path.file_stem().unwrap().to_string_lossy().to_string();
+                                                let is_std_dir = dir.to_string_lossy().contains("std/");
                                                 let mut prefix = mod_parts.to_vec();
-                                                if dir.to_string_lossy().contains("std/") && prefix.first().map(|s| s.as_str()) != Some("std") {
+                                                if is_std_dir && prefix.first().map(|s| s.as_str()) != Some("std") {
                                                     prefix.insert(0, "std".to_string());
+                                                } else if !is_std_dir {
+                                                    if let Some(ref c) = ctx {
+                                                        if !c.root_mod_prefix.is_empty()
+                                                            && !prefix.starts_with(c.root_mod_prefix)
+                                                        {
+                                                            let mut full = c.root_mod_prefix.to_vec();
+                                                            full.extend(prefix);
+                                                            prefix = full;
+                                                        }
+                                                    }
                                                 }
                                                 prefix.push(file_stem);
                                                 found_file = Some((path, prefix, i));
@@ -212,7 +388,15 @@ pub fn load_source_str(
 
         if let Some((sub_file, sub_prefix, matched_len)) = found_file {
             let sub_base = sub_file.parent().unwrap_or_else(|| Path::new("."));
-            load_file_recursive(&sub_file, sub_base, &sub_prefix, loaded_files, merged_program, source_map)?;
+            load_file_recursive_with_ctx(
+                &sub_file,
+                sub_base,
+                &sub_prefix,
+                loaded_files,
+                merged_program,
+                source_map,
+                ctx.as_deref_mut(),
+            )?;
 
             let sub_prefix_str = format!("{}_", sub_prefix.join("_"));
             let resolved_target = if matched_len < u.path.len() {
@@ -268,6 +452,16 @@ pub fn load_source_str(
         rewrite_type(&mut c.ty, &local_types, &use_aliases, &prefix_str);
         rewrite_expr(&mut c.value, &local_types, &use_aliases, &prefix_str);
         merged_program.consts.push(c);
+    }
+
+    for mut st in program.statics {
+        st.module_path = mod_prefix.to_vec();
+        if !prefix_str.is_empty() {
+            st.name = format!("{}{}", prefix_str, st.name);
+        }
+        rewrite_type(&mut st.ty, &local_types, &use_aliases, &prefix_str);
+        rewrite_expr(&mut st.value, &local_types, &use_aliases, &prefix_str);
+        merged_program.statics.push(st);
     }
 
     for mut ext in program.externs {
@@ -376,11 +570,29 @@ pub fn load_source_str(
 
     // Process sub-modules declared via `mod path::to::sub`
     for m in program.mods {
-        let sub_prefix = m.path.clone();
+        let mut sub_prefix = m.path.clone();
+        if let Some(ref c) = ctx {
+            if !c.root_mod_prefix.is_empty() && !sub_prefix.starts_with(c.root_mod_prefix) {
+                let mut full = c.root_mod_prefix.to_vec();
+                full.extend(sub_prefix);
+                sub_prefix = full;
+            }
+            if c.bundled_mod_prefixes.contains(&sub_prefix) {
+                continue;
+            }
+        }
         let rel_path = format!("{}.gdrs", m.path.join("/"));
         let sub_file = base_dir.join(rel_path);
 
-        load_file_recursive(&sub_file, base_dir, &sub_prefix, loaded_files, merged_program, source_map)?;
+        load_file_recursive_with_ctx(
+            &sub_file,
+            base_dir,
+            &sub_prefix,
+            loaded_files,
+            merged_program,
+            source_map,
+            ctx.as_deref_mut(),
+        )?;
     }
 
     Ok(())

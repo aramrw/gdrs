@@ -2548,6 +2548,7 @@ fn main():
     }
 }
 
+
 #[test]
 fn repr_packed_and_align_randomized_c_parity() {
     let mut seed: u64 = 0x5EED_C0DE_1234_5678;
@@ -2876,6 +2877,7 @@ fn main():
     }
 }
 
+
 #[test]
 fn stage1_and_stage2_sugars_runtime_and_leaks() {
     let src_fn = |n: usize| {
@@ -3142,6 +3144,7 @@ fn main():
         );
     }
 }
+
 
 #[test]
 fn sugars_loop_inclusive_struct_destructure_and_matrix_iter_runtime_and_leaks() {
@@ -3496,4 +3499,513 @@ fn main():
         );
     }
 }
+
+
+#[test]
+fn priority3_release_and_static_globals() {
+    let dir = make_temp_dir("priority3_static_release");
+    let src_path = dir.join("static_rel.gdrs");
+    let rel_bin = dir.join("static_rel_bin");
+    let src = r#"
+const BASE: i64 = 100
+const FACTOR: f64 = 2.5
+
+#[repr(C)]
+obj LockState:
+	tag: u8
+	locked: i64
+	count: i32
+
+impl LockState:
+	fn acquire(&mut self, delta: i32):
+		self.locked = 1
+		self.count = self.count + delta
+
+static VERSION: i64 = BASE + 7
+static SCALE: f64 = FACTOR * 2.0
+static LABEL: str = "gdrs_static"
+static WEIGHTS: [i64; 3] = [10, 20, BASE]
+static CONFIG: LockState = LockState { tag: 9, locked: 0, count: 4 as i32 }
+
+static mut COUNTER: i64 = 5
+static mut TABLE: [i64; 3] = [1, 2, 3]
+static mut GLOBAL_LOCK: LockState = LockState { tag: 3, locked: 0, count: 10 as i32 }
+
+fn bump_via_mut_ref(r: &mut i64):
+	*r += 11
+
+fn main():
+	// Immutable static reads + safe borrows + struct fields
+	let w_ref = &WEIGHTS[2]
+	let cfg_ref = &CONFIG
+	if VERSION != 107 || SCALE != 5.0 || LABEL != "gdrs_static" || *w_ref != 100 || cfg_ref.tag != 9:
+		log!("FAIL immut_static")
+		return
+
+	// Local shadowing of static name works cleanly
+	let mut acc: i64 = 0
+	if true:
+		let VERSION: i64 = 1
+		acc += VERSION
+
+	// Mutable static read, write, compound assign, index assign, struct method, & closure access
+	unsafe:
+		COUNTER += 5
+		bump_via_mut_ref(&mut COUNTER)
+		TABLE[1] = 42
+		GLOBAL_LOCK.locked = 1
+		GLOBAL_LOCK.acquire(7 as i32)
+
+	let cl = ||:
+		unsafe:
+			COUNTER += 3
+			COUNTER
+	let cl_res = cl()
+
+	let final_ok = unsafe:
+		COUNTER == 24 && cl_res == 24 && TABLE[0] + TABLE[1] + TABLE[2] == 46 && GLOBAL_LOCK.tag == 3 && GLOBAL_LOCK.locked == 1 && GLOBAL_LOCK.count == (17 as i32) && acc == 1
+	if !final_ok:
+		log!("FAIL mut_static")
+		return
+
+	// Tight compute loop to exercise Cranelift opt_level = speed
+	let mut sum: i64 = 0
+	for i in 0..=1000:
+		sum += (i * 3) ^ 7
+	log!("STATIC_OK {}", sum)
+"#;
+    fs::write(&src_path, src).unwrap();
+
+    // 1. Default debug run
+    let dbg_out = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .arg(&src_path)
+        .output()
+        .unwrap();
+    let dbg_str = combined_output(&dbg_out);
+    assert!(dbg_out.status.success() && dbg_str.contains("STATIC_OK "), "debug failed:\n{dbg_str}");
+
+    // 2. --release build & run
+    let rel_build = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .args(["build", "--release"])
+        .arg(&src_path)
+        .arg("-o")
+        .arg(&rel_bin)
+        .output()
+        .unwrap();
+    let rel_build_str = combined_output(&rel_build);
+    assert!(rel_build.status.success(), "--release build failed:\n{rel_build_str}");
+
+    let rel_run = Command::new(&rel_bin).output().unwrap();
+    let rel_run_str = combined_output(&rel_run);
+    assert_eq!(dbg_str.trim(), rel_run_str.trim(), "--release output mismatch");
+
+    // 3. `gdrs run --opt-level s`
+    let opt_s_out = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .args(["run", "--opt-level", "s"])
+        .arg(&src_path)
+        .output()
+        .unwrap();
+    let opt_s_str = combined_output(&opt_s_out);
+    assert!(opt_s_out.status.success() && opt_s_str.trim() == dbg_str.trim(), "--opt-level s failed:\n{opt_s_str}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn priority3_static_negative_errors() {
+    let cases = [
+        (
+            "read_mut_static_without_unsafe",
+            r#"
+static mut X: i64 = 1
+fn main():
+	let _v = X
+"#,
+            "E0133",
+        ),
+        (
+            "write_mut_static_without_unsafe",
+            r#"
+static mut X: i64 = 1
+fn main():
+	X = 2
+"#,
+            "E0133",
+        ),
+        (
+            "assign_immut_static",
+            r#"
+static X: i64 = 1
+fn main():
+	X = 2
+"#,
+            "E0594",
+        ),
+        (
+            "mutate_immut_static_field",
+            r#"
+obj Pair:
+	a: i64
+static P: Pair = Pair { a: 1 }
+fn main():
+	P.a = 2
+"#,
+            "E0594",
+        ),
+        (
+            "mut_borrow_immut_static",
+            r#"
+static X: i64 = 1
+fn main():
+	let _r = &mut X
+"#,
+            "E0596",
+        ),
+        (
+            "mut_method_on_immut_static",
+            r#"
+obj Boxed:
+	v: i64
+impl Boxed:
+	fn inc(&mut self):
+		self.v += 1
+static B: Boxed = Boxed { v: 1 }
+fn main():
+	B.inc()
+"#,
+            "E0596",
+        ),
+        (
+            "move_non_copy_static",
+            r#"
+obj NonCopy:
+	v: i64
+fn take(x: NonCopy):
+	pass
+static NC: NonCopy = NonCopy { v: 1 }
+fn main():
+	take(NC)
+"#,
+            "E0507",
+        ),
+        (
+            "drop_type_in_static",
+            r#"
+use std::core::Drop
+obj Guard:
+	v: i64
+impl Drop for Guard:
+	fn drop(&mut self):
+		pass
+static G: Guard = Guard { v: 1 }
+fn main():
+	pass
+"#,
+            "E0493",
+        ),
+        (
+            "non_const_static_init",
+            r#"
+fn runtime_fn() -> i64:
+	return 7
+static S: i64 = runtime_fn()
+fn main():
+	pass
+"#,
+            "E0015",
+        ),
+    ];
+
+    for (name, src, expected_code) in cases {
+        let out = run_gdrs_source(&format!("p3_static_neg_{name}"), src);
+        let combined = combined_output(&out);
+        assert!(
+            !out.status.success() && combined.contains(expected_code),
+            "Case `{name}` expected error `{expected_code}`, got status={:?}\n{combined}",
+            out.status.code()
+        );
+    }
+}
+
+#[test]
+fn priority3_crate_flags_and_extern() {
+    let dir = make_temp_dir("priority3_crates");
+    let lib_dir = dir.join("mathlib_src");
+    let out_dir = dir.join("target_out");
+    fs::create_dir_all(&lib_dir).unwrap();
+
+    fs::write(
+        lib_dir.join("math_extras.gdrs"),
+        r#"
+pub fn triple(x: i64) -> i64:
+	return x * 3
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        lib_dir.join("lib.gdrs"),
+        r#"
+pub use math_extras::triple as ext_triple
+
+pub const VERSION_TAG: i64 = 42
+pub static SCALE_FACTOR: i64 = 3
+pub static mut SHARED_HITS: i64 = 10
+
+static HIDDEN_STATIC: i64 = 999
+
+pub trait Norm:
+	fn norm_sq(&self) -> i64
+
+pub obj Vec2:
+	pub x: i64
+	pub y: i64
+
+impl Vec2:
+	pub fn new(x: i64, y: i64) -> Vec2:
+		return Vec2 { x: x, y: y }
+
+	pub fn dot(&self, other: &Vec2) -> i64:
+		return self.x * other.x + self.y * other.y
+
+impl Norm for Vec2:
+	fn norm_sq(&self) -> i64:
+		return self.x * self.x + self.y * self.y
+
+pub enum Mode:
+	Fast
+	Slow(i64)
+
+fn internal_bias() -> i64:
+	return 5
+
+fn hidden_fn() -> i64:
+	return 77
+
+pub fn combine(v: Vec2) -> i64:
+	return v.x + v.y + internal_bias() + math_extras::triple(2)
+
+pub fn generic_pick(flag: bool, a: $T, b: $T) -> $T:
+	if flag:
+		return a
+	else:
+		return b
+"#,
+    )
+    .unwrap();
+
+    // 1. Build .rlib library with --release + --out-dir
+    let lib_src = lib_dir.join("lib.gdrs");
+    let build_rlib = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .args(["build", "--crate-type", "lib", "--crate-name", "mathlib", "--out-dir"])
+        .arg(&out_dir)
+        .arg("--release")
+        .arg(&lib_src)
+        .output()
+        .unwrap();
+    let build_rlib_out = combined_output(&build_rlib);
+    assert!(build_rlib.status.success(), ".rlib build failed:\n{build_rlib_out}");
+
+    let rlib_path = out_dir.join("libmathlib.rlib");
+    assert!(rlib_path.exists(), "missing expected rlib: {}", rlib_path.display());
+
+    // 2. Build staticlib (.a) + object (.o) via --emit obj,link
+    let build_static = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .args([
+            "build",
+            "--crate-type",
+            "staticlib",
+            "--crate-name",
+            "mathlib",
+            "--emit",
+            "obj,link",
+            "--out-dir",
+        ])
+        .arg(&out_dir)
+        .arg(&lib_src)
+        .output()
+        .unwrap();
+    let build_static_out = combined_output(&build_static);
+    assert!(build_static.status.success(), "staticlib build failed:\n{build_static_out}");
+    let a_path = out_dir.join("libmathlib.a");
+    let o_path = out_dir.join("mathlib.o");
+    assert!(a_path.exists() && o_path.exists(), "missing .a or .o artifact");
+
+    let ar_list = Command::new("ar").args(["-t"]).arg(&a_path).output().unwrap();
+    assert!(ar_list.status.success(), "ar -t failed on {}", a_path.display());
+
+    // 3. Downstream binary using `--extern math=<out_dir>/libmathlib.rlib`
+    let app_src = dir.join("app.gdrs");
+    fs::write(
+        &app_src,
+        r#"
+use math::Vec2
+use math::Mode
+use math::Norm
+use math::VERSION_TAG
+use math::ext_triple
+
+fn internal_bias() -> i64:
+	return 100
+
+fn dyn_norm(n: &dyn Norm) -> i64:
+	return n.norm_sq()
+
+fn main():
+	let a = Vec2::new(3, 4)
+	let b = Vec2 { x: 2, y: 5 }
+	let d = a.dot(&b)
+	let comb = math::combine(a)
+	let picked = math::generic_pick(true, 11, 22)
+	let dyn_obj: dyn Norm = b as dyn Norm
+	let dn = dyn_norm(&dyn_obj)
+
+	let m = Mode::Slow(9)
+	let m_val = match m:
+		Mode::Fast => 0
+		Mode::Slow(n) => n
+
+	let mut hits_after: i64 = 0
+	unsafe:
+		math::SHARED_HITS += 4
+		hits_after = math::SHARED_HITS
+
+	let total = VERSION_TAG + math::SCALE_FACTOR + ext_triple(4) + d + comb + picked + dn + m_val + hits_after + internal_bias()
+	log!("CRATE_OK {}", total)
+"#,
+    )
+    .unwrap();
+
+    let extern_arg = format!("math={}", rlib_path.display());
+
+    // 3a. `gdrs check --extern ...`
+    let chk = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .args(["check", "--extern", &extern_arg])
+        .arg(&app_src)
+        .output()
+        .unwrap();
+    let chk_out = combined_output(&chk);
+    assert!(chk.status.success(), "check --extern failed:\n{chk_out}");
+
+    // Expected total:
+    // VERSION_TAG(42) + SCALE_FACTOR(3) + ext_triple(4)=12 + dot(3,4 . 2,5)=26
+    // + combine(3+4+5+6=18) + picked(11) + dyn_norm(2^2+5^2=29) + m_val(9) + hits_after(14) + internal_bias(100)
+    // = 42 + 3 + 12 + 26 + 18 + 11 + 29 + 9 + 14 + 100 = 264
+
+    // 3b. `gdrs run --extern ...`
+    let run = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .args(["run", "--extern", &extern_arg])
+        .arg(&app_src)
+        .output()
+        .unwrap();
+    let run_out = combined_output(&run);
+    assert!(run.status.success() && run_out.contains("CRATE_OK 264"), "run --extern failed:\n{run_out}");
+
+    // 3c. `gdrs build --crate-type bin --crate-name myapp --out-dir ... --release --extern ...`
+    let build_bin = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .args([
+            "build",
+            "--crate-type",
+            "bin",
+            "--crate-name",
+            "myapp",
+            "--out-dir",
+        ])
+        .arg(&out_dir)
+        .args(["--release", "--extern", &extern_arg])
+        .arg(&app_src)
+        .output()
+        .unwrap();
+    let build_bin_out = combined_output(&build_bin);
+    assert!(build_bin.status.success(), "bin build failed:\n{build_bin_out}");
+
+    let app_bin = out_dir.join("myapp");
+    let app_exec = Command::new(&app_bin).output().unwrap();
+    let app_exec_out = combined_output(&app_exec);
+    assert!(app_exec.status.success() && app_exec_out.contains("CRATE_OK 264"), "myapp exec failed:\n{app_exec_out}");
+}
+
+#[test]
+fn priority3_extern_negative_errors() {
+    let dir = make_temp_dir("priority3_extern_neg");
+    let lib_src = dir.join("secretlib.gdrs");
+    let rlib_path = dir.join("libsecretlib.rlib");
+
+    fs::write(
+        &lib_src,
+        r#"
+fn hidden_fn() -> i64:
+	return 1
+static HIDDEN_STATIC: i64 = 2
+pub fn visible_fn() -> i64:
+	return 3
+"#,
+    )
+    .unwrap();
+
+    let build = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .args(["build", "--crate-type", "lib", "--crate-name", "secretlib", "-o"])
+        .arg(&rlib_path)
+        .arg(&lib_src)
+        .output()
+        .unwrap();
+    assert!(build.status.success(), "setup rlib build failed:\n{}", combined_output(&build));
+
+    let extern_arg = format!("secret={}", rlib_path.display());
+
+    // Private fn rejected E0603
+    let priv_fn_src = dir.join("use_priv_fn.gdrs");
+    fs::write(&priv_fn_src, "fn main():\n\tlet _x = secret::hidden_fn()\n").unwrap();
+    let out1 = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .args(["check", "--extern", &extern_arg])
+        .arg(&priv_fn_src)
+        .output()
+        .unwrap();
+    let s1 = combined_output(&out1);
+    assert!(!out1.status.success() && s1.contains("E0603"), "expected E0603 for private fn:\n{s1}");
+
+    // Private static rejected E0603
+    let priv_st_src = dir.join("use_priv_st.gdrs");
+    fs::write(&priv_st_src, "fn main():\n\tlet _x = secret::HIDDEN_STATIC\n").unwrap();
+    let out2 = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .args(["check", "--extern", &extern_arg])
+        .arg(&priv_st_src)
+        .output()
+        .unwrap();
+    let s2 = combined_output(&out2);
+    assert!(!out2.status.success() && s2.contains("E0603"), "expected E0603 for private static:\n{s2}");
+
+    // Bad --crate-type rejected
+    let out3 = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .args(["build", "--crate-type", "bogus"])
+        .arg(&lib_src)
+        .output()
+        .unwrap();
+    assert!(!out3.status.success(), "expected CLI error for invalid --crate-type");
+
+    // Corrupt rlib rejected cleanly
+    let bad_rlib = dir.join("bad.rlib");
+    fs::write(&bad_rlib, b"NOT_AN_RLIB").unwrap();
+    let out4 = Command::new(gdrs_bin())
+        .current_dir(repo_root())
+        .args(["check", "--extern", &format!("secret={}", bad_rlib.display())])
+        .arg(&priv_fn_src)
+        .output()
+        .unwrap();
+    assert!(!out4.status.success(), "expected error on corrupt rlib");
+}
+
+
 

@@ -360,6 +360,7 @@ pub fn type_check_field_assign<'a>(
             }
         }
     }
+    type_ctx.check_static_lvalue_mutable(&t_target, "E0594", errors, span);
 
     let resolved_target_ty = type_ctx.infer.borrow_mut().resolve(t_target.ty());
     let mut unwrapped_tuple_assign = resolved_target_ty;

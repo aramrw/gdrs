@@ -6,10 +6,29 @@ pub mod files;
 
 use crate::ast::*;
 use crate::loader::derives::expand_derives;
-use crate::loader::files::{load_file_recursive, load_source_str};
+use crate::loader::files::{load_file_recursive, load_source_str, load_source_str_with_ctx, LoaderContext};
+use crate::rlib::{decode_rlib, RlibPackage, RlibSourceFile};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+#[derive(Debug, Clone, Default)]
+pub struct LoadCrateOptions {
+    pub crate_name: Option<String>,
+    pub root_mod_prefix: Vec<String>,
+    pub externs: Vec<(String, PathBuf)>,
+}
+
+#[derive(Debug)]
+pub struct LoadedCrateResult {
+    pub program: Program,
+    pub source_map: SourceMap,
+    pub crate_sources: Vec<RlibSourceFile>,
+    pub extern_objects: Vec<(String, Vec<u8>)>,
+    pub extern_alias_pairs: Vec<(String, String)>,
+    pub extern_lib_dirs: Vec<String>,
+    pub extern_libs: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct SourceFile {
@@ -105,26 +124,44 @@ impl SourceMap {
 static STD_PRELUDE_CACHE: OnceLock<Result<(Program, SourceMap, HashSet<PathBuf>), String>> =
     OnceLock::new();
 
-fn resolve_std_dir() -> PathBuf {
+pub(crate) fn resolve_std_dir() -> PathBuf {
     if let Ok(env_path) = std::env::var("GDRS_STD_PATH") {
-        PathBuf::from(env_path)
-    } else if let Ok(exe_path) = std::env::current_exe() {
-        let exe_dir = exe_path.parent().unwrap_or_else(|| Path::new("."));
-        if exe_dir.join("std").exists() {
-            exe_dir.join("std")
-        } else if exe_dir.join("../std").exists() {
-            exe_dir.join("../std")
-        } else {
-            let default_repo_std = PathBuf::from("/Users/aramsamifanni/Programming/gdrsc/std");
-            if default_repo_std.exists() {
-                default_repo_std
-            } else {
-                PathBuf::from("std")
-            }
+        let p = PathBuf::from(env_path);
+        if !p.as_os_str().is_empty() {
+            return p;
         }
-    } else {
-        PathBuf::from("std")
     }
+
+    let mut candidates = Vec::new();
+    if let Ok(exe_path) = std::env::current_exe() {
+        let exe_dir = exe_path.parent().unwrap_or_else(|| Path::new("."));
+        candidates.push(exe_dir.join("std"));
+        candidates.push(exe_dir.join("../std"));
+        candidates.push(exe_dir.join("../share/gdrs/std"));
+        candidates.push(exe_dir.join("../lib/gdrs/std"));
+    }
+    if let Ok(gdrs_home) = std::env::var("GDRS_HOME") {
+        if !gdrs_home.is_empty() {
+            candidates.push(PathBuf::from(gdrs_home).join("std"));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            candidates.push(PathBuf::from(home).join(".gdrs/std"));
+        }
+    }
+    if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
+        candidates.push(PathBuf::from(manifest_dir).join("std"));
+    }
+    candidates.push(PathBuf::from("std"));
+
+    for cand in &candidates {
+        if cand.join("core.gdrs").exists() {
+            return cand.clone();
+        }
+    }
+
+    PathBuf::from("std")
 }
 
 fn load_std_prelude() -> Result<(Program, SourceMap, HashSet<PathBuf>), String> {
@@ -137,13 +174,21 @@ fn load_std_prelude() -> Result<(Program, SourceMap, HashSet<PathBuf>), String> 
         trait_aliases: Vec::new(),
         externs: Vec::new(),
         consts: Vec::new(),
+        statics: Vec::new(),
         structs: Vec::new(),
         enums: Vec::new(),
         impls: Vec::new(),
         functions: Vec::new(),
+        extern_crate_names: HashSet::new(),
     };
 
     let std_dir = resolve_std_dir();
+    if !std_dir.join("core.gdrs").exists() {
+        return Err(format!(
+            "Failed to locate GDRS std library directory (checked '{}', missing core.gdrs). Set GDRS_STD_PATH=/path/to/gdrsc/std or place std/ next to the gdrsc binary or at ~/.gdrs/std.",
+            std_dir.display()
+        ));
+    }
 
     let std_files = [
         ("libc.gdrs", vec!["std".to_string(), "libc".to_string()]),
@@ -180,7 +225,132 @@ fn load_std_prelude() -> Result<(Program, SourceMap, HashSet<PathBuf>), String> 
 }
 
 pub fn load_program(entry_file: &Path) -> Result<(Program, SourceMap), String> {
+    let loaded = load_program_with_options(entry_file, &LoadCrateOptions::default())?;
+    Ok((loaded.program, loaded.source_map))
+}
+
+pub fn load_program_with_options(
+    entry_file: &Path,
+    opts: &LoadCrateOptions,
+) -> Result<LoadedCrateResult, String> {
     let (mut merged_program, mut source_map, mut loaded_files) = load_std_prelude()?;
+
+    let mut extern_aliases: HashMap<String, String> = HashMap::new();
+    let mut extern_alias_pairs: Vec<(String, String)> = Vec::new();
+    let mut decoded_by_crate: HashMap<String, RlibPackage> = HashMap::new();
+    let mut crate_order: Vec<String> = Vec::new();
+
+    for (alias, rlib_path) in &opts.externs {
+        let bytes = std::fs::read(rlib_path).map_err(|e| {
+            format!(
+                "Failed to read extern library `{}` at '{}': {}",
+                alias,
+                rlib_path.display(),
+                e
+            )
+        })?;
+        let pkg = decode_rlib(&bytes).map_err(|e| {
+            format!(
+                "Failed to decode extern library `{}` ('{}'): {}",
+                alias,
+                rlib_path.display(),
+                e
+            )
+        })?;
+
+        if let Some(prev) = extern_aliases.insert(alias.clone(), pkg.crate_name.clone()) {
+            if prev != pkg.crate_name {
+                return Err(format!(
+                    "Conflicting --extern definitions for `{}`: `{}` vs `{}`",
+                    alias, prev, pkg.crate_name
+                ));
+            }
+        } else {
+            extern_alias_pairs.push((alias.clone(), pkg.crate_name.clone()));
+        }
+        merged_program.extern_crate_names.insert(pkg.crate_name.clone());
+
+        if !decoded_by_crate.contains_key(&pkg.crate_name) {
+            crate_order.push(pkg.crate_name.clone());
+            decoded_by_crate.insert(pkg.crate_name.clone(), pkg);
+        }
+    }
+
+    // Topologically order decoded .rlib crates so transitive dependencies always load first.
+    fn topo_visit(
+        crate_name: &str,
+        by_crate: &HashMap<String, RlibPackage>,
+        visiting: &mut HashSet<String>,
+        visited: &mut HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        if visited.contains(crate_name) || visiting.contains(crate_name) {
+            return;
+        }
+        visiting.insert(crate_name.to_string());
+        if let Some(pkg) = by_crate.get(crate_name) {
+            for (_, dep_crate) in &pkg.extern_aliases {
+                topo_visit(dep_crate, by_crate, visiting, visited, out);
+            }
+        }
+        visiting.remove(crate_name);
+        visited.insert(crate_name.to_string());
+        out.push(crate_name.to_string());
+    }
+
+    let mut topo_order = Vec::with_capacity(crate_order.len());
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    for cname in &crate_order {
+        topo_visit(cname, &decoded_by_crate, &mut visiting, &mut visited, &mut topo_order);
+    }
+
+    let mut extern_objects: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut extern_lib_dirs: Vec<String> = Vec::new();
+    let mut extern_libs: Vec<String> = Vec::new();
+
+    for cname in topo_order {
+        let Some(pkg) = decoded_by_crate.remove(&cname) else {
+            continue;
+        };
+        extern_objects.push((pkg.crate_name.clone(), pkg.object_bytes));
+        for d in pkg.lib_dirs {
+            if !extern_lib_dirs.contains(&d) {
+                extern_lib_dirs.push(d);
+            }
+        }
+        for l in pkg.libs {
+            if !extern_libs.contains(&l) {
+                extern_libs.push(l);
+            }
+        }
+
+        let bundled_mod_prefixes: HashSet<Vec<String>> =
+            pkg.sources.iter().map(|s| s.mod_prefix.clone()).collect();
+        let pkg_aliases: HashMap<String, String> = pkg.extern_aliases.into_iter().collect();
+        for ext_src in &pkg.sources {
+            let mut dummy_recorded = Vec::new();
+            let mut ext_ctx = LoaderContext {
+                root_mod_prefix: std::slice::from_ref(&pkg.crate_name),
+                extern_aliases: &pkg_aliases,
+                bundled_mod_prefixes: &bundled_mod_prefixes,
+                recorded_sources: &mut dummy_recorded,
+                record_sources: false,
+            };
+            let virtual_path = PathBuf::from(format!("<extern:{}>/{}", pkg.crate_name, ext_src.rel_name));
+            load_source_str_with_ctx(
+                &ext_src.source,
+                &virtual_path,
+                Path::new("."),
+                &ext_src.mod_prefix,
+                &mut loaded_files,
+                &mut merged_program,
+                &mut source_map,
+                true,
+                Some(&mut ext_ctx),
+            )?;
+        }
+    }
 
     let base_dir = entry_file
         .parent()
@@ -188,18 +358,36 @@ pub fn load_program(entry_file: &Path) -> Result<(Program, SourceMap), String> {
         .to_path_buf();
 
     source_map.entry_index = source_map.files.len();
-    load_file_recursive(
+    let mut crate_sources = Vec::new();
+    let empty_bundled = HashSet::new();
+    let mut ctx = LoaderContext {
+        root_mod_prefix: &opts.root_mod_prefix,
+        extern_aliases: &extern_aliases,
+        bundled_mod_prefixes: &empty_bundled,
+        recorded_sources: &mut crate_sources,
+        record_sources: true,
+    };
+    crate::loader::files::load_file_recursive_with_ctx(
         entry_file,
         &base_dir,
-        &[],
+        &opts.root_mod_prefix,
         &mut loaded_files,
         &mut merged_program,
         &mut source_map,
+        Some(&mut ctx),
     )?;
 
     expand_derives(&mut merged_program);
 
-    Ok((merged_program, source_map))
+    Ok(LoadedCrateResult {
+        program: merged_program,
+        source_map,
+        crate_sources,
+        extern_objects,
+        extern_alias_pairs,
+        extern_lib_dirs,
+        extern_libs,
+    })
 }
 
 pub fn load_program_from_str(source: &str, quiet: bool) -> Result<(Program, SourceMap), String> {
@@ -281,10 +469,10 @@ fn resolve_name_alias(
     }
     if let Some((mod_part, item_part)) = name.split_once("::") {
         if aliases.contains_key(mod_part) {
-            return Some(format!("{}_{}", aliases[mod_part], item_part));
+            return Some(format!("{}_{}", aliases[mod_part], item_part.replace("::", "_")));
         }
         if local_types.contains(mod_part) {
-            return Some(format!("{}{}_{}", prefix, mod_part, item_part));
+            return Some(format!("{}{}_{}", prefix, mod_part, item_part.replace("::", "_")));
         }
     }
     if local_types.contains(name) {
@@ -401,6 +589,11 @@ fn rewrite_type(
             rewrite_type(&mut rewritten_ret, local_types, aliases, prefix);
             *ty = Type::FnPtr(intern_tuple(&rewritten_params), intern_type(rewritten_ret));
         }
+        Type::DynTrait(name) => {
+            if let Some(r) = resolve_name_alias(name, aliases, local_types, prefix) {
+                *ty = Type::DynTrait(intern_str(&r));
+            }
+        }
         Type::Int
         | Type::I32
         | Type::I16
@@ -417,7 +610,6 @@ fn rewrite_type(
         | Type::Unit
         | Type::Void
         | Type::Generic(_)
-        | Type::DynTrait(_)
         | Type::Infer(_)
         | Type::Error => {}
     }
@@ -516,13 +708,13 @@ fn rewrite_expr(
         Expr::Match(target, arms, _) => {
             rewrite_expr(target, local_types, aliases, prefix);
             for arm in arms {
-                if let Some((enum_part, variant_part)) = arm.variant_name.split_once("::") {
+                if let Some((enum_part, variant_part)) = arm.variant_name.rsplit_once("::") {
                     if let Some(r) = resolve_name_alias(enum_part, aliases, local_types, prefix) {
                         arm.variant_name = format!("{r}::{variant_part}");
                     }
                 }
                 for (alt_v, _) in &mut arm.alt_patterns {
-                    if let Some((enum_part, variant_part)) = alt_v.split_once("::") {
+                    if let Some((enum_part, variant_part)) = alt_v.rsplit_once("::") {
                         if let Some(r) = resolve_name_alias(enum_part, aliases, local_types, prefix) {
                             *alt_v = format!("{r}::{variant_part}");
                         }
@@ -542,7 +734,7 @@ fn rewrite_expr(
             else_body,
             ..
         } => {
-            if let Some((enum_part, variant_part)) = variant_name.split_once("::") {
+            if let Some((enum_part, variant_part)) = variant_name.rsplit_once("::") {
                 if let Some(r) = resolve_name_alias(enum_part, aliases, local_types, prefix) {
                     *variant_name = format!("{r}::{variant_part}");
                 }
@@ -567,7 +759,12 @@ fn rewrite_expr(
             }
             rewrite_expr(val, local_types, aliases, prefix);
         }
-        Expr::Assign(_, val, _) => rewrite_expr(val, local_types, aliases, prefix),
+        Expr::Assign(name, val, _) => {
+            if let Some(r) = resolve_name_alias(name, aliases, local_types, prefix) {
+                *name = r;
+            }
+            rewrite_expr(val, local_types, aliases, prefix);
+        }
         Expr::Return(opt_expr, _) => {
             if let Some(e) = opt_expr {
                 rewrite_expr(e, local_types, aliases, prefix);

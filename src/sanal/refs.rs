@@ -303,6 +303,9 @@ pub fn type_check_ref<'a>(
             errors.pop();
         }
     }
+    if is_mut {
+        type_ctx.check_static_lvalue_mutable(&t_inner, "E0596", errors, span);
+    }
     let inner_ty = t_inner.ty();
     check_unaligned_packed_borrow(&t_inner, type_ctx, errors, span);
     let is_range_slice = matches!(

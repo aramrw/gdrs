@@ -152,8 +152,12 @@ pub fn stmt_parser<'a>(
             })
             .then_ignore(just(Token::Newline).or_not());
 
-        // Standard variable assignment: x = 10 or x += 5
-        let assign_stmt = select! { Token::Ident(s) => s }
+        // Standard variable or qualified static assignment: x = 10 or mod::X += 5
+        let assign_target_ident = select! { Token::Ident(s) => s }
+            .separated_by(just(Token::ColonColon))
+            .at_least(1)
+            .map(|parts: Vec<String>| parts.join("::"));
+        let assign_stmt = assign_target_ident
             .then(assign_op.clone())
             .then(math.clone())
             .map_with_span(|((name, op), rhs), span| match op {

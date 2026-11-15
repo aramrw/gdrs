@@ -365,3 +365,33 @@ pub fn compile_assign<M: Module>(
         final_val
     }
 }
+
+pub fn compile_static_assign<M: Module>(
+    builder: &mut FunctionBuilder,
+    value: &TypedExpr,
+    cg: &mut CodegenCtx,
+    module: &mut M,
+    name: &str,
+) -> Value {
+    let raw_val = compile_expr(builder, value, cg, module);
+    cg.cancel_temp(raw_val);
+
+    let (target_ty, is_mut) = cg
+        .meta
+        .static_globals
+        .get(name)
+        .copied()
+        .unwrap_or_else(|| (value.ty(), true));
+    let dest_ptr = crate::codegen::expr::emit_static_addr(builder, name, is_mut, module);
+
+    if is_aggregate_type(&target_ty, &cg.meta.struct_layouts, cg.meta.enum_layouts) {
+        let (size, _) = size_and_align(&target_ty, &cg.meta.struct_layouts, cg.meta.enum_layouts);
+        emit_memcpy_bytes(builder, module, dest_ptr, raw_val, size);
+        dest_ptr
+    } else {
+        let cl_ty = cranelift_type_of(&target_ty);
+        let val = coerce_typed_val(builder, raw_val, &value.ty(), cl_ty);
+        builder.ins().store(MemFlags::new(), val, dest_ptr, 0);
+        val
+    }
+}

@@ -38,8 +38,8 @@ pub(crate) fn type_contains_ref(ty: &Type) -> bool {
 
 use crate::{
     ast::{
-        intern_str, is_visible, Expr, FuncDecl, Param, Program, Span, Type, TypedExpr,
-        TypedFuncDecl, TypedProgram, Visibility,
+        intern_str, is_visible, Expr, FuncDecl, Param, Program, Span, StaticInitVal, Type,
+        TypedExpr, TypedFuncDecl, TypedProgram, TypedStaticDecl, Visibility,
     },
     sanal::mono::{extract_generic_params_enum, extract_generic_params_struct, Monomorphizer},
     sanal::types::{type_check_expr, TypeCtx},
@@ -171,6 +171,7 @@ fn eval_const_expr(
                     Type::Int | Type::I32 | Type::I16 | Type::I8 | Type::U64 | Type::U32 | Type::U16 | Type::U8,
                 ) => Some(ConstVal::Int(if b { 1 } else { 0 })),
                 (ConstVal::Bool(b), Type::Bool) => Some(ConstVal::Bool(b)),
+                (ConstVal::Int(v), Type::Ptr(_)) => Some(ConstVal::Int(v)),
                 (v, t) => {
                     errors.push(SemanticError {
                         code: "E0308",
@@ -331,6 +332,231 @@ fn const_val_to_typed_expr(
                 span,
             });
             None
+        }
+    }
+}
+
+fn type_contains_drop_for_static(
+    ty: Type,
+    struct_map: &HashMap<String, StructLayout>,
+    drop_impls: &HashSet<String>,
+    visited: &mut HashSet<String>,
+) -> bool {
+    match ty {
+        Type::String | Type::Vec(_) | Type::Box(_) | Type::Rc(_) | Type::Arc(_) | Type::DynTrait(_) => true,
+        Type::Array(inner, _) => type_contains_drop_for_static(*inner, struct_map, drop_impls, visited),
+        Type::Tuple(elems) => elems
+            .iter()
+            .any(|e| type_contains_drop_for_static(*e, struct_map, drop_impls, visited)),
+        Type::Obj(name) => {
+            if drop_impls.contains(name) || !visited.insert(name.to_string()) {
+                return drop_impls.contains(name);
+            }
+            if let Some(layout) = struct_map.get(name) {
+                layout
+                    .field_offsets
+                    .values()
+                    .any(|(_, fty)| type_contains_drop_for_static(*fty, struct_map, drop_impls, visited))
+            } else {
+                false
+            }
+        }
+        Type::Enum(_) => false,
+        _ => false,
+    }
+}
+
+fn eval_static_init_expr(
+    expr: &Expr,
+    expected_ty: Type,
+    const_map: &HashMap<String, ConstMapEntry>,
+    struct_map: &HashMap<String, StructLayout>,
+    enum_names: &HashSet<String>,
+    decl_mod: &[String],
+    errors: &mut Vec<SemanticError>,
+) -> Option<StaticInitVal> {
+    let span = expr.span();
+    match (expr, expected_ty) {
+        (Expr::ArrayInit(elems, _), Type::Array(elem_ty, expected_len)) => {
+            if elems.len() != expected_len {
+                errors.push(SemanticError {
+                    code: "E0308",
+                    message: format!(
+                        "Mismatched array length in `static`: expected {expected_len}, found {}",
+                        elems.len()
+                    ),
+                    label: format!("Expected {expected_len} elements"),
+                    secondary_label: None,
+                    help: None,
+                    span,
+                });
+                return None;
+            }
+            let mut vals = Vec::with_capacity(elems.len());
+            for e in elems {
+                vals.push(eval_static_init_expr(
+                    e,
+                    *elem_ty,
+                    const_map,
+                    struct_map,
+                    enum_names,
+                    decl_mod,
+                    errors,
+                )?);
+            }
+            Some(StaticInitVal::Array(vals))
+        }
+        (Expr::TupleInit(elems, _), Type::Tuple(elem_tys)) => {
+            if elems.len() != elem_tys.len() {
+                errors.push(SemanticError {
+                    code: "E0308",
+                    message: format!(
+                        "Mismatched tuple length in `static`: expected {}, found {}",
+                        elem_tys.len(),
+                        elems.len()
+                    ),
+                    label: "Tuple arity mismatch".to_string(),
+                    secondary_label: None,
+                    help: None,
+                    span,
+                });
+                return None;
+            }
+            let mut vals = Vec::with_capacity(elems.len());
+            for (e, ty) in elems.iter().zip(elem_tys.iter()) {
+                vals.push(eval_static_init_expr(
+                    e,
+                    *ty,
+                    const_map,
+                    struct_map,
+                    enum_names,
+                    decl_mod,
+                    errors,
+                )?);
+            }
+            Some(StaticInitVal::Tuple(vals))
+        }
+        (Expr::ObjInit(raw_name, field_inits, _), Type::Obj(expected_struct_name)) => {
+            let norm = raw_name.replace("::", "_");
+            let local_key = if !decl_mod.is_empty() {
+                format!("{}_{}", decl_mod.join("_"), norm)
+            } else {
+                norm.clone()
+            };
+            let layout = struct_map
+                .get(&local_key)
+                .or_else(|| struct_map.get(&norm))
+                .or_else(|| struct_map.get(expected_struct_name))
+                .filter(|l| l.name == expected_struct_name);
+            let Some(layout) = layout else {
+                errors.push(SemanticError {
+                    code: "E0308",
+                    message: format!(
+                        "Mismatched `static` struct initializer: expected `{expected_struct_name}`, found `{raw_name}`"
+                    ),
+                    label: format!("Expected `{expected_struct_name}`"),
+                    secondary_label: None,
+                    help: None,
+                    span,
+                });
+                return None;
+            };
+            let mut seen = HashSet::new();
+            let mut typed_fields = Vec::with_capacity(field_inits.len());
+            for (fname, fexpr) in field_inits {
+                if !seen.insert(fname.clone()) {
+                    errors.push(SemanticError {
+                        code: "E0062",
+                        message: format!("Field `{fname}` specified more than once in `static` initializer"),
+                        label: "Duplicate field".to_string(),
+                        secondary_label: None,
+                        help: None,
+                        span: fexpr.span(),
+                    });
+                    return None;
+                }
+                let Some((_, fty)) = layout.field_offsets.get(fname) else {
+                    errors.push(SemanticError {
+                        code: "E0560",
+                        message: format!("Unknown field `{fname}` on struct `{}`", layout.name),
+                        label: "Unknown field".to_string(),
+                        secondary_label: None,
+                        help: None,
+                        span: fexpr.span(),
+                    });
+                    return None;
+                };
+                if let Some(f_vis) = layout.field_vis.get(fname) {
+                    if !is_visible(*f_vis, &layout.module_path, decl_mod) {
+                        errors.push(SemanticError {
+                            code: "E0616",
+                            message: format!("Field `{fname}` of struct `{}` is private", layout.name),
+                            label: "Private field".to_string(),
+                            secondary_label: None,
+                            help: None,
+                            span: fexpr.span(),
+                        });
+                        return None;
+                    }
+                }
+                let fval = eval_static_init_expr(
+                    fexpr,
+                    *fty,
+                    const_map,
+                    struct_map,
+                    enum_names,
+                    decl_mod,
+                    errors,
+                )?;
+                typed_fields.push((fname.clone(), fval));
+            }
+            for req_field in layout.field_offsets.keys() {
+                if !seen.contains(req_field) {
+                    errors.push(SemanticError {
+                        code: "E0063",
+                        message: format!("Missing field `{req_field}` in initializer of `{}`", layout.name),
+                        label: "Missing field".to_string(),
+                        secondary_label: None,
+                        help: None,
+                        span,
+                    });
+                    return None;
+                }
+            }
+            Some(StaticInitVal::Struct(layout.name.clone(), typed_fields))
+        }
+        (other_expr, other_ty) => {
+            let c_val = eval_const_expr(other_expr, const_map, enum_names, decl_mod, errors)?;
+            match (c_val, other_ty) {
+                (
+                    ConstVal::Int(n),
+                    Type::Int
+                    | Type::I32
+                    | Type::I16
+                    | Type::I8
+                    | Type::U64
+                    | Type::U32
+                    | Type::U16
+                    | Type::U8
+                    | Type::Ptr(_),
+                ) => Some(StaticInitVal::Int(n)),
+                (ConstVal::Float(f), Type::Float | Type::F32) => Some(StaticInitVal::Float(f)),
+                (ConstVal::Bool(b), Type::Bool) => Some(StaticInitVal::Bool(b)),
+                (ConstVal::Str(s), Type::Str) => Some(StaticInitVal::Str(s)),
+                (found, expected) => {
+                    errors.push(SemanticError {
+                        code: "E0308",
+                        message: format!(
+                            "Mismatched `static` type: expected `{expected:?}`, found `{found:?}`"
+                        ),
+                        label: format!("Expected `{expected:?}`"),
+                        secondary_label: None,
+                        help: None,
+                        span,
+                    });
+                    None
+                }
+            }
         }
     }
 }
@@ -877,6 +1103,71 @@ pub fn check_semantics(
         }
     }
 
+    let drop_impls: HashSet<String> = program
+        .impls
+        .iter()
+        .filter(|i| {
+            i.trait_name
+                .as_deref()
+                .is_some_and(|t| t == "Drop" || t.ends_with("_Drop"))
+        })
+        .map(|i| i.target_type.clone())
+        .collect();
+
+    let mut static_map: HashMap<String, (Type, bool, crate::ast::Visibility, Vec<String>)> =
+        HashMap::new();
+    let mut typed_statics: Vec<TypedStaticDecl> = Vec::new();
+    for st in &program.statics {
+        let resolved_ty = resolve_type(st.ty, &enum_names, st.span.clone(), &mut errors);
+        if type_contains_ref(&resolved_ty) {
+            errors.push(SemanticError {
+                code: "E0106",
+                message: format!("Static item `{}` cannot store a reference (`&T` / `&mut T`)", st.name),
+                label: "References cannot be stored in static items".to_string(),
+                secondary_label: None,
+                help: None,
+                span: st.span.clone(),
+            });
+            continue;
+        }
+        if type_contains_drop_for_static(resolved_ty, &struct_map, &drop_impls, &mut HashSet::new()) {
+            errors.push(SemanticError {
+                code: "E0493",
+                message: format!(
+                    "Static item `{}` cannot have type `{resolved_ty:?}` with heap ownership or `Drop`",
+                    st.name
+                ),
+                label: "Type with destructor not allowed in static initializer".to_string(),
+                secondary_label: None,
+                help: Some("Use a scalar, fixed array, tuple, raw pointer, or non-Drop POD struct".to_string()),
+                span: st.span.clone(),
+            });
+            continue;
+        }
+        if let Some(init_val) = eval_static_init_expr(
+            &st.value,
+            resolved_ty,
+            &const_map,
+            &struct_map,
+            &enum_names,
+            &st.module_path,
+            &mut errors,
+        ) {
+            static_map.insert(
+                st.name.clone(),
+                (resolved_ty, st.is_mut, st.vis, st.module_path.clone()),
+            );
+            typed_statics.push(TypedStaticDecl {
+                name: st.name.clone(),
+                ty: resolved_ty,
+                is_mut: st.is_mut,
+                init: init_val,
+                vis: st.vis,
+                module_path: st.module_path.clone(),
+            });
+        }
+    }
+
     for u in &program.uses {
         let target = &u.resolved_target;
         if target.is_empty() {
@@ -898,6 +1189,8 @@ pub fn check_semantics(
         } else if let Some(ta) = program.trait_aliases.iter().find(|ta| ta.name == *target) {
             vis_info = Some((ta.vis, ta.module_path.clone()));
         } else if let Some((_, _, vis, m_path)) = const_map.get(target) {
+            vis_info = Some((*vis, m_path.clone()));
+        } else if let Some((_, _, vis, m_path)) = static_map.get(target) {
             vis_info = Some((*vis, m_path.clone()));
         }
 
@@ -1067,6 +1360,7 @@ pub fn check_semantics(
         trait_methods: &trait_methods,
         trait_impls: &trait_impls,
         const_map: &const_map,
+        static_map: &static_map,
         current_module: Vec::new(),
         enum_vis: &enum_vis_map,
         extern_vis: &extern_vis_map,
@@ -1103,15 +1397,14 @@ pub fn check_semantics(
     ensure_layout_types_monomorphized(&type_ctx);
 
     let mut processed_fn_names = std::collections::HashSet::new();
+    let mut extern_import_fns = std::collections::HashSet::new();
     let mut i = 0;
     while i < worklist_cell.borrow().len() {
         let func = worklist_cell.borrow()[i].clone();
         i += 1;
 
         let has_generic = func.params.iter().any(|p| compat::type_contains_generic(&p.ty))
-            || compat::type_contains_generic(&func.return_type)
-            || func.name.contains("_t_")
-            || func.name.ends_with("_t");
+            || compat::type_contains_generic(&func.return_type);
 
         if has_generic {
             continue;
@@ -1121,6 +1414,24 @@ pub fn check_semantics(
             continue;
         }
         processed_fn_names.insert(func.name.clone());
+
+        let is_from_extern_crate = func
+            .module_path
+            .first()
+            .is_some_and(|c| program.extern_crate_names.contains(c))
+            && crate::sanal::mono::lookup_mangled(&func.name).is_none();
+        if is_from_extern_crate {
+            extern_import_fns.insert(func.name.clone());
+            typed_functions.push(TypedFuncDecl {
+                name: func.name.clone(),
+                params: func.params.clone(),
+                return_type: func.return_type,
+                where_clause: func.where_clause.clone(),
+                body: Vec::new(),
+                is_track_caller: func.is_track_caller,
+            });
+            continue;
+        }
 
         let mut scope_stack = ScopeStack::new();
         let mut typed_body = Vec::new();
@@ -1260,11 +1571,14 @@ pub fn check_semantics(
                 traits: program.traits.clone(),
                 trait_aliases: program.trait_aliases.clone(),
                 externs: program.externs.clone(),
+                statics: typed_statics,
                 structs: program.structs.clone(),
                 enums: program.enums.clone(),
                 impls: program.impls.clone(),
                 functions: typed_functions,
                 enum_layouts,
+                extern_crate_names: program.extern_crate_names.clone(),
+                extern_import_fns,
             },
             final_struct_map,
         ))

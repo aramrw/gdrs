@@ -105,7 +105,7 @@ pub fn emit_heap_drop_fn_ptr<M: Module>(
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         let fid = module
-            .declare_function(&synth_name, Linkage::Export, &sig)
+            .declare_function(&synth_name, Linkage::Local, &sig)
             .unwrap();
         let mut ctx = module.make_context();
         ctx.func.signature = sig;

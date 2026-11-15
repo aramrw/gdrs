@@ -4,7 +4,7 @@
 use crate::{
     ast::{Span, Type, TypedExpr},
     sanal::{
-        compat::{extract_root_ident_with_ty, extract_root_var, is_diverging_expr},
+        compat::{extract_root_ident_with_ty, extract_root_var, is_diverging_expr, is_static_place},
         ScopeStack, SemanticError,
     },
 };
@@ -59,6 +59,9 @@ pub fn check_return_ref_lifetime(
     match expr {
         TypedExpr::Ref(inner, _, _, span)
         | TypedExpr::IndexAccess(inner, _, Type::Slice(_) | Type::Str, span) => {
+            if is_static_place(inner) {
+                return;
+            }
             match extract_root_ident_with_ty(inner) {
                 None => errors.push(SemanticError {
                     code: "E0515",
@@ -210,6 +213,9 @@ pub fn check_block_escape_lifetime(
 ) {
     match expr {
         TypedExpr::Ref(inner, _, _, span) => {
+            if is_static_place(inner) {
+                return;
+            }
             if let Some(root) = extract_root_var(inner) {
                 if scopes.current_scope_contains(root) {
                     push_block_escape_error(root, span, errors);

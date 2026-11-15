@@ -61,6 +61,39 @@ fn lookup_const_ident(
     Some(with_const_span(val_expr, span.clone()))
 }
 
+fn lookup_static_ident(
+    name: &str,
+    type_ctx: &TypeCtx<'_>,
+    errors: &mut Vec<SemanticError>,
+    span: &Span,
+) -> Option<TypedExpr> {
+    let (resolved_name, st_ty, is_mut, vis, decl_mod) = type_ctx.resolve_static(name)?;
+    let clean = name.rsplit("::").next().unwrap_or(name);
+    if !crate::ast::is_visible(vis, &decl_mod, &type_ctx.current_module) {
+        errors.push(SemanticError {
+            code: "E0603",
+            message: format!("Static item `{clean}` is private"),
+            label: "Private static item".to_string(),
+            secondary_label: None,
+            help: Some(format!("Mark `{clean}` with `pub static` in its defining module")),
+            span: span.clone(),
+        });
+    }
+    if is_mut && !type_ctx.is_unsafe {
+        errors.push(SemanticError {
+            code: "E0133",
+            message: format!(
+                "Use of mutable static `{clean}` is unsafe and requires an `unsafe:` block"
+            ),
+            label: "Use of mutable static requires `unsafe:`".to_string(),
+            secondary_label: None,
+            help: Some("Wrap this access inside an `unsafe:` block".to_string()),
+            span: span.clone(),
+        });
+    }
+    Some(TypedExpr::StaticRef(resolved_name, st_ty, span.clone()))
+}
+
 pub fn type_check_ident<'a>(
     scopes: &mut ScopeStack,
     errors: &mut Vec<SemanticError>,
@@ -143,7 +176,17 @@ pub fn type_check_ident<'a>(
             Some(TypedExpr::Ident(name.to_string(), Type::Int, span.clone()))
         } else if let Some(fn_decl) = {
             let map = type_ctx.fn_map.borrow();
-            map.get(name).or_else(|| map.get(&normalized)).cloned()
+            map.get(name)
+                .or_else(|| map.get(&normalized))
+                .or_else(|| {
+                    if type_ctx.current_module.is_empty() {
+                        None
+                    } else {
+                        let local_fn = format!("{}_{normalized}", type_ctx.current_module.join("_"));
+                        map.get(&local_fn)
+                    }
+                })
+                .cloned()
         } {
             let p_tys: Vec<Type> = fn_decl.params.iter().map(|p| p.ty).collect();
             let fn_ty = Type::FnPtr(
@@ -163,6 +206,8 @@ pub fn type_check_ident<'a>(
             Some(TypedExpr::Ident(normalized, fn_ty, span.clone()))
         } else if let Some(const_expr) = lookup_const_ident(name, &normalized, type_ctx, errors, span) {
             Some(const_expr)
+        } else if let Some(static_expr) = lookup_static_ident(name, type_ctx, errors, span) {
+            Some(static_expr)
         } else {
             errors.push(SemanticError {
                 code: "E0425",
@@ -282,7 +327,17 @@ pub fn type_check_ident<'a>(
             Some(TypedExpr::Ident(name.to_string(), Type::Int, span.clone()))
         } else if let Some(fn_decl) = {
             let map = type_ctx.fn_map.borrow();
-            map.get(name).or_else(|| map.get(&normalized)).cloned()
+            map.get(name)
+                .or_else(|| map.get(&normalized))
+                .or_else(|| {
+                    if type_ctx.current_module.is_empty() {
+                        None
+                    } else {
+                        let local_fn = format!("{}_{normalized}", type_ctx.current_module.join("_"));
+                        map.get(&local_fn)
+                    }
+                })
+                .cloned()
         } {
             let p_tys: Vec<Type> = fn_decl.params.iter().map(|p| p.ty).collect();
             let fn_ty = Type::FnPtr(
@@ -302,6 +357,8 @@ pub fn type_check_ident<'a>(
             Some(TypedExpr::Ident(normalized, fn_ty, span.clone()))
         } else if let Some(const_expr) = lookup_const_ident(name, &normalized, type_ctx, errors, span) {
             Some(const_expr)
+        } else if let Some(static_expr) = lookup_static_ident(name, type_ctx, errors, span) {
+            Some(static_expr)
         } else {
             errors.push(SemanticError {
                 code: "E0425",
@@ -342,6 +399,9 @@ fn resolve_ref_borrow_info(
 
     match typed_val {
         TypedExpr::Ref(inner, ref_is_mut, _, _) => {
+            if crate::sanal::compat::is_static_place(inner) {
+                return (None, true);
+            }
             if let Some(target_var) = extract_root_var(inner) {
                 let target_owned = match scopes.lookup(target_var).map(|i| i.ty) {
                     Some(Type::Ref(_) | Type::MutRef(_) | Type::Slice(_))
@@ -364,6 +424,9 @@ fn resolve_ref_borrow_info(
             if matches!(idx.as_ref(), TypedExpr::Range(..))
                 || matches!(idx.ty(), Type::Obj("Range")) =>
         {
+            if crate::sanal::compat::is_static_place(target) {
+                return (None, true);
+            }
             if let Some(target_var) = extract_root_var(target) {
                 let target_owned = match scopes.lookup(target_var).map(|i| i.ty) {
                     Some(Type::Ref(_) | Type::MutRef(_) | Type::Slice(_))
@@ -1098,6 +1161,60 @@ pub fn type_check_assign<'a>(
         if let Some(info) = scopes.lookup_mut(name) {
             info.from_caller = from_caller;
         }
+    } else if let Some((resolved_name, st_ty, is_mut, vis, decl_mod)) = type_ctx.resolve_static(name) {
+        let clean = name.rsplit("::").next().unwrap_or(name);
+        if !crate::ast::is_visible(vis, &decl_mod, &type_ctx.current_module) {
+            errors.push(SemanticError {
+                code: "E0603",
+                message: format!("Static item `{clean}` is private"),
+                label: "Private static item".to_string(),
+                secondary_label: None,
+                help: Some(format!("Mark `{clean}` with `pub static` in its defining module")),
+                span: span.clone(),
+            });
+        }
+        if !is_mut {
+            errors.push(SemanticError {
+                code: "E0594",
+                message: format!("Cannot assign to immutable static item `{clean}`"),
+                label: format!("`{clean}` is an immutable static item"),
+                secondary_label: None,
+                help: Some(format!("Declare `static mut {clean}` and assign inside an `unsafe:` block")),
+                span: span.clone(),
+            });
+        } else if !type_ctx.is_unsafe {
+            errors.push(SemanticError {
+                code: "E0133",
+                message: format!(
+                    "Assignment to mutable static `{clean}` is unsafe and requires an `unsafe:` block"
+                ),
+                label: "Mutation of mutable static requires `unsafe:`".to_string(),
+                secondary_label: None,
+                help: Some("Wrap this assignment inside an `unsafe:` block".to_string()),
+                span: span.clone(),
+            });
+        }
+        let unify_res = type_ctx.infer.borrow_mut().unify(st_ty, typed_val.ty());
+        let resolved_var = type_ctx.infer.borrow_mut().resolve(st_ty);
+        let resolved_val = type_ctx.infer.borrow_mut().resolve(typed_val.ty());
+        if unify_res.is_err() && !is_type_compatible(&resolved_var, &resolved_val) {
+            errors.push(SemanticError {
+                code: "E0308",
+                message: format!(
+                    "Cannot assign type `{:?}` to static item `{clean}` of type `{:?}`",
+                    resolved_val, resolved_var
+                ),
+                label: "Type mismatch".to_string(),
+                secondary_label: None,
+                help: None,
+                span: span.clone(),
+            });
+        }
+        return Some(TypedExpr::StaticAssign(
+            resolved_name,
+            Box::new(typed_val),
+            span.clone(),
+        ));
     } else {
         errors.push(SemanticError {
             code: "E0425",

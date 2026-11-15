@@ -420,7 +420,7 @@ fn resolve_or_synthesize_enum_eq_fn<M: Module>(
     sig.params.push(AbiParam::new(types::I64));
     sig.returns.push(AbiParam::new(types::I8));
     let func_id = module
-        .declare_function(&synth_name, Linkage::Export, &sig)
+        .declare_function(&synth_name, Linkage::Local, &sig)
         .ok()?;
 
     let variants = find_enum_layout(enum_name, enum_layouts).cloned().unwrap_or_default();
@@ -557,7 +557,7 @@ fn resolve_or_synthesize_tuple_eq_fn<M: Module>(
     sig.params.push(AbiParam::new(types::I64));
     sig.returns.push(AbiParam::new(types::I8));
     let func_id = module
-        .declare_function(&synth_name, Linkage::Export, &sig)
+        .declare_function(&synth_name, Linkage::Local, &sig)
         .ok()?;
 
     let mut ctx = module.make_context();

@@ -50,6 +50,7 @@ pub struct TypeCtx<'a> {
     pub trait_methods: &'a HashMap<String, Vec<(String, Vec<Type>, Type)>>,
     pub trait_impls: &'a std::collections::HashSet<(String, String)>,
     pub const_map: &'a HashMap<String, (Type, TypedExpr, crate::ast::Visibility, Vec<String>)>,
+    pub static_map: &'a HashMap<String, (Type, bool, crate::ast::Visibility, Vec<String>)>,
     pub current_module: Vec<String>,
     pub enum_vis: &'a HashMap<String, (crate::ast::Visibility, Vec<String>)>,
     pub extern_vis: &'a HashMap<String, (crate::ast::Visibility, Vec<String>)>,
@@ -232,6 +233,67 @@ impl<'a> TypeCtx<'a> {
                 });
             }
             _ => {}
+        }
+    }
+
+    pub fn resolve_static(
+        &self,
+        name: &str,
+    ) -> Option<(String, Type, bool, crate::ast::Visibility, Vec<String>)> {
+        let normalized = name.replace("::", "_");
+        let local_key = if !self.current_module.is_empty() {
+            Some(format!("{}_{}", self.current_module.join("_"), name))
+        } else {
+            None
+        };
+        if let Some(k) = local_key {
+            if let Some((ty, is_mut, vis, decl_mod)) = self.static_map.get(&k) {
+                return Some((k, *ty, *is_mut, *vis, decl_mod.clone()));
+            }
+        }
+        if let Some((ty, is_mut, vis, decl_mod)) = self.static_map.get(name) {
+            return Some((name.to_string(), *ty, *is_mut, *vis, decl_mod.clone()));
+        }
+        if let Some((ty, is_mut, vis, decl_mod)) = self.static_map.get(&normalized) {
+            return Some((normalized, *ty, *is_mut, *vis, decl_mod.clone()));
+        }
+        None
+    }
+
+    pub fn extract_static_root<'b>(&self, mut expr: &'b TypedExpr) -> Option<&'b str> {
+        loop {
+            match expr {
+                TypedExpr::StaticRef(name, _, _) => return Some(name.as_str()),
+                TypedExpr::FieldAccess(inner, _, _, _)
+                | TypedExpr::IndexAccess(inner, _, _, _) => {
+                    expr = inner.as_ref();
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    pub fn check_static_lvalue_mutable(
+        &self,
+        expr: &TypedExpr,
+        code: &'static str,
+        errors: &mut Vec<SemanticError>,
+        span: &crate::ast::Span,
+    ) {
+        if let Some(static_sym) = self.extract_static_root(expr) {
+            if let Some((_, is_mut, _, _)) = self.static_map.get(static_sym) {
+                if !*is_mut {
+                    let clean = static_sym.rsplit('_').next().unwrap_or(static_sym);
+                    errors.push(SemanticError {
+                        code,
+                        message: format!("Cannot mutate immutable static item `{clean}`"),
+                        label: format!("`{clean}` is an immutable static item"),
+                        secondary_label: None,
+                        help: Some(format!("Declare `static mut {clean}` and access inside an `unsafe:` block")),
+                        span: span.clone(),
+                    });
+                }
+            }
         }
     }
 

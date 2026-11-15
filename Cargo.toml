@@ -2,6 +2,15 @@
 name = "gdrs"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "gdrs"
+path = "src/main.rs"
+
+[[bin]]
+name = "gdrsc"
+path = "src/main.rs"
 
 [dependencies]
 ariadne = { version = "0.6.0", features = ["auto-color"] }

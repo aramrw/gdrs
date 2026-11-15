@@ -374,6 +374,8 @@ pub fn validate_call_arguments<'a>(
                                 span: arg.span(),
                             });
                         }
+                    } else {
+                        type_ctx.check_static_lvalue_mutable(arg, "E0596", errors, &arg.span());
                     }
                     let arg_span = arg.span();
                     crate::sanal::refs::check_unaligned_packed_borrow(arg, type_ctx, errors, &arg_span);
@@ -402,6 +404,8 @@ pub fn validate_call_arguments<'a>(
                                 span: arg.span(),
                             });
                         }
+                    } else {
+                        type_ctx.check_static_lvalue_mutable(arg, "E0596", errors, &arg.span());
                     }
                     let arg_span = arg.span();
                     crate::sanal::refs::check_unaligned_packed_borrow(arg, type_ctx, errors, &arg_span);
