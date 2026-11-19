@@ -99,6 +99,8 @@ pub enum Token {
     Continue,
     #[token("else")]
     Else,
+    #[token("elif")]
+    Elif,
     #[token("move")]
     Move,
 
@@ -151,6 +153,8 @@ pub enum Token {
 
     #[regex(r#""([^"\\]|\\.)*""#, |lex| lex.slice().to_string())]
     String(String),
+    #[regex(r#"b'([^'\\]|\\([nrt\\'\"0]|x[0-9a-fA-F]{2}))'"#, |lex| parse_byte_literal(lex.slice()))]
+    Byte(u8),
     #[token("while")]
     While,
     #[token("loop")]
@@ -191,8 +195,6 @@ pub enum Token {
     TypeString,
     #[token("str")]
     TypeStr,
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*!", |lex| lex.slice()[..lex.slice().len() - 1].to_string())]
-    MacroIdent(String),
 
     #[token("[")]
     LBracket,
@@ -1114,6 +1116,35 @@ pub struct TypedFuncDecl {
     pub where_clause: Option<WhereClause>,
     pub body: Vec<TypedExpr>,
     pub is_track_caller: bool,
+    pub is_std: bool,
+}
+
+/// Parses a single-byte literal token like `b'a'`, `b'\n'`, or `b'\x20'`.
+fn parse_byte_literal(raw: &str) -> u8 {
+    let inner = raw
+        .strip_prefix("b'")
+        .and_then(|s| s.strip_suffix('\''))
+        .unwrap_or("");
+    let mut chars = inner.chars();
+    match chars.next() {
+        Some('\\') => match chars.next() {
+            Some('n') => b'\n',
+            Some('r') => b'\r',
+            Some('t') => b'\t',
+            Some('\\') => b'\\',
+            Some('\'') => b'\'',
+            Some('"') => b'"',
+            Some('0') => 0,
+            Some('x') => {
+                let hex: String = chars.take(2).collect();
+                u8::from_str_radix(&hex, 16).unwrap_or(0)
+            }
+            Some(c) => c as u8,
+            None => 0,
+        },
+        Some(c) => c as u8,
+        None => 0,
+    }
 }
 
 /// Unescapes standard C/Rust escape sequences inside a source string literal.

@@ -377,10 +377,8 @@ impl<'a> TypeCtx<'a> {
                     let mut field_vis = HashMap::new();
                     let mut offset = 0u32;
                     for field in &decl.fields {
-                        let resolved_ty = self
-                            .infer
-                            .borrow_mut()
-                            .resolve(crate::sanal::mono::substitute_type(field.ty, &env));
+                        let sub_ty = crate::sanal::mono::substitute_type(field.ty, &env);
+                        let resolved_ty = self.infer.borrow_mut().resolve(sub_ty);
                         field_offsets.insert(field.name.clone(), (offset, resolved_ty));
                         field_vis.insert(field.name.clone(), field.vis);
                         offset += 8;

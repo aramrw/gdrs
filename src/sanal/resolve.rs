@@ -133,6 +133,13 @@ pub(crate) fn resolve_type(
                 crate::ast::intern_type(resolved_ret),
             )
         }
+        Type::Obj("str") => Type::Str,
+        Type::Obj("i64") => Type::Int,
+        Type::Obj("i32") => Type::I32,
+        Type::Obj("u64") => Type::U64,
+        Type::Obj("u8") => Type::U8,
+        Type::Obj("f64") => Type::Float,
+        Type::Obj("bool") => Type::Bool,
         other => other,
     }
 }

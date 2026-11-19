@@ -275,6 +275,10 @@ pub fn type_check_index_access<'a>(
 
     let elem_ty = match target_ty {
         Type::Array(e_ty, _) | Type::Slice(e_ty) | Type::Vec(e_ty) => *e_ty,
+        Type::Str
+        | Type::String
+        | Type::Obj("String")
+        | Type::Obj("std_string_String") => Type::U8,
         Type::Obj(s) => {
             if let Some((_, t_args)) = crate::sanal::mono::lookup_mangled(s) {
                 t_args.first().copied().unwrap_or(Type::Int)
@@ -364,6 +368,21 @@ pub fn type_check_index_assign<'a>(
     let mut clean_target_ty = type_ctx.infer.borrow_mut().resolve(t_target.ty());
     while let Type::Ref(inner) | Type::MutRef(inner) | Type::Box(inner) = clean_target_ty {
         clean_target_ty = *inner;
+    }
+
+    if matches!(
+        clean_target_ty,
+        Type::Str | Type::String | Type::Obj("String") | Type::Obj("std_string_String")
+    ) {
+        errors.push(SemanticError {
+            code: "E0594",
+            message: "Cannot mutate string bytes directly via index assignment".to_string(),
+            label: "Strings are not byte-mutable by index".to_string(),
+            secondary_label: None,
+            help: Some("Build a new `String` or use `String` mutation methods".to_string()),
+            span: span.clone(),
+        });
+        return None;
     }
 
     if let Type::Obj(s) = clean_target_ty {

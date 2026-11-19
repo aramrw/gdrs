@@ -8,6 +8,56 @@ pub trait PartialEq:
 
 pub trait Eq {}
 
+pub trait Hash:
+	fn hash(&self) -> u64
+
+fn mix_u64(val: u64) -> u64:
+	let mut z = val
+	z = (z ^ (z >> (30 as u64))) * (13787848793156543929 as u64)
+	z = (z ^ (z >> (27 as u64))) * (10723151780598845931 as u64)
+	return z ^ (z >> (31 as u64))
+
+impl PartialEq for i64:
+	pub fn eq(&self, other: &i64) -> bool:
+		return *self == *other
+
+impl Hash for i64:
+	pub fn hash(&self) -> u64:
+		return mix_u64(*self as u64)
+
+impl PartialEq for i32:
+	pub fn eq(&self, other: &i32) -> bool:
+		return *self == *other
+
+impl Hash for i32:
+	pub fn hash(&self) -> u64:
+		return mix_u64((*self as i64) as u64)
+
+impl PartialEq for u64:
+	pub fn eq(&self, other: &u64) -> bool:
+		return *self == *other
+
+impl Hash for u64:
+	pub fn hash(&self) -> u64:
+		return mix_u64(*self)
+
+impl PartialEq for u8:
+	pub fn eq(&self, other: &u8) -> bool:
+		return *self == *other
+
+impl Hash for u8:
+	pub fn hash(&self) -> u64:
+		return mix_u64(*self as u64)
+
+impl PartialEq for bool:
+	pub fn eq(&self, other: &bool) -> bool:
+		return *self == *other
+
+impl Hash for bool:
+	pub fn hash(&self) -> u64:
+		let v: u64 = if *self: 1 as u64 else: 0 as u64
+		return mix_u64(v)
+
 #[derive(Debug)]
 pub enum Option:
 	Some($T)

@@ -1,0 +1,290 @@
+// std/net.gdrs - TCP and Unix domain sockets using POSIX sockets
+use std::core::{Result, Drop}
+use std::fs::IoError
+use std::libc::{malloc, free, strlen}
+use std::string::String
+use std::vec::Vec
+
+extern "C":
+	fn intrinsic_net_tcp_connect(host: str, port: i64) -> i64
+	fn intrinsic_net_tcp_listen(host: str, port: i64, out_port: *i64) -> i64
+	fn intrinsic_net_unix_connect(path: str) -> i64
+	fn intrinsic_net_unix_listen(path: str) -> i64
+	fn intrinsic_net_accept(listener_fd: i64) -> i64
+	fn intrinsic_net_read(fd: i64, buf: *void, cap: i64) -> i64
+	fn intrinsic_net_read_all(fd: i64, out_ptr: *i64, out_len: *i64) -> i64
+	fn intrinsic_net_write(fd: i64, buf: *void, len: i64) -> i64
+	fn intrinsic_net_shutdown_write(fd: i64) -> i32
+	fn intrinsic_net_close(fd: i64) -> i32
+
+fn fd_read_str(fd: i64, max_bytes: i64) -> Result<String, IoError>:
+	if fd < 0:
+		return Err(IoError::ReadFailed)
+	if max_bytes <= 0:
+		return Ok(String::new())
+	unsafe:
+		let buf = malloc(max_bytes + 1)
+		if (buf as i64) == 0:
+			return Err(IoError::AllocationFailed)
+		let n = intrinsic_net_read(fd, buf, max_bytes)
+		if n < 0:
+			free(buf)
+			return Err(IoError::ReadFailed)
+		if n == 0:
+			free(buf)
+			return Ok(String::new())
+		let end_ptr = ((buf as i64) + n) as *u8
+		*end_ptr = b'\0'
+		return Ok(String::from_raw_parts(buf as *i64, n, max_bytes + 1))
+
+fn fd_read_bytes(fd: i64, max_bytes: i64) -> Result<Vec<u8>, IoError>:
+	if fd < 0:
+		return Err(IoError::ReadFailed)
+	if max_bytes <= 0:
+		let empty: Vec<u8> = Vec::new()
+		return Ok(empty)
+	unsafe:
+		let buf = malloc(max_bytes)
+		if (buf as i64) == 0:
+			return Err(IoError::AllocationFailed)
+		let n = intrinsic_net_read(fd, buf, max_bytes)
+		if n < 0:
+			free(buf)
+			return Err(IoError::ReadFailed)
+		if n == 0:
+			free(buf)
+			let empty: Vec<u8> = Vec::new()
+			return Ok(empty)
+		return Ok(Vec::from_raw_parts(buf as *u8, n, max_bytes))
+
+fn fd_read_to_end(fd: i64) -> Result<String, IoError>:
+	if fd < 0:
+		return Err(IoError::ReadFailed)
+	unsafe:
+		let mut out_ptr: i64 = 0
+		let mut out_len: i64 = 0
+		let rc = intrinsic_net_read_all(fd, (&mut out_ptr) as *i64, (&mut out_len) as *i64)
+		if rc != 0:
+			if out_ptr != 0:
+				free(out_ptr as *void)
+			return Err(IoError::ReadFailed)
+		let out_cap = if out_len > 0: out_len + 1 else: 0
+		return Ok(String::from_raw_parts(out_ptr as *i64, out_len, out_cap))
+
+fn fd_read_line(fd: i64) -> Result<String, IoError>:
+	if fd < 0:
+		return Err(IoError::ReadFailed)
+	let mut out = String::new()
+	let mut ch: u8 = 0 as u8
+	unsafe:
+		while true:
+			let n = intrinsic_net_read(fd, (&mut ch) as *void, 1)
+			if n < 0:
+				return Err(IoError::ReadFailed)
+			if n == 0:
+				break
+			out.push_byte(ch)
+			if ch == b'\n':
+				break
+	return Ok(out)
+
+fn fd_write_str(fd: i64, s: str) -> Result<(), IoError>:
+	if fd < 0:
+		return Err(IoError::WriteFailed)
+	unsafe:
+		let n = strlen(s)
+		if n == 0:
+			return Ok(())
+		if intrinsic_net_write(fd, s as *void, n) != 0:
+			return Err(IoError::WriteFailed)
+		return Ok(())
+
+fn fd_write_bytes(fd: i64, data: &[u8]) -> Result<(), IoError>:
+	if fd < 0:
+		return Err(IoError::WriteFailed)
+	let n = data.len()
+	if n == 0:
+		return Ok(())
+	unsafe:
+		if intrinsic_net_write(fd, (&data[0]) as *void, n) != 0:
+			return Err(IoError::WriteFailed)
+		return Ok(())
+
+fn fd_shutdown_write(fd: i64) -> Result<(), IoError>:
+	if fd < 0:
+		return Err(IoError::WriteFailed)
+	unsafe:
+		if intrinsic_net_shutdown_write(fd) != (0 as i32):
+			return Err(IoError::WriteFailed)
+		return Ok(())
+
+// ==========================================
+// TCP Sockets
+// ==========================================
+pub obj TcpStream:
+	fd: i64
+
+impl Drop for TcpStream:
+	fn drop(mut self):
+		unsafe:
+			if self.fd >= 0:
+				intrinsic_net_close(self.fd)
+				self.fd = -1
+
+impl TcpStream:
+	pub fn connect(host: str, port: i64) -> Result<TcpStream, IoError>:
+		unsafe:
+			let fd = intrinsic_net_tcp_connect(host, port)
+			if fd < 0:
+				return Err(IoError::OpenFailed(format!("{}:{}", host, port)))
+			return Ok(TcpStream{ fd: fd })
+
+	pub fn read(&mut self, max_bytes: i64) -> Result<String, IoError>:
+		return fd_read_str(self.fd, max_bytes)
+
+	pub fn read_bytes(&mut self, max_bytes: i64) -> Result<Vec<u8>, IoError>:
+		return fd_read_bytes(self.fd, max_bytes)
+
+	pub fn read_to_end(&mut self) -> Result<String, IoError>:
+		return fd_read_to_end(self.fd)
+
+	pub fn read_line(&mut self) -> Result<String, IoError>:
+		return fd_read_line(self.fd)
+
+	pub fn write_str(&mut self, s: str) -> Result<(), IoError>:
+		return fd_write_str(self.fd, s)
+
+	pub fn write_bytes(&mut self, data: &[u8]) -> Result<(), IoError>:
+		return fd_write_bytes(self.fd, data)
+
+	pub fn shutdown_write(&mut self) -> Result<(), IoError>:
+		return fd_shutdown_write(self.fd)
+
+	pub fn close(&mut self) -> i32:
+		unsafe:
+			if self.fd < 0:
+				return 0 as i32
+			let rc = intrinsic_net_close(self.fd)
+			self.fd = -1
+			return rc
+
+pub obj TcpListener:
+	fd: i64
+	bound_port: i64
+
+impl Drop for TcpListener:
+	fn drop(mut self):
+		unsafe:
+			if self.fd >= 0:
+				intrinsic_net_close(self.fd)
+				self.fd = -1
+
+impl TcpListener:
+	pub fn bind(host: str, port: i64) -> Result<TcpListener, IoError>:
+		unsafe:
+			let mut actual_port: i64 = port
+			let fd = intrinsic_net_tcp_listen(host, port, (&mut actual_port) as *i64)
+			if fd < 0:
+				return Err(IoError::OpenFailed(format!("{}:{}", host, port)))
+			return Ok(TcpListener{ fd: fd, bound_port: actual_port })
+
+	pub fn local_port(&self) -> i64:
+		return self.bound_port
+
+	pub fn accept(&self) -> Result<TcpStream, IoError>:
+		unsafe:
+			let cfd = intrinsic_net_accept(self.fd)
+			if cfd < 0:
+				return Err(IoError::ReadFailed)
+			return Ok(TcpStream{ fd: cfd })
+
+	pub fn close(&mut self) -> i32:
+		unsafe:
+			if self.fd < 0:
+				return 0 as i32
+			let rc = intrinsic_net_close(self.fd)
+			self.fd = -1
+			return rc
+
+// ==========================================
+// Unix Domain Sockets
+// ==========================================
+pub obj UnixStream:
+	fd: i64
+
+impl Drop for UnixStream:
+	fn drop(mut self):
+		unsafe:
+			if self.fd >= 0:
+				intrinsic_net_close(self.fd)
+				self.fd = -1
+
+impl UnixStream:
+	pub fn connect(path: str) -> Result<UnixStream, IoError>:
+		unsafe:
+			let fd = intrinsic_net_unix_connect(path)
+			if fd < 0:
+				return Err(IoError::OpenFailed(String::from(path)))
+			return Ok(UnixStream{ fd: fd })
+
+	pub fn read(&mut self, max_bytes: i64) -> Result<String, IoError>:
+		return fd_read_str(self.fd, max_bytes)
+
+	pub fn read_bytes(&mut self, max_bytes: i64) -> Result<Vec<u8>, IoError>:
+		return fd_read_bytes(self.fd, max_bytes)
+
+	pub fn read_to_end(&mut self) -> Result<String, IoError>:
+		return fd_read_to_end(self.fd)
+
+	pub fn read_line(&mut self) -> Result<String, IoError>:
+		return fd_read_line(self.fd)
+
+	pub fn write_str(&mut self, s: str) -> Result<(), IoError>:
+		return fd_write_str(self.fd, s)
+
+	pub fn write_bytes(&mut self, data: &[u8]) -> Result<(), IoError>:
+		return fd_write_bytes(self.fd, data)
+
+	pub fn shutdown_write(&mut self) -> Result<(), IoError>:
+		return fd_shutdown_write(self.fd)
+
+	pub fn close(&mut self) -> i32:
+		unsafe:
+			if self.fd < 0:
+				return 0 as i32
+			let rc = intrinsic_net_close(self.fd)
+			self.fd = -1
+			return rc
+
+pub obj UnixListener:
+	fd: i64
+
+impl Drop for UnixListener:
+	fn drop(mut self):
+		unsafe:
+			if self.fd >= 0:
+				intrinsic_net_close(self.fd)
+				self.fd = -1
+
+impl UnixListener:
+	pub fn bind(path: str) -> Result<UnixListener, IoError>:
+		unsafe:
+			let fd = intrinsic_net_unix_listen(path)
+			if fd < 0:
+				return Err(IoError::OpenFailed(String::from(path)))
+			return Ok(UnixListener{ fd: fd })
+
+	pub fn accept(&self) -> Result<UnixStream, IoError>:
+		unsafe:
+			let cfd = intrinsic_net_accept(self.fd)
+			if cfd < 0:
+				return Err(IoError::ReadFailed)
+			return Ok(UnixStream{ fd: cfd })
+
+	pub fn close(&mut self) -> i32:
+		unsafe:
+			if self.fd < 0:
+				return 0 as i32
+			let rc = intrinsic_net_close(self.fd)
+			self.fd = -1
+			return rc

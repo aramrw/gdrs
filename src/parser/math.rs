@@ -223,6 +223,8 @@ pub fn match_arm_pattern_parser<'a>(
         .map(|n| (format!("__lit_int:{}", n.wrapping_neg()), Vec::new()));
     let lit_int = select! { Token::Int(n) => n }
         .map(|n| (format!("__lit_int:{n}"), Vec::new()));
+    let lit_byte = select! { Token::Byte(b) => b }
+        .map(|b| (format!("__lit_int:{b}"), Vec::new()));
     let variant_pat = path.then(
         select! { Token::Ident(s) => s }
             .separated_by(just(Token::Comma))
@@ -235,6 +237,7 @@ pub fn match_arm_pattern_parser<'a>(
         .or(lit_bool)
         .or(lit_neg_int)
         .or(lit_int)
+        .or(lit_byte)
         .or(variant_pat);
 
     single_pat
@@ -377,6 +380,13 @@ pub fn math_parser<'a>(
 ) -> BoxedParser<'a, Token, Expr, Simple<Token>> {
     // 1. Individual base literal & identifier parsers
     let int = select! { Token::Int(n) => n }.map_with_span(|n, span| Expr::Int(n, span));
+    let byte_lit = select! { Token::Byte(b) => b }.map_with_span(|b, span: Span| {
+        Expr::Cast(
+            Box::new(Expr::Int(b as i64, span.clone())),
+            crate::ast::Type::U8,
+            span,
+        )
+    });
     let float_lit = select! { Token::Float(raw) => raw.parse::<f64>().unwrap() }
         .map_with_span(|f, span| Expr::Float(f, span));
     let boolean = select! { Token::Bool(b) => b }.map_with_span(|b, span| Expr::Bool(b, span));
@@ -498,7 +508,8 @@ pub fn math_parser<'a>(
 
         let macro_args = parenthesized_args.clone().or(bracketed_args.clone());
 
-        let macro_call = select! { Token::MacroIdent(name) => name }
+        let macro_call = select! { Token::Ident(name) => name }
+            .then_ignore(just(Token::Exclamation))
             .then(macro_args)
             .map_with_span(|(name, args), span| Expr::MacroCall(name, args, span));
 
@@ -673,10 +684,14 @@ pub fn math_parser<'a>(
                 .or(closure_continue.clone())
                 .or(math.clone());
 
-            let closure_if = recursive(|cif| {
+            let closure_if_tail = recursive(|cif| {
                 let else_if_br = just(Token::Newline)
                     .repeated()
-                    .ignore_then(just(Token::Else))
+                    .ignore_then(
+                        just(Token::Elif)
+                            .to(())
+                            .or(just(Token::Else).ignore_then(just(Token::If)).to(())),
+                    )
                     .ignore_then(cif);
                 let else_blk_br = just(Token::Newline)
                     .repeated()
@@ -684,8 +699,7 @@ pub fn math_parser<'a>(
                     .ignore_then(just(Token::Colon))
                     .ignore_then(just(Token::Newline).or_not())
                     .ignore_then(closure_expr_body.clone());
-                just(Token::If)
-                    .ignore_then(math.clone())
+                math.clone()
                     .then_ignore(just(Token::Colon))
                     .then_ignore(just(Token::Newline).or_not())
                     .then(closure_expr_body.clone())
@@ -695,6 +709,7 @@ pub fn math_parser<'a>(
                         None => Expr::If(Box::new(cond), Box::new(then_b), span),
                     })
             });
+            let closure_if = just(Token::If).ignore_then(closure_if_tail);
 
             closure_if
                 .or(closure_return)
@@ -814,10 +829,14 @@ pub fn math_parser<'a>(
                     .map(|opt| opt.unwrap_or_default()),
             ));
 
-        let if_expr = recursive(|if_e| {
+        let if_expr_tail = recursive(|if_e| {
             let else_if_br = just(Token::Newline)
                 .repeated()
-                .ignore_then(just(Token::Else))
+                .ignore_then(
+                    just(Token::Elif)
+                        .to(())
+                        .or(just(Token::Else).ignore_then(just(Token::If)).to(())),
+                )
                 .ignore_then(if_e);
             let else_blk_br = just(Token::Newline)
                 .repeated()
@@ -826,8 +845,7 @@ pub fn math_parser<'a>(
                 .ignore_then(just(Token::Newline).or_not())
                 .ignore_then(expr_branch_body.clone());
 
-            let if_let_e = just(Token::If)
-                .ignore_then(just(Token::Let))
+            let if_let_e = just(Token::Let)
                 .ignore_then(expr_arm_pattern.clone())
                 .then_ignore(just(Token::Assign))
                 .then(math.clone())
@@ -865,8 +883,8 @@ pub fn math_parser<'a>(
                     )
                 });
 
-            let if_cond_e = just(Token::If)
-                .ignore_then(math.clone())
+            let if_cond_e = math
+                .clone()
                 .then_ignore(just(Token::Colon))
                 .then_ignore(just(Token::Newline).or_not())
                 .then(expr_branch_body.clone())
@@ -878,6 +896,7 @@ pub fn math_parser<'a>(
 
             if_let_e.or(if_cond_e)
         });
+        let if_expr = just(Token::If).ignore_then(if_expr_tail);
 
         let expr_match_arm = match_arm_pattern_parser(math.clone())
             .then_ignore(just(Token::FatArrow))
@@ -942,6 +961,7 @@ pub fn math_parser<'a>(
             .or(loop_expr)
             .or(unsafe_expr)
             .or(string)
+            .or(byte_lit)
             .or(float_lit)
             .or(int)
             .or(boolean)
@@ -960,6 +980,7 @@ pub fn math_parser<'a>(
             Index(Expr, Span),
             Call(Vec<Expr>, Span),
             Try(Span),
+            Unwrap(Span),
         }
 
         let dot_call_post = just(Token::Dot)
@@ -982,6 +1003,10 @@ pub fn math_parser<'a>(
         let try_post = just(Token::Question)
             .map_with_span(|_, span: Span| Postfix::Try(span));
 
+        let unwrap_post = just(Token::Exclamation)
+            .then(just(Token::Exclamation))
+            .map_with_span(|_, span: Span| Postfix::Unwrap(span));
+
         let postfix_atom = atom
             .then(
                 dot_call_post
@@ -989,6 +1014,7 @@ pub fn math_parser<'a>(
                     .or(index_post)
                     .or(call_post)
                     .or(try_post)
+                    .or(unwrap_post)
                     .repeated(),
             )
             .foldl(|target, post| match post {
@@ -1043,6 +1069,10 @@ pub fn math_parser<'a>(
                 Postfix::Try(try_span) => {
                     let span = target.span().start..try_span.end;
                     Expr::Try(Box::new(target), span)
+                }
+                Postfix::Unwrap(unwrap_span) => {
+                    let span = target.span().start..unwrap_span.end;
+                    Expr::Call(".unwrap".to_string(), vec![target], span)
                 }
             })
             .boxed();

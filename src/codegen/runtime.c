@@ -10,6 +10,14 @@
 #include <sys/wait.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <poll.h>
+#include <errno.h>
+#include <time.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 #if defined(__APPLE__) || defined(__linux__)
 #include <execinfo.h>
 #endif
@@ -557,6 +565,376 @@ int32_t intrinsic_waitpid(int32_t pid) {
     return -1;
 }
 
+typedef struct {
+    char* ptr;
+    int64_t len;
+    int64_t cap;
+} GdrsCaptureBuf;
+
+static int gdrs_capture_read_fd(int fd, GdrsCaptureBuf* buf) {
+    char tmp[4096];
+    ssize_t n = read(fd, tmp, sizeof(tmp));
+    if (n > 0) {
+        int64_t needed = buf->len + (int64_t)n + 1;
+        if (needed > buf->cap) {
+            int64_t new_cap = buf->cap > 0 ? buf->cap : 256;
+            while (new_cap < needed) {
+                new_cap *= 2;
+            }
+            char* next = (char*)realloc(buf->ptr, (size_t)new_cap);
+            if (!next) {
+                return -1;
+            }
+            buf->ptr = next;
+            buf->cap = new_cap;
+        }
+        memcpy(buf->ptr + buf->len, tmp, (size_t)n);
+        buf->len += (int64_t)n;
+        buf->ptr[buf->len] = '\0';
+        return 1;
+    }
+    if (n == 0) {
+        return 0;
+    }
+    return (errno == EINTR) ? 1 : -1;
+}
+
+static void gdrs_capture_finalize(GdrsCaptureBuf* buf, int64_t* out_ptr, int64_t* out_len) {
+    if (!buf->ptr || buf->len == 0) {
+        free(buf->ptr);
+        buf->ptr = NULL;
+        *out_ptr = 0;
+        *out_len = 0;
+        return;
+    }
+    char* shrunk = (char*)realloc(buf->ptr, (size_t)buf->len + 1);
+    if (shrunk) {
+        buf->ptr = shrunk;
+    }
+    buf->ptr[buf->len] = '\0';
+    *out_ptr = (int64_t)(uintptr_t)buf->ptr;
+    *out_len = buf->len;
+}
+
+int32_t intrinsic_process_run(
+    const char* program,
+    const int64_t* argv_ptrs,
+    int64_t argc,
+    int64_t capture,
+    int64_t* out_stdout_ptr,
+    int64_t* out_stdout_len,
+    int64_t* out_stderr_ptr,
+    int64_t* out_stderr_len
+) {
+    if (out_stdout_ptr) *out_stdout_ptr = 0;
+    if (out_stdout_len) *out_stdout_len = 0;
+    if (out_stderr_ptr) *out_stderr_ptr = 0;
+    if (out_stderr_len) *out_stderr_len = 0;
+    if (!program || program[0] == '\0') {
+        return -1;
+    }
+
+    char** argv = (char**)malloc(sizeof(char*) * (size_t)(argc + 2));
+    if (!argv) {
+        return -1;
+    }
+    argv[0] = (char*)program;
+    for (int64_t i = 0; i < argc; ++i) {
+        argv[i + 1] = argv_ptrs && argv_ptrs[i] ? (char*)(uintptr_t)argv_ptrs[i] : "";
+    }
+    argv[argc + 1] = NULL;
+
+    int out_pipe[2] = { -1, -1 };
+    int err_pipe[2] = { -1, -1 };
+    if (capture) {
+        if (pipe(out_pipe) != 0 || pipe(err_pipe) != 0) {
+            if (out_pipe[0] >= 0) { close(out_pipe[0]); close(out_pipe[1]); }
+            if (err_pipe[0] >= 0) { close(err_pipe[0]); close(err_pipe[1]); }
+            free(argv);
+            return -1;
+        }
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        if (capture) {
+            close(out_pipe[0]); close(out_pipe[1]);
+            close(err_pipe[0]); close(err_pipe[1]);
+        }
+        free(argv);
+        return -1;
+    }
+
+    if (pid == 0) {
+        if (capture) {
+            dup2(out_pipe[1], STDOUT_FILENO);
+            dup2(err_pipe[1], STDERR_FILENO);
+            close(out_pipe[0]); close(out_pipe[1]);
+            close(err_pipe[0]); close(err_pipe[1]);
+        }
+        execvp(program, argv);
+        _exit(127);
+    }
+
+    free(argv);
+    if (capture) {
+        close(out_pipe[1]);
+        close(err_pipe[1]);
+
+        GdrsCaptureBuf out_buf = { NULL, 0, 0 };
+        GdrsCaptureBuf err_buf = { NULL, 0, 0 };
+        struct pollfd fds[2];
+        fds[0].fd = out_pipe[0];
+        fds[0].events = POLLIN;
+        fds[1].fd = err_pipe[0];
+        fds[1].events = POLLIN;
+
+        while (fds[0].fd >= 0 || fds[1].fd >= 0) {
+            int pr = poll(fds, 2, -1);
+            if (pr < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (fds[0].fd >= 0 && (fds[0].revents & (POLLIN | POLLHUP | POLLERR))) {
+                if (gdrs_capture_read_fd(fds[0].fd, &out_buf) <= 0) {
+                    close(fds[0].fd);
+                    fds[0].fd = -1;
+                }
+            }
+            if (fds[1].fd >= 0 && (fds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+                if (gdrs_capture_read_fd(fds[1].fd, &err_buf) <= 0) {
+                    close(fds[1].fd);
+                    fds[1].fd = -1;
+                }
+            }
+        }
+        if (fds[0].fd >= 0) close(fds[0].fd);
+        if (fds[1].fd >= 0) close(fds[1].fd);
+
+        if (out_stdout_ptr && out_stdout_len) {
+            gdrs_capture_finalize(&out_buf, out_stdout_ptr, out_stdout_len);
+        } else {
+            free(out_buf.ptr);
+        }
+        if (out_stderr_ptr && out_stderr_len) {
+            gdrs_capture_finalize(&err_buf, out_stderr_ptr, out_stderr_len);
+        } else {
+            free(err_buf.ptr);
+        }
+    }
+
+    int status = 0;
+    pid_t wres;
+    do {
+        wres = waitpid(pid, &status, 0);
+    } while (wres < 0 && errno == EINTR);
+    if (wres < 0) {
+        return -1;
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status);
+    }
+    return -1;
+}
+
+void intrinsic_sleep_us(int64_t us) {
+    if (us <= 0) return;
+    struct timespec req;
+    req.tv_sec = us / 1000000;
+    req.tv_nsec = (us % 1000000) * 1000;
+    while (nanosleep(&req, &req) == -1 && errno == EINTR) {}
+}
+
+// Networking intrinsics (TCP & Unix domain sockets)
+int64_t intrinsic_net_tcp_connect(const char* host, int64_t port) {
+    if (!host || host[0] == '\0' || port <= 0 || port > 65535) {
+        return -1;
+    }
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%lld", (long long)port);
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* res = NULL;
+    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
+        return -1;
+    }
+    int fd = -1;
+    for (struct addrinfo* p = res; p != NULL; p = p->ai_next) {
+        int s = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (s < 0) continue;
+        int rc;
+        do {
+            rc = connect(s, p->ai_addr, p->ai_addrlen);
+        } while (rc < 0 && errno == EINTR);
+        if (rc == 0) {
+            fd = s;
+            break;
+        }
+        close(s);
+    }
+    freeaddrinfo(res);
+    return (int64_t)fd;
+}
+
+int64_t intrinsic_net_tcp_listen(const char* host, int64_t port, int64_t* out_port) {
+    if (out_port) *out_port = 0;
+    if (port < 0 || port > 65535) {
+        return -1;
+    }
+    const char* bind_host = (host && host[0] != '\0') ? host : "127.0.0.1";
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%lld", (long long)port);
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+    struct addrinfo* res = NULL;
+    if (getaddrinfo(bind_host, port_str, &hints, &res) != 0 || !res) {
+        return -1;
+    }
+    int fd = -1;
+    for (struct addrinfo* p = res; p != NULL; p = p->ai_next) {
+        int s = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (s < 0) continue;
+        int yes = 1;
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        if (bind(s, p->ai_addr, p->ai_addrlen) == 0 && listen(s, 128) == 0) {
+            if (out_port) {
+                struct sockaddr_storage ss;
+                socklen_t slen = sizeof(ss);
+                if (getsockname(s, (struct sockaddr*)&ss, &slen) == 0) {
+                    if (ss.ss_family == AF_INET) {
+                        *out_port = (int64_t)ntohs(((struct sockaddr_in*)&ss)->sin_port);
+                    } else if (ss.ss_family == AF_INET6) {
+                        *out_port = (int64_t)ntohs(((struct sockaddr_in6*)&ss)->sin6_port);
+                    }
+                }
+            }
+            fd = s;
+            break;
+        }
+        close(s);
+    }
+    freeaddrinfo(res);
+    return (int64_t)fd;
+}
+
+static int gdrs_fill_unix_addr(struct sockaddr_un* addr, const char* path) {
+    if (!path || path[0] == '\0') return -1;
+    size_t len = strlen(path);
+    if (len >= sizeof(addr->sun_path)) return -1;
+    memset(addr, 0, sizeof(*addr));
+    addr->sun_family = AF_UNIX;
+    memcpy(addr->sun_path, path, len + 1);
+    return 0;
+}
+
+int64_t intrinsic_net_unix_connect(const char* path) {
+    struct sockaddr_un addr;
+    if (gdrs_fill_unix_addr(&addr, path) != 0) {
+        return -1;
+    }
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (s < 0) return -1;
+    int rc;
+    do {
+        rc = connect(s, (struct sockaddr*)&addr, (socklen_t)sizeof(addr));
+    } while (rc < 0 && errno == EINTR);
+    if (rc != 0) {
+        close(s);
+        return -1;
+    }
+    return (int64_t)s;
+}
+
+int64_t intrinsic_net_unix_listen(const char* path) {
+    struct sockaddr_un addr;
+    if (gdrs_fill_unix_addr(&addr, path) != 0) {
+        return -1;
+    }
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (s < 0) return -1;
+    if (bind(s, (struct sockaddr*)&addr, (socklen_t)sizeof(addr)) != 0 || listen(s, 128) != 0) {
+        close(s);
+        return -1;
+    }
+    return (int64_t)s;
+}
+
+int64_t intrinsic_net_accept(int64_t listener_fd) {
+    if (listener_fd < 0) return -1;
+    int client;
+    do {
+        client = accept((int)listener_fd, NULL, NULL);
+    } while (client < 0 && errno == EINTR);
+    return (int64_t)client;
+}
+
+int64_t intrinsic_net_read(int64_t fd, void* buf, int64_t cap) {
+    if (fd < 0 || !buf || cap <= 0) return -1;
+    ssize_t n;
+    do {
+        n = read((int)fd, buf, (size_t)cap);
+    } while (n < 0 && errno == EINTR);
+    return (int64_t)n;
+}
+
+int64_t intrinsic_net_read_all(int64_t fd, int64_t* out_ptr, int64_t* out_len) {
+    if (out_ptr) *out_ptr = 0;
+    if (out_len) *out_len = 0;
+    if (fd < 0) return -1;
+    GdrsCaptureBuf buf = { NULL, 0, 0 };
+    for (;;) {
+        int rc = gdrs_capture_read_fd((int)fd, &buf);
+        if (rc == 0) break;
+        if (rc < 0) {
+            free(buf.ptr);
+            return -1;
+        }
+    }
+    if (out_ptr && out_len) {
+        gdrs_capture_finalize(&buf, out_ptr, out_len);
+    } else {
+        free(buf.ptr);
+    }
+    return 0;
+}
+
+int64_t intrinsic_net_write(int64_t fd, const void* buf, int64_t len) {
+    if (fd < 0) return -1;
+    if (len <= 0) return 0;
+    if (!buf) return -1;
+    const char* p = (const char*)buf;
+    int64_t remaining = len;
+    while (remaining > 0) {
+        ssize_t n = write((int)fd, p, (size_t)remaining);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1;
+        p += n;
+        remaining -= (int64_t)n;
+    }
+    return 0;
+}
+
+int32_t intrinsic_net_shutdown_write(int64_t fd) {
+    if (fd < 0) return -1;
+    return (int32_t)shutdown((int)fd, SHUT_WR);
+}
+
+int32_t intrinsic_net_close(int64_t fd) {
+    if (fd < 0) return 0;
+    return (int32_t)close((int)fd);
+}
+
 // Math FFI wrappers (corresponding to std/math.gdrs extern "C")
 double c_exp(double x) { return exp(x); }
 double c_sqrt(double x) { return sqrt(x); }
@@ -693,9 +1071,9 @@ const char* intrinsic_str_slice_loc(
     if (end == len) {
         return ptr + start;
     }
-    static char* ring[64] = {0};
-    static size_t ring_idx = 0;
-    size_t slot = (ring_idx++) & 63;
+    static _Thread_local char* ring[256] = {0};
+    static _Thread_local size_t ring_idx = 0;
+    size_t slot = (ring_idx++) & 255;
     char* out = (char*)realloc(ring[slot], (size_t)sub_len + 1);
     if (!out) return "";
     ring[slot] = out;

@@ -5,6 +5,16 @@ use std::core::{Option}
 
 extern "C":
 	fn clock_gettime(clk_id: i32, tp: *void) -> i32
+	fn intrinsic_sleep_us(us: i64)
+
+pub fn sleep_us(us: i64):
+	unsafe:
+		intrinsic_sleep_us(us)
+
+pub fn sleep_ms(ms: i64):
+	if ms > 0:
+		unsafe:
+			intrinsic_sleep_us(ms * 1000)
 
 pub obj Instant:
 	pub sec: i64

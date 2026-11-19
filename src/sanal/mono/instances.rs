@@ -867,6 +867,13 @@ fn infer_iter_output_type(iter_ty: Type, fn_map: &HashMap<String, FuncDecl>) -> 
     match iter_ty {
         Type::Obj("Range") | Type::Obj("std_iter_Range") => Some(Type::Int),
         Type::Obj(s) => {
+            if s.contains("VecRefIter_") {
+                if let Some((_, args)) = lookup_mangled(s) {
+                    if let Some(&first) = args.first() {
+                        return Some(Type::Ref(crate::ast::intern_type(first)));
+                    }
+                }
+            }
             if s.contains("VecIter_") {
                 if let Some((_, args)) = lookup_mangled(s) {
                     if let Some(&first) = args.first() {

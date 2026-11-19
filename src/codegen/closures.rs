@@ -38,6 +38,7 @@ pub fn compile_closure<M: Module>(
                 where_clause: None,
                 body: vec![body.clone()],
                 is_track_caller: false,
+                is_std: false,
             };
 
             let mut new_ctx = module.make_context();

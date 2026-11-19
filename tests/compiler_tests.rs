@@ -2982,3 +2982,445 @@ fn main() {
         "E0277",
     );
 }
+
+#[test]
+fn postfix_double_bang_unwrap() {
+    assert_ok_output(
+        "double_bang_unwrap_ok_and_some",
+        r#"
+obj Boxed:
+	x: i64
+
+fn ok_box(n: i64) -> Result<Boxed, str>:
+	return Result::Ok(Boxed{ x: n })
+
+fn ok_val(n: i64) -> Result<i64, str>:
+	return Result::Ok(n)
+
+fn some_opt(n: i64) -> Option<i64>:
+	return Option::Some(n)
+
+fn some_bool(b: bool) -> Option<bool>:
+	return Option::Some(b)
+
+fn nested_ok(n: i64) -> Result<Result<i64, str>, str>:
+	return Result::Ok(Result::Ok(n))
+
+fn main():
+	let r = ok_val(10)
+	let a = r!!
+	let b = ok_val(20)!!
+	let c = some_opt(30)!!
+	let d = ok_box(40)!!.x
+	let mut arr: Vec<Result<i64, str> > = vec![Result::Ok(50)]
+	let e = arr.pop()!!!!
+	let f = nested_ok(60)!!!!
+
+	let flag = true
+	let double_not = !!flag
+	let bang_after_unwrap = !some_bool(false)!!
+
+	log!("{} {} {} {} {} {} {} {}", a, b, c, d, e, f, double_not, bang_after_unwrap)
+"#,
+        &["10 20 30 40 50 60 true true"],
+    );
+
+    let err_run = run_gdrs_source(
+        "double_bang_unwrap_err_panics",
+        r#"
+fn fail() -> Result<i64, str>:
+	return Result::Err("boom")
+
+fn main():
+	let _v = fail()!!
+"#,
+    );
+    assert!(!err_run.status.success(), "expected Err!! to panic");
+
+    let none_run = run_gdrs_source(
+        "double_bang_unwrap_none_panics",
+        r#"
+fn main():
+	let none: Option<i64> = Option::None
+	let _v = none!!
+"#,
+    );
+    assert!(!none_run.status.success(), "expected None!! to panic");
+}
+
+#[test]
+fn round26_phase1_ergonomics_and_stdlib() {
+    let tmp_path = std::env::temp_dir().join(format!("gdrs_round26_fs_{}.txt", std::process::id()));
+    let tmp_path_str = tmp_path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+    let _ = std::fs::remove_file(&tmp_path);
+
+    let src = format!(
+        r#"
+use std::fs
+use std::fs::File
+use std::time::{{Instant, sleep_ms, sleep_us}}
+use std::process::Command
+use std::string::String
+
+const NL_BYTE: u8 = b'\n'
+
+fn classify(n: i64) -> str:
+	if n < 0:
+		return "neg"
+	elif n == 0:
+		return "zero"
+	elif n < 10:
+		return "small"
+	else:
+		return "big"
+
+fn accept_str(s: str) -> i64:
+	return s.len()
+
+fn main():
+	// 1. elif, elif let, expression elif, and multiline braced else
+	let c0 = classify(-1)
+	let c1 = classify(0)
+	let c2 = classify(5)
+	let c3 = classify(42)
+
+	let opt: Option<i64> = Option::Some(9)
+	let mut opt_msg = ""
+	if let Option::None = &opt:
+		opt_msg = "none"
+	elif let Option::Some(v) = &opt:
+		opt_msg = if v > 10: "gt10" elif v == 9: "eq9" else: "lt9"
+	else:
+		opt_msg = "other"
+
+	let mut braced_val = 0
+	if false: {{
+		braced_val = 1
+	}}
+	elif true: {{
+		braced_val = 2
+	}}
+	else: {{
+		braced_val = 3
+	}}
+	log!("elif={{}},{{}},{{}},{{}},{{}},{{}}", c0, c1, c2, c3, opt_msg, braced_val)
+
+	// 2. Byte literals, match on bytes, string byte indexing, null-safe String->str
+	let empty_s = String::new()
+	let empty_len = accept_str(empty_s)
+	let raw = "abc\n"
+	let byte_kind = match raw[3]:
+		b'\r' => 1
+		b'\n' => 2
+		_ => 3
+	let owned = String::from("Z9")
+	log!("bytes={{}},{{}},{{}},{{}},{{}}", empty_len, raw[0] == b'a', byte_kind, NL_BYTE == b'\n', owned[1] == b'9')
+
+	// 3. String & str helpers + number parsing/formatting
+	let mut sb = String::with_capacity(8)
+	sb.push_byte(b' ')
+	sb.push_byte(b'4')
+	sb.push_byte(b'2')
+	sb.append(" ")
+	let p_i = sb.parse_i64()!!
+	sb.clear()
+	sb.append("  -3.5  ")
+	let p_f = sb.parse_f64()!!
+	let bad_i = "12x".parse_i64().is_none()
+	let bad_f = "1.2x".parse_f64().is_none()
+
+	let hay = "hello, world, hello"
+	let parts = hay.split(", ")
+	let rep = hay.replace("hello", "hi")
+	let tr = "  ok \t\n".trim()
+	let i_str = (123).to_string()
+	let f_str = (2.5).to_string()
+	log!(
+		"str={{}},{{}},{{}},{{}},{{}},{{}},{{}},{{}},{{}},{{}},{{}},{{}}",
+		p_i,
+		p_f,
+		bad_i,
+		bad_f,
+		hay.contains("world"),
+		hay.starts_with("hello"),
+		hay.ends_with("hello"),
+		hay.find("world")!!,
+		parts.len(),
+		parts[1].as_str(),
+		rep.as_str(),
+		tr.as_str()
+	)
+	log!("tostr={{}},{{}}", i_str.as_str(), f_str.as_str())
+
+	// 4. std::fs write & append
+	let p = "{tmp_path_str}"
+	fs::write(p, "line1\n")!!
+	fs::append(p, "line2\n")!!
+	let mut f = File::open_append(p)!!
+	f.write_bytes(&[b'o', b'k', b'\n'])!!
+	f.flush()!!
+	let _ = f.close()
+	let contents = fs::read_to_string(p)!!
+	log!("fs={{}}", contents.replace("\n", "|").as_str())
+
+	// 5. std::time sleep_ms / sleep_us
+	let t0 = Instant::now()
+	sleep_ms(12)
+	sleep_us(500)
+	let elapsed = t0.ms()
+	log!("slept={{}}", elapsed >= 5)
+
+	// 6. std::process Command args & stdout/stderr capture
+	let out = Command::new("/bin/sh").arg("-c").arg("printf 'out123'; printf 'err456' 1>&2").output()!!
+	let ok_status = Command::new("/bin/sh").args(&["-c", "exit 7"]).status()!!
+	log!("proc={{}},{{}},{{}},{{}}", out.success(), out.stdout.as_str(), out.stderr.as_str(), ok_status)
+"#
+    );
+
+    assert_ok_output(
+        "round26_phase1_positive",
+        &src,
+        &[
+            "elif=neg,zero,small,big,eq9,2",
+            "bytes=0,true,2,true,true",
+            "str=42,-3.5,true,true,true,true,true,7,3,world,hi, world, hi,ok",
+            "tostr=123,2.5",
+            "fs=line1|line2|ok|",
+            "slept=true",
+            "proc=true,out123,err456,7",
+        ],
+    );
+    let _ = std::fs::remove_file(&tmp_path);
+
+    // Negative check: index assignment into string is rejected
+    assert_err_code(
+        "round26_string_index_assign_rejected",
+        "fn main():\n\tlet mut s = \"abc\"\n\ts[0] = b'z'\n",
+        "E0594",
+    );
+
+    // Runtime bounds check: s[idx] panics out-of-bounds
+    let oob_run = run_gdrs_source(
+        "round26_string_index_oob_panics",
+        "fn main():\n\tlet s = \"ab\"\n\tlet _b = s[5]\n",
+    );
+    assert!(!oob_run.status.success(), "expected out-of-bounds s[5] to panic");
+}
+
+#[test]
+fn round27_phase2_collections_and_vec_refs() {
+    assert_ok_output(
+        "round27_phase2_positive",
+        r#"
+use std::collections::{VecDeque, HashMap}
+use std::core::Drop
+use std::string::String
+use std::vec::Vec
+
+obj Item:
+	id: i64
+
+impl Drop for Item:
+	fn drop(mut self):
+		log!("drop_item:{}", self.id)
+
+fn main():
+	// 1. Vec<String>: for s in &v, iter_ref, get, get_mut, remove, clear
+	let mut vs: Vec<String> = Vec::new()
+	vs.push(String::from("alpha"))
+	vs.push(String::from("beta"))
+	vs.push(String::from("gamma"))
+
+	let mut joined = String::new()
+	for s in &vs:
+		if !joined.is_empty():
+			joined.append(",")
+		joined.append(s.as_str())
+	log!("vec_for={}", joined.as_str())
+
+	let first_ref = vs.get(0)!!
+	log!("vec_get0={}", first_ref.as_str())
+	log!("vec_oob={}", vs.get(9).is_none())
+
+	let mid_mut = vs.get_mut(1)!!
+	mid_mut.append("!")
+	let removed = vs.remove(0)!!
+	log!("vec_rem={} len={} rem_first={}", removed.as_str(), vs.len(), vs.get(0)!!.as_str())
+
+	{
+		let mut it = vs.iter_ref()
+		let mut iter_count = 0
+		while let Option::Some(s) = it.next():
+			iter_count = iter_count + s.len()
+		log!("vec_iter_ref_chars={}", iter_count)
+	}
+	vs.clear()
+	log!("vec_after_clear={}", vs.len())
+
+	// 2. VecDeque<String>: wrap-around push_front/push_back + grow + pop + clear
+	let mut dq: VecDeque<String> = VecDeque::with_capacity(4)
+	dq.push_back(String::from("b"))
+	dq.push_front(String::from("a"))
+	dq.push_back(String::from("c"))
+	let f0 = dq.pop_front()!!
+	dq.push_back(String::from("d"))
+	dq.push_back(String::from("e"))
+	dq.push_front(String::from("z"))
+	dq.push_back(String::from("f"))
+	dq.push_back(String::from("g"))
+	let b0 = dq.pop_back()!!
+	log!(
+		"dq=f0:{} b0:{} front:{} back:{} len:{}",
+		f0.as_str(),
+		b0.as_str(),
+		dq.front()!!.as_str(),
+		dq.back()!!.as_str(),
+		dq.len()
+	)
+	dq.clear()
+	log!("dq_cleared={}", dq.is_empty())
+
+	// 3. HashMap<String, i64> + HashMap<i64, String> + rehash + overwrite + remove
+	let mut scores: HashMap<String, i64> = HashMap::new()
+	assert!(scores.insert(String::from("alice"), 10).is_none())
+	let prev = scores.insert(String::from("alice"), 25)!!
+	scores.insert(String::from("bob"), 40)
+	let bob_mut = scores.get_mut(&String::from("bob"))!!
+	*bob_mut = *bob_mut + 2
+	let rm_bob = scores.remove(&String::from("bob"))!!
+	let has_bob = scores.contains_key(&String::from("bob"))
+	let alice_v = *scores.get(&String::from("alice"))!!
+	log!("hm1=prev:{} rm:{} has_bob:{} alice:{} len:{}", prev, rm_bob, has_bob, alice_v, scores.len())
+
+	let mut num_map: HashMap<i64, String> = HashMap::new()
+	for i in 0..24:
+		num_map.insert(i, format!("v{}", i))
+	log!("hm2=len:{} k17:{} k99:{}", num_map.len(), num_map.get(&17)!!.as_str(), num_map.get(&99).is_none())
+
+	let mut str_map: HashMap<str, String> = HashMap::new()
+	str_map.insert("mode", String::from("gather"))
+	log!("hm_str={}", str_map.get(&"mode")!!.as_str())
+
+	// 4. Owned String/str::slice (no ring buffer)
+	let sl1 = "hello world".slice(0, 5)
+	let owned_src = String::from("abcdef")
+	let sl2 = owned_src.slice(2, 5)
+	log!("slice={},{}", sl1.as_str(), sl2.as_str())
+
+	// 5. Drop tracking inside Vec::clear, VecDeque, and HashMap
+	{
+		let mut dv: Vec<Item> = Vec::new()
+		dv.push(Item{ id: 1 })
+		dv.push(Item{ id: 2 })
+		dv.clear()
+
+		let mut dd: VecDeque<Item> = VecDeque::new()
+		dd.push_back(Item{ id: 3 })
+		dd.push_front(Item{ id: 4 })
+
+		let mut dm: HashMap<i64, Item> = HashMap::new()
+		dm.insert(10, Item{ id: 5 })
+		let old_item = dm.insert(10, Item{ id: 6 })!!
+		let _ = old_item.id
+	}
+	log!("after_drops")
+"#,
+        &[
+            "vec_for=alpha,beta,gamma",
+            "vec_get0=alpha",
+            "vec_oob=true",
+            "vec_rem=alpha len=2 rem_first=beta!",
+            "vec_iter_ref_chars=10",
+            "vec_after_clear=0",
+            "dq=f0:a b0:g front:z back:f len:6",
+            "dq_cleared=true",
+            "hm1=prev:10 rm:42 has_bob:false alice:25 len:1",
+            "hm2=len:24 k17:v17 k99:true",
+            "hm_str=gather",
+            "slice=hello,cde",
+            "drop_item:1",
+            "drop_item:2",
+            "drop_item:5",
+            "drop_item:6",
+            "drop_item:4",
+            "drop_item:3",
+            "after_drops",
+        ],
+    );
+
+    assert_err_code(
+        "round27_option_local_ref_cannot_escape",
+        "fn bad() -> Option<&i64>:\n\tlet x = 5\n\treturn Option::Some(&x)\nfn main():\n\tlet _ = bad()\n",
+        "E0515",
+    );
+}
+
+#[test]
+fn round28_phase3_std_net() {
+    let sock_path = std::env::temp_dir().join(format!("gdrs_round28_unix_{}.sock", std::process::id()));
+    let sock_path_str = sock_path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+    let _ = std::fs::remove_file(&sock_path);
+
+    let src = format!(
+        r#"
+use std::net::{{TcpListener, TcpStream, UnixListener, UnixStream}}
+
+fn main():
+	// 1. TCP loopback client + server
+	let listener = TcpListener::bind("127.0.0.1", 0)!!
+	let port = listener.local_port()
+	let mut client = TcpStream::connect("127.0.0.1", port)!!
+	let mut server_conn = listener.accept()!!
+
+	client.write_str("GET /api\nbody")!!
+	client.shutdown_write()!!
+	let line1 = server_conn.read_line()!!
+	let rest = server_conn.read_to_end()!!
+	server_conn.write_bytes(&[b'O', b'K'])!!
+	server_conn.shutdown_write()!!
+	let resp = client.read_to_end()!!
+	log!("tcp={{}}|{{}}|{{}}", line1.trim().as_str(), rest.as_str(), resp.as_str())
+
+	// 2. Unix domain socket client + server
+	let u_listener = UnixListener::bind("{sock_path_str}")!!
+	let mut u_client = UnixStream::connect("{sock_path_str}")!!
+	let mut u_srv = u_listener.accept()!!
+
+	u_client.write_str("ping\n")!!
+	let u_msg = u_srv.read_line()!!
+	u_srv.write_str("pong")!!
+	u_srv.shutdown_write()!!
+	let u_reply = u_client.read_to_end()!!
+	log!("unix={{}}|{{}}", u_msg.trim().as_str(), u_reply.as_str())
+"#
+    );
+
+    assert_ok_output(
+        "round28_phase3_std_net_positive",
+        &src,
+        &[
+            "tcp=GET /api|body|OK",
+            "unix=ping|pong",
+        ],
+    );
+    let _ = std::fs::remove_file(&sock_path);
+}
+
+#[test]
+fn round28_float_to_int_cast() {
+    let src = r#"
+fn get_opt(flag: bool) -> Option<f64>:
+	if flag:
+		return Some(42.5)
+	return None
+
+fn main():
+	let a: f64 = 42.0
+	let b: f64 = -7.9
+	let c: f32 = 12.75 as f32
+	let opt = get_opt(true)
+	log!("casts={}|{}|{}|{}|{}", a as i64, b as i64, c as i32, a as u8, opt!! as i64)
+"#;
+    assert_ok_output("round28_float_to_int_cast", src, &["casts=42|-7|12|42|42"]);
+}
+

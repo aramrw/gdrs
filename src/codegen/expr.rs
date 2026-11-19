@@ -177,7 +177,7 @@ pub fn compile_expr<M: Module>(
 
         TypedExpr::Cast(inner_expr, target_ty, _) => {
             let val = compile_expr(builder, inner_expr, cg, module);
-            coerce_typed_val(builder, val, &inner_expr.ty(), cranelift_type_of(target_ty))
+            cast_typed_val(builder, val, &inner_expr.ty(), target_ty)
         }
 
         TypedExpr::Return(opt_expr, _) => {
@@ -588,4 +588,33 @@ pub(crate) fn coerce_typed_val(
         return builder.ins().fcvt_from_sint(target_ty, wide);
     }
     coerce_val(builder, val, target_ty)
+}
+
+/// Explicit `as` cast coercion. Converts floats to signed/unsigned integers with
+/// `fcvt_to_sint`/`fcvt_to_uint`, keeping `coerce_typed_val`'s `bitcast` behavior
+/// intact for erased enum/generic `i64` storage slots.
+fn cast_typed_val(
+    builder: &mut cranelift_frontend::FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    src_ty: &Type,
+    dst_ty: &Type,
+) -> cranelift_codegen::ir::Value {
+    let val_ty = builder.func.dfg.value_type(val);
+    let cl_target = cranelift_type_of(dst_ty);
+    if matches!(val_ty, types::F32 | types::F64)
+        && (dst_ty.is_signed_integer() || dst_ty.is_unsigned_integer())
+    {
+        let wide_target = if matches!(cl_target, types::I8 | types::I16) {
+            types::I64
+        } else {
+            cl_target
+        };
+        let int_val = if dst_ty.is_unsigned_integer() {
+            builder.ins().fcvt_to_uint(wide_target, val)
+        } else {
+            builder.ins().fcvt_to_sint(wide_target, val)
+        };
+        return coerce_int_width(builder, int_val, cl_target, dst_ty.is_signed_integer()).unwrap();
+    }
+    coerce_typed_val(builder, val, src_ty, cl_target)
 }

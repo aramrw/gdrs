@@ -8,12 +8,15 @@ extern "C":
 	pub fn realloc(ptr: *void, size: i64) -> *void
 	pub fn free(ptr: *void)
 	pub fn memcpy(dest: *void, src: *void, count: i64) -> *void
+	pub fn memmove(dest: *void, src: *void, count: i64) -> *void
 	pub fn memset(ptr: *void, val: i32, size: i64) -> *void
 	pub fn strlen(s: str) -> i64
 	pub fn strdup(s: str) -> *void
 	pub fn strcmp(s1: str, s2: str) -> i32
 	pub fn strncmp(s1: str, s2: str, n: i64) -> i32
 	pub fn strcpy(dest: *void, src: str) -> *void
+	pub fn strstr(haystack: str, needle: str) -> *u8
+	pub fn strtod(nptr: str, endptr: *i64) -> f64
 	pub fn getenv(name: str) -> *void
 	pub fn setenv(name: str, value: str, overwrite: i32) -> i32
 	pub fn unsetenv(name: str) -> i32

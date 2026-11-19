@@ -15,8 +15,21 @@ pub(crate) fn is_borrowed_view_call(fn_name: &str) -> bool {
         || bare == "std_string_String_as_str"
         || bare.ends_with("_String_as_str")
         || bare == "std_vec_Vec_iter"
+        || bare == "std_vec_Vec_iter_ref"
         || bare == "std_vec_Vec_into_iter"
-        || (bare.starts_with("std_vec_Vec") && (bare.ends_with("_iter") || bare.ends_with("_into_iter")))
+        || (bare.starts_with("std_vec_Vec")
+            && (bare.ends_with("_iter")
+                || bare.ends_with("_iter_ref")
+                || bare.ends_with("_into_iter")
+                || bare.ends_with("_get")
+                || bare.ends_with("_get_mut")))
+        || (bare.starts_with("std_collections_")
+            && (bare.ends_with("_get")
+                || bare.ends_with("_get_mut")
+                || bare.ends_with("_front")
+                || bare.ends_with("_back")
+                || bare.ends_with("_slot_key")
+                || bare.ends_with("_slot_val")))
 }
 
 pub(crate) fn borrowed_view_root<'a>(
@@ -38,6 +51,7 @@ pub fn type_may_borrow(ty: &Type) -> bool {
         Type::Ref(_) | Type::MutRef(_) | Type::Str | Type::Slice(_) => true,
         Type::Obj(name) | Type::Enum(name) => {
             name.contains("VecIter")
+                || name.contains("VecRefIter")
                 || crate::sanal::mono::lookup_mangled(name)
                     .is_some_and(|(_, args)| args.iter().any(type_may_borrow))
         }
@@ -54,6 +68,15 @@ pub fn type_may_borrow(ty: &Type) -> bool {
 pub fn check_return_ref_lifetime(
     scopes: &ScopeStack,
     expr: &TypedExpr,
+    errors: &mut Vec<SemanticError>,
+) {
+    check_return_ref_lifetime_inner(scopes, expr, &[], errors);
+}
+
+fn check_return_ref_lifetime_inner(
+    scopes: &ScopeStack,
+    expr: &TypedExpr,
+    caller_bindings: &[String],
     errors: &mut Vec<SemanticError>,
 ) {
     match expr {
@@ -74,7 +97,8 @@ pub fn check_return_ref_lifetime(
                 Some((root, root_ty)) => {
                     let valid_caller_origin =
                         matches!(root_ty, Type::Ref(_) | Type::MutRef(_) | Type::Slice(_))
-                            && scopes.lookup(root).is_some_and(|info| info.from_caller);
+                            && (scopes.lookup(root).is_some_and(|info| info.from_caller)
+                                || caller_bindings.iter().any(|b| b == root));
                     if !valid_caller_origin {
                         errors.push(SemanticError {
                             code: "E0515",
@@ -91,13 +115,15 @@ pub fn check_return_ref_lifetime(
         }
         TypedExpr::Ident(name, ty, span) => {
             let borrowed_str_or_iter = matches!(ty, Type::Str | Type::Slice(_))
-                || matches!(ty, Type::Obj(s) if s.contains("VecIter"));
+                || matches!(ty, Type::Obj(s) if s.contains("VecIter") || s.contains("VecRefIter"));
             let valid_caller_borrow = scopes
                 .borrow_target(name)
                 .is_some_and(|root| scopes.lookup(&root).is_some_and(|info| info.from_caller));
+            let is_caller_origin = scopes.lookup(name).is_some_and(|info| info.from_caller)
+                || caller_bindings.iter().any(|b| b == name);
             if (matches!(ty, Type::Ref(_) | Type::MutRef(_))
                 || (borrowed_str_or_iter && scopes.borrow_target(name).is_some() && !valid_caller_borrow))
-                && !scopes.lookup(name).is_some_and(|info| info.from_caller)
+                && !is_caller_origin
             {
                 errors.push(SemanticError {
                     code: "E0515",
@@ -114,37 +140,54 @@ pub fn check_return_ref_lifetime(
         }
         TypedExpr::TupleInit(elems, _, _) | TypedExpr::ArrayInit(elems, _, _) => {
             for elem in elems {
-                check_return_ref_lifetime(scopes, elem, errors);
+                check_return_ref_lifetime_inner(scopes, elem, caller_bindings, errors);
             }
         }
         TypedExpr::ObjInit(_, fields, _, _) => {
             for (_, val) in fields {
-                check_return_ref_lifetime(scopes, val, errors);
+                check_return_ref_lifetime_inner(scopes, val, caller_bindings, errors);
             }
         }
         TypedExpr::EnumConstruct(_, _, _, args, _, _) => {
             for arg in args {
-                check_return_ref_lifetime(scopes, arg, errors);
+                check_return_ref_lifetime_inner(scopes, arg, caller_bindings, errors);
             }
         }
         TypedExpr::Block(stmts, _, _) | TypedExpr::Unsafe(stmts, _, _) => {
             if let Some(last) = stmts.last() {
-                check_return_ref_lifetime(scopes, last, errors);
+                check_return_ref_lifetime_inner(scopes, last, caller_bindings, errors);
             }
         }
         TypedExpr::IfElse(_, then_b, else_b, _, _) => {
             if !is_diverging_expr(then_b) {
-                check_return_ref_lifetime(scopes, then_b, errors);
+                check_return_ref_lifetime_inner(scopes, then_b, caller_bindings, errors);
             }
             if !is_diverging_expr(else_b) {
-                check_return_ref_lifetime(scopes, else_b, errors);
+                check_return_ref_lifetime_inner(scopes, else_b, caller_bindings, errors);
             }
         }
-        TypedExpr::Match(_, arms, _, _) => {
+        TypedExpr::Match(target, arms, _, _) => {
+            let target_from_caller = extract_root_var(target).is_some_and(|root| {
+                scopes.lookup(root).is_some_and(|i| i.from_caller)
+                    || caller_bindings.iter().any(|b| b == root)
+                    || scopes
+                        .borrow_target(root)
+                        .is_some_and(|bt| scopes.lookup(&bt).is_some_and(|i| i.from_caller))
+            });
             for arm in arms {
                 if !crate::sanal::compat::definitely_returns(&arm.body) {
                     if let Some(last) = arm.body.last() {
-                        check_return_ref_lifetime(scopes, last, errors);
+                        if target_from_caller && !arm.bindings.is_empty() {
+                            let mut next_bindings = caller_bindings.to_vec();
+                            for (b_name, _) in &arm.bindings {
+                                if b_name != "_" {
+                                    next_bindings.push(b_name.clone());
+                                }
+                            }
+                            check_return_ref_lifetime_inner(scopes, last, &next_bindings, errors);
+                        } else {
+                            check_return_ref_lifetime_inner(scopes, last, caller_bindings, errors);
+                        }
                     }
                 }
             }
@@ -165,7 +208,8 @@ pub fn check_return_ref_lifetime(
                             .lookup(root)
                             .is_some_and(|info| {
                                 matches!(info.ty, Type::Ref(_) | Type::MutRef(_)) && info.from_caller
-                            });
+                            })
+                            || caller_bindings.iter().any(|b| b == root);
                         if !valid_caller_origin {
                             errors.push(SemanticError {
                                 code: "E0515",
@@ -184,7 +228,7 @@ pub fn check_return_ref_lifetime(
             } else {
                 for arg in args {
                     if matches!(arg.ty(), Type::Ref(_) | Type::MutRef(_)) {
-                        check_return_ref_lifetime(scopes, arg, errors);
+                        check_return_ref_lifetime_inner(scopes, arg, caller_bindings, errors);
                     }
                 }
             }
@@ -238,7 +282,7 @@ pub fn check_block_escape_lifetime(
         TypedExpr::Ident(name, ty, span) => {
             let may_hold_borrow =
                 matches!(ty, Type::Ref(_) | Type::MutRef(_) | Type::Str | Type::Slice(_))
-                    || matches!(ty, Type::Obj(s) if s.contains("VecIter"));
+                    || matches!(ty, Type::Obj(s) if s.contains("VecIter") || s.contains("VecRefIter"));
             if may_hold_borrow {
                 if let Some(target) = scopes.borrow_target(name) {
                     if scopes.current_scope_contains(&target) {

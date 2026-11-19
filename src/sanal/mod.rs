@@ -1293,7 +1293,10 @@ pub fn check_semantics(
                                     let resolved = resolve_type(rp.ty, &enum_names, impl_block.span.clone(), &mut errors);
                                     substitute_self_type(resolved, target_ty)
                                 };
-                                let ip_ty = resolve_type(ip.ty, &enum_names, ip.span.clone(), &mut errors);
+                                let ip_ty = substitute_self_type(
+                                    resolve_type(ip.ty, &enum_names, ip.span.clone(), &mut errors),
+                                    target_ty,
+                                );
                                 if !compat::is_type_compatible(&rp_ty, &ip_ty) {
                                     errors.push(SemanticError {
                                         code: "E0053",
@@ -1312,9 +1315,15 @@ pub fn check_semantics(
                         let req_ret = if req_m.return_type == Type::Unit && req_m.name != "drop" {
                             Type::Unit
                         } else {
-                            resolve_type(req_m.return_type, &enum_names, impl_block.span.clone(), &mut errors)
+                            substitute_self_type(
+                                resolve_type(req_m.return_type, &enum_names, impl_block.span.clone(), &mut errors),
+                                target_ty,
+                            )
                         };
-                        let imp_ret = resolve_type(imp.return_type, &enum_names, impl_block.span.clone(), &mut errors);
+                        let imp_ret = substitute_self_type(
+                            resolve_type(imp.return_type, &enum_names, impl_block.span.clone(), &mut errors),
+                            target_ty,
+                        );
                         let ret_ok = (req_m.return_type == Type::Unit && imp_ret == target_ty)
                             || compat::is_type_compatible(&req_ret, &imp_ret);
                         if !ret_ok {
@@ -1429,6 +1438,7 @@ pub fn check_semantics(
                 where_clause: func.where_clause.clone(),
                 body: Vec::new(),
                 is_track_caller: func.is_track_caller,
+                is_std: false,
             });
             continue;
         }
@@ -1453,7 +1463,7 @@ pub fn check_semantics(
         );
         for param in &func.params {
             let res_ty = param.ty;
-            let from_caller = matches!(res_ty, Type::Ref(_) | Type::MutRef(_) | Type::Slice(_));
+            let from_caller = control_flow::lifetimes::type_may_borrow(&res_ty);
             if param.name == "self" && !from_caller && fn_non_consuming_self {
                 scope_stack.declare_borrowed_self(param.name.clone(), param.is_mutable, res_ty);
             } else {
@@ -1545,6 +1555,7 @@ pub fn check_semantics(
             where_clause: func.where_clause.clone(),
             body: typed_body,
             is_track_caller: func.is_track_caller,
+            is_std: func.module_path.first().map(|s| s.as_str()) == Some("std"),
         });
     }
 

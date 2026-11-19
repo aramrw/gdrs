@@ -775,8 +775,20 @@ pub fn type_check_call<'a>(
                     && !crate::sanal::compat::type_contains_generic(&f.return_type)
             }));
 
+    let effective_call_name = if is_method_syntax
+        && raw_name == "into_iter"
+        && matches!(typed_args.first(), Some(TypedExpr::Ref(inner, false, _, _)) if {
+            let inner_ty = type_ctx.infer.borrow_mut().resolve(inner.ty());
+            matches!(inner_ty, Type::Vec(_)) || matches!(inner_ty, Type::Obj(s) if s.contains("Vec"))
+        })
+    {
+        "iter_ref".to_string()
+    } else {
+        name.clone()
+    };
+
     // 1. Check if first argument is a receiver target for method lookup `target.method(...)`
-    if !is_direct_concrete_fn && !typed_args.is_empty() {
+    if is_method_syntax && !is_direct_concrete_fn && !typed_args.is_empty() {
         let mut target_ty = type_ctx.infer.borrow_mut().resolve(typed_args[0].ty());
         while let Type::Ref(inner)
         | Type::MutRef(inner)
@@ -788,11 +800,18 @@ pub fn type_check_call<'a>(
         }
         let type_name = match &target_ty {
             Type::Obj(s) | Type::Enum(s) => Some(s.to_string()),
+            Type::Str => Some("str".to_string()),
+            Type::Int => Some("i64".to_string()),
+            Type::I32 => Some("i32".to_string()),
+            Type::U64 => Some("u64".to_string()),
+            Type::U8 => Some("u8".to_string()),
+            Type::Float => Some("f64".to_string()),
+            Type::Bool => Some("bool".to_string()),
             _ => None,
         };
 
         if let Some(tn) = type_name {
-            let mangled = format!("{tn}_{name}");
+            let mangled = format!("{tn}_{effective_call_name}");
             if let Some(target_func) = type_ctx.get_fn(&mangled) {
                 resolved_name = target_func.name;
             } else if type_ctx.contains_struct(&tn) {
@@ -934,9 +953,14 @@ pub fn type_check_call<'a>(
     }
 
     let (mut resolved_name, mut deferred_target_func) = resolve_call_target(
-        raw_name,
-        &name,
-        resolved_name,
+        if effective_call_name != name { &effective_call_name } else { raw_name },
+        &effective_call_name,
+        if effective_call_name != name && resolved_name == name {
+            effective_call_name.clone()
+        } else {
+            resolved_name
+        },
+        is_method_syntax,
         is_direct_concrete_fn,
         is_generic_fn,
         &typed_args,
@@ -945,9 +969,10 @@ pub fn type_check_call<'a>(
     );
 
     if is_method_syntax && resolved_name == name && deferred_target_func.is_none() && !typed_args.is_empty() {
+        let recv_ty = type_ctx.infer.borrow_mut().resolve(typed_args[0].ty());
         let has_callable_field = crate::sanal::objects::construction::lookup_struct_layout_for_type(
             type_ctx,
-            type_ctx.infer.borrow_mut().resolve(typed_args[0].ty()),
+            recv_ty,
         )
         .is_some_and(|(_, layout)| layout.field_offsets.contains_key(raw_name));
         if !has_callable_field {
@@ -970,6 +995,7 @@ pub fn type_check_call<'a>(
                     raw_name,
                     &name,
                     name.clone(),
+                    is_method_syntax,
                     is_direct_concrete_fn,
                     is_generic_fn,
                     &probe_args,
@@ -1218,7 +1244,47 @@ pub fn type_check_call<'a>(
             target_func.return_type
         };
 
-        if (resolved_name == "std_vec_Vec_into_iter"
+        if (resolved_name == "std_vec_Vec_iter_ref"
+            || (resolved_name.starts_with("std_vec_Vec") && resolved_name.ends_with("_iter_ref")))
+            && !typed_args.is_empty()
+        {
+            fn vec_elem_from_ref_ty(t: Type) -> Option<Type> {
+                match t {
+                    Type::Vec(e) | Type::Slice(e) | Type::Array(e, _) => Some(*e),
+                    Type::Obj(s) => crate::sanal::mono::lookup_mangled(s)
+                        .and_then(|(_, args)| args.first().copied()),
+                    Type::Ref(inner)
+                    | Type::MutRef(inner)
+                    | Type::Box(inner)
+                    | Type::Rc(inner)
+                    | Type::Arc(inner) => vec_elem_from_ref_ty(*inner),
+                    _ => None,
+                }
+            }
+            if let Some(raw_elem_ty) = vec_elem_from_ref_ty(typed_args[0].ty()) {
+                let elem_ty = type_ctx.infer.borrow_mut().resolve(raw_elem_ty);
+                if let Some(mangled_iter) = crate::sanal::mono::monomorphize_struct(
+                    type_ctx.mono,
+                    "std_vec_VecRefIter",
+                    &[elem_ty],
+                    type_ctx.struct_map,
+                    type_ctx.enum_map,
+                    type_ctx.fn_map,
+                    type_ctx.worklist,
+                ) {
+                    let ref_elem_ty = Type::Ref(crate::ast::intern_type(elem_ty));
+                    let _ = crate::sanal::mono::monomorphize_enum(
+                        type_ctx.mono,
+                        "std_core_Option",
+                        &[ref_elem_ty],
+                        type_ctx.enum_map,
+                        type_ctx.fn_map,
+                        type_ctx.worklist,
+                    );
+                    ret_ty = Type::Obj(crate::ast::intern_str(&mangled_iter));
+                }
+            }
+        } else if (resolved_name == "std_vec_Vec_into_iter"
             || resolved_name == "std_vec_Vec_iter"
             || (resolved_name.starts_with("std_vec_Vec")
                 && (resolved_name.ends_with("_into_iter") || resolved_name.ends_with("_iter"))))
@@ -1249,7 +1315,7 @@ pub fn type_check_call<'a>(
                         label: "Would copy non-Copy element out of borrowed Vec".to_string(),
                         secondary_label: None,
                         help: Some(
-                            "Iterate by index (`for i in 0..v.len():`) and borrow elements (`&v[i]`) instead"
+                            "Use `for item in &v:` or `v.iter_ref()` to borrow elements instead"
                                 .to_string(),
                         ),
                         span: span.clone(),

@@ -2,7 +2,7 @@
 use std::core::{Result, Option, Drop}
 use std::error::Error
 use std::fmt::Display
-use std::libc::{malloc, free, memset}
+use std::libc::{malloc, free, memset, strlen}
 use std::vec::Vec
 
 use std::string::String
@@ -18,12 +18,16 @@ pub enum IoError:
 	AllocationFailed
 	#[err("Failed to read file contents")]
 	ReadFailed
+	#[err("Failed to write file contents")]
+	WriteFailed
 
 extern "C":
 	fn fopen(filename: str, mode: str) -> i64
 	fn fseek(stream: i64, offset: i64, whence: i32) -> i32
 	fn ftell(stream: i64) -> i64
 	fn fread(ptr: *void, size: i64, nmemb: i64, stream: i64) -> i64
+	fn fwrite(ptr: *void, size: i64, nmemb: i64, stream: i64) -> i64
+	fn fflush(stream: i64) -> i32
 	fn fclose(stream: i64) -> i32
 	fn gdrs_fs_read_dir(path: str, out_vec: *void) -> i64
 
@@ -59,6 +63,21 @@ pub fn read_to_string(path: str) -> Result<String, IoError>:
 		Result::Ok(f) => f.read_to_string()
 		Result::Err(e) => Err(e)
 
+pub fn write(path: str, content: str) -> Result<(), IoError>:
+	let mut f = File::create(path)?
+	f.write_str(content)?
+	return Ok(())
+
+pub fn write_bytes(path: str, data: &[u8]) -> Result<(), IoError>:
+	let mut f = File::create(path)?
+	f.write_bytes(data)?
+	return Ok(())
+
+pub fn append(path: str, content: str) -> Result<(), IoError>:
+	let mut f = File::open_append(path)?
+	f.write_str(content)?
+	return Ok(())
+
 pub obj File:
 	handle: i64
 
@@ -70,13 +89,53 @@ impl Drop for File:
 				self.handle = 0
 
 impl File:
-	pub fn open(path: str) -> Result<File, IoError>:
+	fn open_with_mode(path: str, mode: str) -> Result<File, IoError>:
 		unsafe:
-			let ptr = fopen(path, "r")
+			let ptr = fopen(path, mode)
 			if ptr == 0:
 				return Err(IoError::OpenFailed(String::from(path)))
-			
 			return Ok(File{handle: ptr})
+
+	pub fn open(path: str) -> Result<File, IoError>:
+		return File::open_with_mode(path, "r")
+
+	pub fn create(path: str) -> Result<File, IoError>:
+		return File::open_with_mode(path, "wb")
+
+	pub fn open_append(path: str) -> Result<File, IoError>:
+		return File::open_with_mode(path, "ab")
+
+	pub fn write_str(&mut self, content: str) -> Result<(), IoError>:
+		unsafe:
+			if self.handle == 0:
+				return Err(IoError::WriteFailed)
+			let n = strlen(content)
+			if n == 0:
+				return Ok(())
+			let written = fwrite(content as *void, 1, n, self.handle)
+			if written < n:
+				return Err(IoError::WriteFailed)
+			return Ok(())
+
+	pub fn write_bytes(&mut self, data: &[u8]) -> Result<(), IoError>:
+		unsafe:
+			if self.handle == 0:
+				return Err(IoError::WriteFailed)
+			let n = data.len()
+			if n == 0:
+				return Ok(())
+			let written = fwrite((&data[0]) as *void, 1, n, self.handle)
+			if written < n:
+				return Err(IoError::WriteFailed)
+			return Ok(())
+
+	pub fn flush(&mut self) -> Result<(), IoError>:
+		unsafe:
+			if self.handle == 0:
+				return Err(IoError::WriteFailed)
+			if fflush(self.handle) != 0:
+				return Err(IoError::WriteFailed)
+			return Ok(())
 
 	pub fn read_to_string(mut self) -> Result<String, IoError>:
 		unsafe:

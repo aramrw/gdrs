@@ -201,10 +201,13 @@ fn load_std_prelude() -> Result<(Program, SourceMap, HashSet<PathBuf>), String> 
         ("rc.gdrs", vec!["std".to_string(), "rc".to_string()]),
         ("sync.gdrs", vec!["std".to_string(), "sync".to_string()]),
         ("string.gdrs", vec!["std".to_string(), "string".to_string()]),
+        ("collections.gdrs", vec!["std".to_string(), "collections".to_string()]),
         ("fmt.gdrs", vec!["std".to_string(), "fmt".to_string()]),
         ("time.gdrs", vec!["std".to_string(), "time".to_string()]),
         ("env.gdrs", vec!["std".to_string(), "env".to_string()]),
         ("fs.gdrs", vec!["std".to_string(), "fs".to_string()]),
+        ("net.gdrs", vec!["std".to_string(), "net".to_string()]),
+        ("process.gdrs", vec!["std".to_string(), "process".to_string()]),
         ("math.gdrs", vec!["std".to_string(), "math".to_string()]),
     ];
     for (file_name, prefix) in std_files {

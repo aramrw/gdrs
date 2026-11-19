@@ -323,15 +323,23 @@ pub fn stmt_parser<'a>(
                     .map(|opt| opt.unwrap_or_default()),
             ));
 
-        let if_stmt = recursive(|if_s| {
-            let else_if_branch = just(Token::Else).ignore_then(if_s);
-            let else_block_branch = just(Token::Else)
+        let if_tail = recursive(|if_tail| {
+            let else_if_branch = just(Token::Newline)
+                .repeated()
+                .ignore_then(
+                    just(Token::Elif)
+                        .to(())
+                        .or(just(Token::Else).ignore_then(just(Token::If)).to(())),
+                )
+                .ignore_then(if_tail);
+            let else_block_branch = just(Token::Newline)
+                .repeated()
+                .ignore_then(just(Token::Else))
                 .ignore_then(just(Token::Colon))
                 .ignore_then(just(Token::Newline).or_not())
                 .ignore_then(block.clone());
 
-            let if_let_branch = just(Token::If)
-                .ignore_then(just(Token::Let))
+            let if_let_branch = just(Token::Let)
                 .ignore_then(arm_pattern.clone())
                 .then_ignore(just(Token::Assign))
                 .then(math.clone())
@@ -369,8 +377,8 @@ pub fn stmt_parser<'a>(
                     )
                 });
 
-            let if_cond_branch = just(Token::If)
-                .ignore_then(math.clone())
+            let if_cond_branch = math
+                .clone()
                 .then_ignore(just(Token::Colon))
                 .then_ignore(just(Token::Newline).or_not())
                 .then(block.clone())
@@ -383,8 +391,9 @@ pub fn stmt_parser<'a>(
                 });
 
             if_let_branch.or(if_cond_branch)
-        })
-        .boxed();
+        });
+
+        let if_stmt = just(Token::If).ignore_then(if_tail).boxed();
 
         let return_stmt = just(Token::Return)
             .ignore_then(math.clone().or_not())
@@ -417,16 +426,6 @@ pub fn stmt_parser<'a>(
             });
 
         let let_else_stmt = crate::parser::math::let_else_stmt_parser(math.clone(), let_else_body);
-
-        let macro_call = select! { Token::MacroIdent(name) => name }
-            .then(
-                math.clone()
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .delimited_by(just(Token::LParen), just(Token::RParen)),
-            )
-            .map_with_span(|(name, args), span| Expr::MacroCall(name, args, span))
-            .then_ignore(just(Token::Newline).or_not());
 
         let unsafe_stmt = just(Token::Unsafe)
             .ignore_then(just(Token::Colon))
@@ -518,7 +517,6 @@ pub fn stmt_parser<'a>(
                     .or(loop_stmt)
                     .or(while_stmt)
                     .or(for_stmt)
-                    .or(macro_call)
                     .or(math_stmt)
                     .or(block),
             )

@@ -1,0 +1,89 @@
+// std/process.gdrs - Subprocess execution and stdout/stderr capture
+use std::core::{Result, Drop}
+use std::fs::IoError
+use std::libc::{free, strdup}
+use std::string::String
+use std::vec::Vec
+
+extern "C":
+	fn intrinsic_process_run(program: str, argv_ptrs: *i64, argc: i64, capture: i64, out_stdout_ptr: *i64, out_stdout_len: *i64, out_stderr_ptr: *i64, out_stderr_len: *i64) -> i32
+
+pub obj Output:
+	pub status: i32
+	pub stdout: String
+	pub stderr: String
+
+impl Output:
+	pub fn success(&self) -> bool:
+		return self.status == (0 as i32)
+
+pub obj Command:
+	program: String
+	args: Vec<i64>
+
+impl Drop for Command:
+	fn drop(mut self):
+		unsafe:
+			let mut i: i64 = 0
+			while i < self.args.len():
+				let p = self.args[i]
+				if p != 0:
+					free(p as *void)
+				i = i + 1
+
+impl Command:
+	pub fn new(program: str) -> Command:
+		let arg_ptrs: Vec<i64> = Vec::new()
+		return Command{ program: String::from(program), args: arg_ptrs }
+
+	pub fn push_arg(&mut self, a: str):
+		unsafe:
+			let p = strdup(a) as i64
+			self.args.push(p)
+
+	pub fn arg(mut self, a: str) -> Command:
+		self.push_arg(a)
+		return self
+
+	pub fn args(mut self, list: &[str]) -> Command:
+		let mut i: i64 = 0
+		while i < list.len():
+			self.push_arg(list[i])
+			i = i + 1
+		return self
+
+	pub fn status(&self) -> Result<i32, IoError>:
+		unsafe:
+			let mut dummy: i64 = 0
+			let code = intrinsic_process_run(self.program.as_str(), self.args.as_ptr(), self.args.len(), 0, (&mut dummy) as *i64, (&mut dummy) as *i64, (&mut dummy) as *i64, (&mut dummy) as *i64)
+			if code < (0 as i32):
+				return Err(IoError::OpenFailed(self.program.clone()))
+			return Ok(code)
+
+	pub fn output(&self) -> Result<Output, IoError>:
+		unsafe:
+			let mut out_ptr: i64 = 0
+			let mut out_len: i64 = 0
+			let mut err_ptr: i64 = 0
+			let mut err_len: i64 = 0
+			let code = intrinsic_process_run(self.program.as_str(), self.args.as_ptr(), self.args.len(), 1, (&mut out_ptr) as *i64, (&mut out_len) as *i64, (&mut err_ptr) as *i64, (&mut err_len) as *i64)
+			if code < (0 as i32):
+				if out_ptr != 0:
+					free(out_ptr as *void)
+				if err_ptr != 0:
+					free(err_ptr as *void)
+				return Err(IoError::OpenFailed(self.program.clone()))
+			let out_cap = if out_len > 0: out_len + 1 else: 0
+			let err_cap = if err_len > 0: err_len + 1 else: 0
+			let stdout_str = String::from_raw_parts(out_ptr as *i64, out_len, out_cap)
+			let stderr_str = String::from_raw_parts(err_ptr as *i64, err_len, err_cap)
+			return Ok(Output{ status: code, stdout: stdout_str, stderr: stderr_str })
+
+	pub fn spawn(program: str) -> i32:
+		match Command::new(program).status():
+			Result::Ok(code) =>
+				if code == (127 as i32):
+					return -1 as i32
+				return code
+			Result::Err(_) =>
+				return -1 as i32

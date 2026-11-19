@@ -1,7 +1,7 @@
 // std/vec.gdrs - Heap allocated Vec collection using libc
-use std::libc::{malloc, realloc, free}
+use std::libc::{malloc, realloc, free, memmove}
 use std::core::{Option, Drop}
-use std::mem::size_of
+use std::mem::{size_of, drop}
 use std::iter::{Map, Filter, FilterMap}
 
 pub obj Vec:
@@ -10,6 +10,11 @@ pub obj Vec:
 	cap: i64
 
 pub obj VecIter:
+	vec_ptr: *u8
+	idx: i64
+	len: i64
+
+pub obj VecRefIter:
 	vec_ptr: *u8
 	idx: i64
 	len: i64
@@ -113,11 +118,69 @@ impl Vec:
 	pub fn is_empty(&self) -> bool:
 		return self.len == 0
 
+	pub fn get(&self, idx: i64) -> Option<&$T>:
+		if idx < 0 || idx >= self.len:
+			return Option::None
+		unsafe:
+			let slot = (self.ptr as *$T) + idx
+			return Option::Some(slot as &$T)
+
+	pub fn get_mut(&mut self, idx: i64) -> Option<&mut $T>:
+		if idx < 0 || idx >= self.len:
+			return Option::None
+		unsafe:
+			let slot = (self.ptr as *$T) + idx
+			return Option::Some(slot as &mut $T)
+
+	pub fn remove(&mut self, idx: i64) -> Option<$T>:
+		if idx < 0 || idx >= self.len:
+			return Option::None
+		unsafe:
+			let elem_size = size_of::<$T>()
+			let target_slot = (self.ptr as *$T) + idx
+			let removed = *target_slot
+			let tail_count = self.len - idx - 1
+			if tail_count > 0 && elem_size > 0:
+				let base = self.ptr as i64
+				let dst = (base + idx * elem_size) as *void
+				let src = (base + (idx + 1) * elem_size) as *void
+				memmove(dst, src, tail_count * elem_size)
+			self.len = self.len - 1
+			return Option::Some(removed)
+
+	pub fn clear(&mut self):
+		unsafe:
+			let mut i: i64 = 0
+			while i < self.len:
+				let slot = (self.ptr as *$T) + i
+				drop(*slot)
+				i = i + 1
+		self.len = 0
+
 	pub fn into_iter(&self) -> VecIter:
 		return VecIter{ vec_ptr: self.ptr, idx: 0, len: self.len }
 
 	pub fn iter(&self) -> VecIter:
 		return VecIter{ vec_ptr: self.ptr, idx: 0, len: self.len }
+
+	pub fn iter_ref(&self) -> VecRefIter:
+		return VecRefIter{ vec_ptr: self.ptr, idx: 0, len: self.len }
+
+impl VecRefIter:
+	pub fn into_iter(self) -> VecRefIter:
+		return self
+
+	pub fn iter(self) -> VecRefIter:
+		return self
+
+	pub fn next(&mut self) -> Option<&$T>:
+		if self.idx < self.len:
+			let idx = self.idx
+			self.idx = idx + 1
+			unsafe:
+				let slot = (self.vec_ptr as *$T) + idx
+				return Option::Some(slot as &$T)
+		return Option::None
 
 impl VecIter:
 	pub fn into_iter(self) -> VecIter:

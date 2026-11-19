@@ -13,6 +13,7 @@ pub fn resolve_call_target<'a>(
     raw_name: &str,
     name: &str,
     mut resolved_name: String,
+    is_method_syntax: bool,
     is_direct_concrete_fn: bool,
     is_generic_fn: bool,
     typed_args: &[TypedExpr],
@@ -22,7 +23,7 @@ pub fn resolve_call_target<'a>(
     let mut deferred_target_func: Option<FuncDecl> = None;
 
     if !is_direct_concrete_fn && (resolved_name == name || !type_ctx.contains_fn(&resolved_name) || is_generic_fn) {
-        let target_type = if !typed_args.is_empty() {
+        let target_type = if is_method_syntax && !typed_args.is_empty() {
             let mut t0 = type_ctx.infer.borrow_mut().resolve(typed_args[0].ty());
             while let Type::Ref(inner)
             | Type::MutRef(inner)
@@ -41,6 +42,13 @@ pub fn resolve_call_target<'a>(
                     Some("Vec".to_string())
                 }
                 Type::String => Some("String".to_string()),
+                Type::Str => Some("str".to_string()),
+                Type::Int => Some("i64".to_string()),
+                Type::I32 => Some("i32".to_string()),
+                Type::U64 => Some("u64".to_string()),
+                Type::U8 => Some("u8".to_string()),
+                Type::Float => Some("f64".to_string()),
+                Type::Bool => Some("bool".to_string()),
                 _ => None,
             }
         } else {
@@ -87,7 +95,9 @@ pub fn resolve_call_target<'a>(
         if base_struct.ends_with("_t") || base_struct.ends_with("_T") {
             base_struct = base_struct[..base_struct.len() - 2].to_string();
         }
-        if base_struct == "VecIter" || base_struct == "std_vec_VecIter" || base_struct.starts_with("std_vec_VecIter_") {
+        if base_struct == "VecRefIter" || base_struct == "std_vec_VecRefIter" || base_struct.starts_with("std_vec_VecRefIter_") {
+            base_struct = "std_vec_VecRefIter".to_string();
+        } else if base_struct == "VecIter" || base_struct == "std_vec_VecIter" || base_struct.starts_with("std_vec_VecIter_") {
             base_struct = "std_vec_VecIter".to_string();
         } else if base_struct == "Vec" || base_struct == "std_vec_Vec" || base_struct.starts_with("std_vec_Vec_") {
             base_struct = "std_vec_Vec".to_string();

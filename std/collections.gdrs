@@ -1,0 +1,431 @@
+// std/collections.gdrs - VecDeque<T> ring buffer and HashMap<K, V>
+use std::libc::{malloc, calloc, free, memcpy}
+use std::core::{Option, Drop, PartialEq, Hash}
+use std::mem::{size_of, drop}
+
+// ==========================================
+// 1. VecDeque<T>
+// ==========================================
+pub obj VecDeque:
+	ptr: *$T
+	head: i64
+	len: i64
+	cap: i64
+
+impl Drop for VecDeque:
+	fn drop(mut self):
+		self.clear()
+		unsafe:
+			if (self.ptr as u64) != 0:
+				free(self.ptr as *void)
+				self.ptr = 0 as *$T
+				self.head = 0
+				self.len = 0
+				self.cap = 0
+
+impl VecDeque:
+	pub fn new() -> VecDeque:
+		return VecDeque{ ptr: 0 as *$T, head: 0, len: 0, cap: 0 }
+
+	pub fn with_capacity(capacity: i64) -> VecDeque:
+		if capacity <= 0:
+			return VecDeque::new()
+		unsafe:
+			let elem_size = size_of::<$T>()
+			if elem_size == 0:
+				return VecDeque{ ptr: 0 as *$T, head: 0, len: 0, cap: capacity }
+			if capacity > (9223372036854775807 / elem_size):
+				return VecDeque::new()
+			let p = malloc(capacity * elem_size)
+			if (p as u64) == 0:
+				return VecDeque::new()
+			return VecDeque{ ptr: p as *$T, head: 0, len: 0, cap: capacity }
+
+	pub fn len(&self) -> i64:
+		return self.len
+
+	pub fn is_empty(&self) -> bool:
+		return self.len == 0
+
+	pub fn capacity(&self) -> i64:
+		return self.cap
+
+	fn phys_idx(&self, logical: i64) -> i64:
+		if self.cap == 0:
+			return 0
+		return (self.head + logical) % self.cap
+
+	fn grow(&mut self):
+		unsafe:
+			let elem_size = size_of::<$T>()
+			let mut new_cap = 8
+			if self.cap > 0:
+				if self.cap > (9223372036854775807 / 2):
+					return
+				new_cap = self.cap * 2
+			if elem_size == 0:
+				self.cap = new_cap
+				return
+			if new_cap > (9223372036854775807 / elem_size):
+				return
+			let new_buf = malloc(new_cap * elem_size)
+			if (new_buf as u64) == 0:
+				return
+			let new_base = new_buf as i64
+			let old_base = self.ptr as i64
+			let mut i: i64 = 0
+			while i < self.len:
+				let p_idx = self.phys_idx(i)
+				let dst = (new_base + i * elem_size) as *void
+				let src = (old_base + p_idx * elem_size) as *void
+				memcpy(dst, src, elem_size)
+				i = i + 1
+			if (self.ptr as u64) != 0:
+				free(self.ptr as *void)
+			self.ptr = new_buf as *$T
+			self.head = 0
+			self.cap = new_cap
+
+	pub fn push_back(&mut self, elem: $T):
+		if self.len >= self.cap:
+			self.grow()
+			if self.len >= self.cap:
+				return
+		let idx = self.phys_idx(self.len)
+		unsafe:
+			let elem_size = size_of::<$T>()
+			if elem_size > 0:
+				let slot = self.ptr + idx
+				*slot = elem
+			else:
+				drop(elem)
+		self.len = self.len + 1
+
+	pub fn push_front(&mut self, elem: $T):
+		if self.len >= self.cap:
+			self.grow()
+			if self.len >= self.cap:
+				return
+		let new_head = if self.head == 0: self.cap - 1 else: self.head - 1
+		self.head = new_head
+		unsafe:
+			let elem_size = size_of::<$T>()
+			if elem_size > 0:
+				let slot = self.ptr + self.head
+				*slot = elem
+			else:
+				drop(elem)
+		self.len = self.len + 1
+
+	pub fn pop_front(&mut self) -> Option<$T>:
+		if self.len == 0:
+			return Option::None
+		let idx = self.head
+		self.head = if self.head + 1 >= self.cap: 0 else: self.head + 1
+		self.len = self.len - 1
+		unsafe:
+			let slot = self.ptr + idx
+			return Option::Some(*slot)
+
+	pub fn pop_back(&mut self) -> Option<$T>:
+		if self.len == 0:
+			return Option::None
+		self.len = self.len - 1
+		let idx = self.phys_idx(self.len)
+		unsafe:
+			let slot = self.ptr + idx
+			return Option::Some(*slot)
+
+	pub fn get(&self, idx: i64) -> Option<&$T>:
+		if idx < 0 || idx >= self.len:
+			return Option::None
+		let p_idx = self.phys_idx(idx)
+		unsafe:
+			let slot = self.ptr + p_idx
+			return Option::Some(slot as &$T)
+
+	pub fn get_mut(&mut self, idx: i64) -> Option<&mut $T>:
+		if idx < 0 || idx >= self.len:
+			return Option::None
+		let p_idx = self.phys_idx(idx)
+		unsafe:
+			let slot = self.ptr + p_idx
+			return Option::Some(slot as &mut $T)
+
+	pub fn front(&self) -> Option<&$T>:
+		return self.get(0)
+
+	pub fn back(&self) -> Option<&$T>:
+		if self.len == 0:
+			return Option::None
+		return self.get(self.len - 1)
+
+	pub fn clear(&mut self):
+		unsafe:
+			let mut i: i64 = 0
+			while i < self.len:
+				let p_idx = self.phys_idx(i)
+				let slot = self.ptr + p_idx
+				drop(*slot)
+				i = i + 1
+		self.head = 0
+		self.len = 0
+
+// ==========================================
+// 2. HashMap<K, V>
+// ==========================================
+pub obj HashMap:
+	states: *u8
+	hashes: *u64
+	keys: *$K
+	vals: *$V
+	len: i64
+	tombstones: i64
+	cap: i64
+
+impl Drop for HashMap:
+	fn drop(mut self):
+		self.clear()
+		unsafe:
+			if (self.states as u64) != 0:
+				free(self.states as *void)
+			if (self.hashes as u64) != 0:
+				free(self.hashes as *void)
+			if (self.keys as u64) != 0:
+				free(self.keys as *void)
+			if (self.vals as u64) != 0:
+				free(self.vals as *void)
+			self.states = 0 as *u8
+			self.hashes = 0 as *u64
+			self.keys = 0 as *$K
+			self.vals = 0 as *$V
+			self.cap = 0
+
+impl HashMap:
+	pub fn new() -> HashMap:
+		return HashMap{
+			states: 0 as *u8,
+			hashes: 0 as *u64,
+			keys: 0 as *$K,
+			vals: 0 as *$V,
+			len: 0,
+			tombstones: 0,
+			cap: 0
+		}
+
+	pub fn with_capacity(capacity: i64) -> HashMap:
+		if capacity <= 0:
+			return HashMap::new()
+		let mut cap: i64 = 8
+		while cap * 3 < capacity * 4:
+			cap = cap * 2
+		unsafe:
+			let k_size = size_of::<$K>()
+			let v_size = size_of::<$V>()
+			let states = calloc(cap, 1) as *u8
+			let hashes = malloc(cap * 8) as *u64
+			let k_alloc = if k_size > 0: cap * k_size else: 1
+			let v_alloc = if v_size > 0: cap * v_size else: 1
+			let keys = malloc(k_alloc) as *$K
+			let vals = malloc(v_alloc) as *$V
+			if (states as u64) == 0 || (hashes as u64) == 0 || (keys as u64) == 0 || (vals as u64) == 0:
+				if (states as u64) != 0: free(states as *void)
+				if (hashes as u64) != 0: free(hashes as *void)
+				if (keys as u64) != 0: free(keys as *void)
+				if (vals as u64) != 0: free(vals as *void)
+				return HashMap::new()
+			return HashMap{
+				states: states,
+				hashes: hashes,
+				keys: keys,
+				vals: vals,
+				len: 0,
+				tombstones: 0,
+				cap: cap
+			}
+
+	pub fn len(&self) -> i64:
+		return self.len
+
+	pub fn is_empty(&self) -> bool:
+		return self.len == 0
+
+	pub fn slot_count(&self) -> i64:
+		return self.cap
+
+	pub fn slot_key(&self, slot: i64) -> Option<&$K>:
+		if slot < 0 || slot >= self.cap:
+			return Option::None
+		unsafe:
+			if *(self.states + slot) != (1 as u8):
+				return Option::None
+			return Option::Some((self.keys + slot) as &$K)
+
+	pub fn slot_val(&self, slot: i64) -> Option<&$V>:
+		if slot < 0 || slot >= self.cap:
+			return Option::None
+		unsafe:
+			if *(self.states + slot) != (1 as u8):
+				return Option::None
+			return Option::Some((self.vals + slot) as &$V)
+
+	fn rehash(&mut self, new_cap: i64):
+		unsafe:
+			let k_size = size_of::<$K>()
+			let v_size = size_of::<$V>()
+			let new_states = calloc(new_cap, 1) as *u8
+			let new_hashes = malloc(new_cap * 8) as *u64
+			let k_alloc = if k_size > 0: new_cap * k_size else: 1
+			let v_alloc = if v_size > 0: new_cap * v_size else: 1
+			let new_keys = malloc(k_alloc) as *$K
+			let new_vals = malloc(v_alloc) as *$V
+			if (new_states as u64) == 0 || (new_hashes as u64) == 0 || (new_keys as u64) == 0 || (new_vals as u64) == 0:
+				if (new_states as u64) != 0: free(new_states as *void)
+				if (new_hashes as u64) != 0: free(new_hashes as *void)
+				if (new_keys as u64) != 0: free(new_keys as *void)
+				if (new_vals as u64) != 0: free(new_vals as *void)
+				return
+
+			let mask = (new_cap - 1) as u64
+			let mut i: i64 = 0
+			while i < self.cap:
+				if *(self.states + i) == (1 as u8):
+					let h = *(self.hashes + i)
+					let mut dst = (h & mask) as i64
+					while *(new_states + dst) == (1 as u8):
+						dst = dst + 1
+						if dst >= new_cap:
+							dst = 0
+					*(new_states + dst) = 1 as u8
+					*(new_hashes + dst) = h
+					if k_size > 0:
+						let dst_k = ((new_keys as i64) + dst * k_size) as *void
+						let src_k = ((self.keys as i64) + i * k_size) as *void
+						memcpy(dst_k, src_k, k_size)
+					if v_size > 0:
+						let dst_v = ((new_vals as i64) + dst * v_size) as *void
+						let src_v = ((self.vals as i64) + i * v_size) as *void
+						memcpy(dst_v, src_v, v_size)
+				i = i + 1
+
+			if (self.states as u64) != 0: free(self.states as *void)
+			if (self.hashes as u64) != 0: free(self.hashes as *void)
+			if (self.keys as u64) != 0: free(self.keys as *void)
+			if (self.vals as u64) != 0: free(self.vals as *void)
+			self.states = new_states
+			self.hashes = new_hashes
+			self.keys = new_keys
+			self.vals = new_vals
+			self.tombstones = 0
+			self.cap = new_cap
+
+	fn find_slot(&self, key: &$K, h: u64) -> i64:
+		if self.cap == 0 || self.len == 0:
+			return -1
+		let mask = (self.cap - 1) as u64
+		let mut idx = (h & mask) as i64
+		let mut steps: i64 = 0
+		unsafe:
+			while steps < self.cap:
+				let st = *(self.states + idx)
+				if st == (0 as u8):
+					return -1
+				if st == (1 as u8) && *(self.hashes + idx) == h:
+					let slot_k = (self.keys + idx) as &$K
+					if slot_k.eq(key):
+						return idx
+				idx = idx + 1
+				if idx >= self.cap:
+					idx = 0
+				steps = steps + 1
+		return -1
+
+	pub fn insert(&mut self, key: $K, val: $V) -> Option<$V>:
+		if self.cap == 0:
+			self.rehash(8)
+		elif (self.len + self.tombstones + 1) * 4 >= self.cap * 3:
+			let next_cap = if self.len * 2 >= self.cap: self.cap * 2 else: self.cap
+			self.rehash(next_cap)
+		if self.cap == 0:
+			return Option::None
+
+		let h = key.hash()
+		let mask = (self.cap - 1) as u64
+		let mut idx = (h & mask) as i64
+		let mut first_tomb: i64 = -1
+		let mut steps: i64 = 0
+		unsafe:
+			while steps < self.cap:
+				let st = *(self.states + idx)
+				if st == (0 as u8):
+					let target = if first_tomb >= 0: first_tomb else: idx
+					if *(self.states + target) == (2 as u8):
+						self.tombstones = self.tombstones - 1
+					*(self.states + target) = 1 as u8
+					*(self.hashes + target) = h
+					*(self.keys + target) = key
+					*(self.vals + target) = val
+					self.len = self.len + 1
+					return Option::None
+				if st == (2 as u8):
+					if first_tomb < 0:
+						first_tomb = idx
+				elif *(self.hashes + idx) == h:
+					let slot_k = (self.keys + idx) as &$K
+					if slot_k.eq(&key):
+						let old_val = *(self.vals + idx)
+						*(self.vals + idx) = val
+						drop(key)
+						return Option::Some(old_val)
+				idx = idx + 1
+				if idx >= self.cap:
+					idx = 0
+				steps = steps + 1
+		return Option::None
+
+	pub fn get(&self, key: &$K) -> Option<&$V>:
+		let h = key.hash()
+		let idx = self.find_slot(key, h)
+		if idx < 0:
+			return Option::None
+		unsafe:
+			let slot_v = self.vals + idx
+			return Option::Some(slot_v as &$V)
+
+	pub fn get_mut(&mut self, key: &$K) -> Option<&mut $V>:
+		let h = key.hash()
+		let idx = self.find_slot(key, h)
+		if idx < 0:
+			return Option::None
+		unsafe:
+			let slot_v = self.vals + idx
+			return Option::Some(slot_v as &mut $V)
+
+	pub fn contains_key(&self, key: &$K) -> bool:
+		let h = key.hash()
+		return self.find_slot(key, h) >= 0
+
+	pub fn remove(&mut self, key: &$K) -> Option<$V>:
+		let h = key.hash()
+		let idx = self.find_slot(key, h)
+		if idx < 0:
+			return Option::None
+		unsafe:
+			*(self.states + idx) = 2 as u8
+			self.len = self.len - 1
+			self.tombstones = self.tombstones + 1
+			drop(*(self.keys + idx))
+			let old_val = *(self.vals + idx)
+			return Option::Some(old_val)
+
+	pub fn clear(&mut self):
+		unsafe:
+			let mut i: i64 = 0
+			while i < self.cap:
+				if *(self.states + i) == (1 as u8):
+					drop(*(self.keys + i))
+					drop(*(self.vals + i))
+				*(self.states + i) = 0 as u8
+				i = i + 1
+		self.len = 0
+		self.tombstones = 0

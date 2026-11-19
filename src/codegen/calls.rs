@@ -28,6 +28,62 @@ fn emit_malloc<M: Module>(builder: &mut FunctionBuilder, module: &mut M, bytes: 
     builder.inst_results(call_inst)[0]
 }
 
+pub(crate) fn emit_safe_strlen<M: Module>(
+    builder: &mut FunctionBuilder,
+    cstr_ptr: Value,
+    module: &mut M,
+) -> Value {
+    let is_null = builder.ins().icmp_imm(
+        cranelift_codegen::ir::condcodes::IntCC::Equal,
+        cstr_ptr,
+        0,
+    );
+    let empty_blk = builder.create_block();
+    let call_blk = builder.create_block();
+    let merge_blk = builder.create_block();
+    builder.append_block_param(merge_blk, types::I64);
+    builder.ins().brif(is_null, empty_blk, &[], call_blk, &[]);
+
+    builder.switch_to_block(empty_blk);
+    builder.seal_block(empty_blk);
+    let zero = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(merge_blk, &[zero]);
+
+    builder.switch_to_block(call_blk);
+    builder.seal_block(call_blk);
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I64));
+    let strlen_id = module
+        .declare_function("strlen", Linkage::Import, &sig)
+        .unwrap();
+    let local_strlen = module.declare_func_in_func(strlen_id, builder.func);
+    let inst = builder.ins().call(local_strlen, &[cstr_ptr]);
+    let len = builder.inst_results(inst)[0];
+    builder.ins().jump(merge_blk, &[len]);
+
+    builder.switch_to_block(merge_blk);
+    builder.seal_block(merge_blk);
+    builder.block_params(merge_blk)[0]
+}
+
+fn emit_string_obj_as_cstr<M: Module>(
+    builder: &mut FunctionBuilder,
+    string_struct_ptr: Value,
+    module: &mut M,
+) -> Value {
+    let raw_ptr = builder
+        .ins()
+        .load(types::I64, MemFlags::new(), string_struct_ptr, 0);
+    let empty_cstr = crate::codegen::expr::compile_string_constant(builder, "", module);
+    let is_null = builder.ins().icmp_imm(
+        cranelift_codegen::ir::condcodes::IntCC::Equal,
+        raw_ptr,
+        0,
+    );
+    builder.ins().select(is_null, empty_cstr, raw_ptr)
+}
+
 pub fn compile_call<M: Module>(
     builder: &mut FunctionBuilder,
     name: &str,
@@ -196,27 +252,9 @@ pub fn compile_call<M: Module>(
             }
             Type::String | Type::Obj("String") | Type::Obj("std_string_String") => {
                 let cstr_ptr = builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0);
-                let mut sig = module.make_signature();
-                sig.params.push(AbiParam::new(types::I64));
-                sig.returns.push(AbiParam::new(types::I64));
-                let strlen_id = module
-                    .declare_function("strlen", Linkage::Import, &sig)
-                    .unwrap();
-                let local_strlen = module.declare_func_in_func(strlen_id, builder.func);
-                let inst = builder.ins().call(local_strlen, &[cstr_ptr]);
-                builder.inst_results(inst)[0]
+                emit_safe_strlen(builder, cstr_ptr, module)
             }
-            Type::Str => {
-                let mut sig = module.make_signature();
-                sig.params.push(AbiParam::new(types::I64));
-                sig.returns.push(AbiParam::new(types::I64));
-                let strlen_id = module
-                    .declare_function("strlen", Linkage::Import, &sig)
-                    .unwrap();
-                let local_strlen = module.declare_func_in_func(strlen_id, builder.func);
-                let inst = builder.ins().call(local_strlen, &[base_ptr]);
-                builder.inst_results(inst)[0]
-            }
+            Type::Str => emit_safe_strlen(builder, base_ptr, module),
             _ => builder.ins().iconst(types::I64, 0),
         };
         if name == "__builtin_is_empty" {
@@ -290,7 +328,7 @@ pub fn compile_call<M: Module>(
                             arg.ty(),
                             Type::String | Type::Obj("String") | Type::Obj("std_string_String")
                         ) {
-                        builder.ins().load(types::I64, MemFlags::new(), compiled_arg, 0)
+                        emit_string_obj_as_cstr(builder, compiled_arg, module)
                     } else {
                         coerce_typed_val(builder, compiled_arg, &arg.ty(), target_cl_ty)
                     };
@@ -450,7 +488,7 @@ pub fn compile_call<M: Module>(
                         arg.ty(),
                         Type::String | Type::Obj("String") | Type::Obj("std_string_String")
                     ) {
-                    builder.ins().load(types::I64, MemFlags::new(), compiled_arg, 0)
+                    emit_string_obj_as_cstr(builder, compiled_arg, module)
                 } else {
                     coerce_typed_val(builder, compiled_arg, &arg.ty(), target_cl_ty)
                 };

@@ -57,6 +57,7 @@ pub fn unwrap_struct_base_ptr<M: Module>(
                         | Type::Rc(_)
                         | Type::Arc(_)
                         | Type::Ptr(_)
+                        | Type::Str
                 ) {
                     cur_ptr = builder.ins().load(types::I64, MemFlags::new(), cur_ptr, 0);
                 }

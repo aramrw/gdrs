@@ -147,6 +147,12 @@ pub fn type_check_match<'a>(
     }
     let pre_match_moves = scopes.snapshot_moves();
     let mut non_diverging_moves = Vec::new();
+    let target_from_caller = crate::sanal::compat::extract_root_var(&t_target).is_some_and(|root| {
+        scopes.lookup(root).is_some_and(|i| i.from_caller)
+            || scopes
+                .borrow_target(root)
+                .is_some_and(|bt| scopes.lookup(&bt).is_some_and(|i| i.from_caller))
+    });
     let mut typed_arms = Vec::new();
     let mut non_diverging_arm: Option<(Type, Span)> = None;
     let mut all_diverging = !arms.is_empty();
@@ -224,7 +230,11 @@ pub fn type_check_match<'a>(
                                                     } else if let Type::Obj(obj_name) = info.ty {
                                                         if let Some((_, t_args)) = crate::sanal::mono::lookup_mangled(obj_name) {
                                                             if let Some(first_t) = t_args.first() {
-                                                                bound_ty = *first_t;
+                                                                bound_ty = if obj_name.contains("VecRefIter") {
+                                                                    Type::Ref(crate::ast::intern_type(*first_t))
+                                                                } else {
+                                                                    *first_t
+                                                                };
                                                             }
                                                         }
                                                     }
@@ -249,7 +259,12 @@ pub fn type_check_match<'a>(
                                             span: arm.span.clone(),
                                         });
                                     }
-                                    scopes.declare(b_name.clone(), false, bound_ty);
+                                    scopes.declare_with_caller(
+                                        b_name.clone(),
+                                        false,
+                                        bound_ty,
+                                        target_from_caller,
+                                    );
                                 }
                                 cur_bindings.push((b_name.clone(), bound_ty));
                             }

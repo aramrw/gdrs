@@ -572,17 +572,28 @@ pub fn parser() -> BoxedParser<'static, Token, Program, Simple<Token>> {
         })
         .boxed();
 
+    let impl_type_ident = select! {
+        Token::Ident(s) => s,
+        Token::TypeStr => "str".to_string(),
+        Token::TypeI64 => "i64".to_string(),
+        Token::TypeI32 => "i32".to_string(),
+        Token::TypeU64 => "u64".to_string(),
+        Token::TypeU8 => "u8".to_string(),
+        Token::TypeFloat => "f64".to_string(),
+        Token::TypeBool => "bool".to_string(),
+    };
+
     let impl_target_name = just(Token::Ampersand)
         .ignore_then(just(Token::Mut).or_not())
         .or_not()
-        .then(select! { Token::Ident(s) => s })
+        .then(impl_type_ident.clone())
         .map(|(ref_prefix, name)| match ref_prefix {
             Some(Some(_)) => format!("&mut {name}"),
             Some(None) => format!("&{name}"),
             None => name,
         });
 
-    let impl_header = select! { Token::Ident(s) => s }
+    let impl_header = impl_type_ident
         .then(
             just(Token::For)
                 .map(|_| "for".to_string())

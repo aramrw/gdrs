@@ -280,7 +280,7 @@ pub(crate) fn load_indexable_buffer_and_len(
             let len_val = builder.ins().iconst(types::I64, arr_len as i64);
             (base_ptr, Some(len_val))
         }
-        Type::Slice(_) | Type::Vec(_) => {
+        Type::Slice(_) | Type::Vec(_) | Type::String | Type::Obj("String") | Type::Obj("std_string_String") => {
             let buf_ptr = builder.ins().load(types::I64, MemFlags::new(), base_ptr, 0);
             let len_val = builder.ins().load(types::I64, MemFlags::new(), base_ptr, 8);
             (buf_ptr, Some(len_val))
@@ -430,6 +430,16 @@ pub fn compile_index_access<M: Module>(
         let new_ptr = builder.ins().iadd(buffer_ptr, byte_off);
         let new_len = builder.ins().isub(end_val, start_val);
         return alloc_stack_slice_header_dyn(builder, new_ptr, new_len);
+    }
+
+    let (base_ptr, unwrapped_target_ty) = eval_index_target_ptr_and_ty(builder, target, cg, module);
+    if unwrapped_target_ty == Type::Str {
+        let len_val = crate::codegen::calls::emit_safe_strlen(builder, base_ptr, module);
+        let raw_idx_val = compile_expr(builder, idx, cg, module);
+        let idx_val = coerce_val(builder, raw_idx_val, types::I64);
+        emit_bounds_check(builder, idx_val, len_val, &idx.span(), cg, module);
+        let elem_addr = builder.ins().iadd(base_ptr, idx_val);
+        return builder.ins().load(types::I8, MemFlags::new(), elem_addr, 0);
     }
 
     let (elem_addr, actual_elem_ty) =

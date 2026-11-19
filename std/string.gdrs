@@ -1,6 +1,7 @@
-// std/string.gdrs - Heap allocated String collection using libc
-use std::libc::{malloc, realloc, free, memcpy, memset, strlen, strdup}
-use std::core::{Option, Drop}
+// std/string.gdrs - Heap allocated String collection and str helpers using libc
+use std::libc::{malloc, realloc, free, memcpy, memset, strlen, strdup, strstr, strncmp, strtod}
+use std::core::{Option, Drop, PartialEq, Hash}
+use std::vec::Vec
 
 pub obj String:
 	ptr: *i64
@@ -12,9 +13,36 @@ impl Drop for String:
 		unsafe:
 			self.free()
 
+fn is_ascii_ws(b: u8) -> bool:
+	return b == b' ' || b == b'\t' || b == b'\n' || b == b'\r'
+
+fn string_from_raw_slice(src_ptr: i64, n: i64) -> String:
+	if n <= 0 || src_ptr == 0:
+		return String::new()
+	unsafe:
+		let p = malloc(n + 1)
+		if (p as i64) == 0:
+			return String::new()
+		memcpy(p, src_ptr as *void, n)
+		let end_ptr = ((p as i64) + n) as *u8
+		*end_ptr = b'\0'
+		return String{ ptr: p as *i64, len: n, cap: n + 1 }
+
 impl String:
 	pub fn new() -> String:
 		return String{ ptr: 0 as *i64, len: 0, cap: 0 }
+
+	pub fn with_capacity(capacity: i64) -> String:
+		if capacity <= 0:
+			return String::new()
+		unsafe:
+			let cap = capacity + 1
+			let p = malloc(cap)
+			if (p as i64) == 0:
+				return String::new()
+			let first = p as *u8
+			*first = b'\0'
+			return String{ ptr: p as *i64, len: 0, cap: cap }
 
 	pub(crate) fn from_raw_parts(ptr: *i64, len: i64, cap: i64) -> String:
 		return String{ ptr: ptr, len: len, cap: cap }
@@ -23,12 +51,11 @@ impl String:
 		unsafe:
 			let length = strlen(s)
 			if length == 0:
-				return String{ ptr: 0 as *i64, len: 0, cap: 0 }
+				return String::new()
 			let p = strdup(s)
 			if (p as i64) == 0:
-				return String{ ptr: 0 as *i64, len: 0, cap: 0 }
-			let p_val = p as *i64
-			return String{ ptr: p_val, len: length, cap: length + 1 }
+				return String::new()
+			return String{ ptr: p as *i64, len: length, cap: length + 1 }
 
 	pub fn len(&self) -> i64:
 		return self.len
@@ -39,47 +66,65 @@ impl String:
 	pub fn clone(&self) -> String:
 		if self.len == 0 || (self.ptr as i64) == 0:
 			return String::new()
-		unsafe:
-			let p = malloc(self.len + 1)
-			if (p as i64) == 0:
-				return String::new()
-			memcpy(p, self.ptr as *void, self.len)
-			let end_ptr = (p as i64) + self.len
-			memset(end_ptr as *void, 0, 1)
-			return String{ ptr: p as *i64, len: self.len, cap: self.len + 1 }
+		return string_from_raw_slice(self.ptr as i64, self.len)
 
-	pub fn append(&mut self, s: str):
+	fn ensure_extra(&mut self, extra: i64) -> bool:
+		if extra <= 0:
+			return true
 		unsafe:
-			let s_len = strlen(s)
-			if s_len == 0:
-				return
-			let needed_cap = self.len + s_len + 1
+			let needed_cap = self.len + extra + 1
 			if self.cap == 0:
 				let mut new_cap = 16
 				if needed_cap > new_cap:
 					new_cap = needed_cap
 				let p = malloc(new_cap)
 				if (p as i64) == 0:
-					return
+					return false
 				self.ptr = p as *i64
 				self.cap = new_cap
-				memcpy(self.ptr as *void, s as *void, s_len)
-				self.len = s_len
-				let end_ptr = (self.ptr as i64) + self.len
-				memset(end_ptr as *void, 0, 1)
-			else:
-				if needed_cap > self.cap:
-					let new_cap = needed_cap * 2
-					let p = realloc(self.ptr as *void, new_cap)
-					if (p as i64) == 0:
-						return
-					self.ptr = p as *i64
-					self.cap = new_cap
-				let dst_ptr = (self.ptr as i64) + self.len
-				memcpy(dst_ptr as *void, s as *void, s_len)
-				self.len = self.len + s_len
-				let end_ptr = (self.ptr as i64) + self.len
-				memset(end_ptr as *void, 0, 1)
+				let end_ptr = ((self.ptr as i64) + self.len) as *u8
+				*end_ptr = b'\0'
+				return true
+			if needed_cap > self.cap:
+				let mut new_cap = self.cap * 2
+				if new_cap < needed_cap:
+					new_cap = needed_cap
+				let p = realloc(self.ptr as *void, new_cap)
+				if (p as i64) == 0:
+					return false
+				self.ptr = p as *i64
+				self.cap = new_cap
+			return true
+
+	pub fn push_byte(&mut self, b: u8):
+		if !self.ensure_extra(1):
+			return
+		unsafe:
+			let dst = ((self.ptr as i64) + self.len) as *u8
+			*dst = b
+			self.len = self.len + 1
+			let end_ptr = ((self.ptr as i64) + self.len) as *u8
+			*end_ptr = b'\0'
+
+	pub fn clear(&mut self):
+		self.len = 0
+		if (self.ptr as i64) != 0 && self.cap > 0:
+			unsafe:
+				let first = self.ptr as *u8
+				*first = b'\0'
+
+	pub fn append(&mut self, s: str):
+		unsafe:
+			let s_len = strlen(s)
+			if s_len == 0:
+				return
+			if !self.ensure_extra(s_len):
+				return
+			let dst_ptr = (self.ptr as i64) + self.len
+			memcpy(dst_ptr as *void, s as *void, s_len)
+			self.len = self.len + s_len
+			let end_ptr = ((self.ptr as i64) + self.len) as *u8
+			*end_ptr = b'\0'
 
 	pub fn push_str(mut self, s: str) -> String:
 		self.append(s)
@@ -90,6 +135,41 @@ impl String:
 			return ""
 		return self.ptr as str
 
+	pub fn contains(&self, needle: str) -> bool:
+		return self.as_str().contains(needle)
+
+	pub fn starts_with(&self, prefix: str) -> bool:
+		return self.as_str().starts_with(prefix)
+
+	pub fn ends_with(&self, suffix: str) -> bool:
+		return self.as_str().ends_with(suffix)
+
+	pub fn find(&self, needle: str) -> Option<i64>:
+		return self.as_str().find(needle)
+
+	pub fn byte_at(&self, idx: i64) -> Option<u8>:
+		if idx < 0 || idx >= self.len:
+			return Option::None
+		return Option::Some(self[idx])
+
+	pub fn trim(&self) -> String:
+		return self.as_str().trim()
+
+	pub fn split(&self, sep: str) -> Vec<String>:
+		return self.as_str().split(sep)
+
+	pub fn replace(&self, from: str, to: str) -> String:
+		return self.as_str().replace(from, to)
+
+	pub fn parse_i64(&self) -> Option<i64>:
+		return self.as_str().parse_i64()
+
+	pub fn parse_f64(&self) -> Option<f64>:
+		return self.as_str().parse_f64()
+
+	pub fn slice(&self, start: i64, end: i64) -> String:
+		return self.as_str().slice(start, end)
+
 	pub fn free(&mut self):
 		unsafe:
 			if (self.ptr as i64) != 0 && self.cap > 0:
@@ -97,3 +177,196 @@ impl String:
 				self.ptr = 0 as *i64
 				self.len = 0
 				self.cap = 0
+
+impl str:
+	pub fn contains(self, needle: str) -> bool:
+		if needle.is_empty():
+			return true
+		unsafe:
+			return (strstr(self, needle) as i64) != 0
+
+	pub fn starts_with(self, prefix: str) -> bool:
+		let plen = prefix.len()
+		if plen == 0:
+			return true
+		if self.len() < plen:
+			return false
+		unsafe:
+			return strncmp(self, prefix, plen) == (0 as i32)
+
+	pub fn ends_with(self, suffix: str) -> bool:
+		let slen = self.len()
+		let suf_len = suffix.len()
+		if suf_len == 0:
+			return true
+		if slen < suf_len:
+			return false
+		unsafe:
+			let tail = ((self as i64) + (slen - suf_len)) as str
+			return strncmp(tail, suffix, suf_len) == (0 as i32)
+
+	pub fn find(self, needle: str) -> Option<i64>:
+		if needle.is_empty():
+			return Option::Some(0)
+		unsafe:
+			let p = strstr(self, needle)
+			if (p as i64) == 0:
+				return Option::None
+			return Option::Some((p as i64) - (self as i64))
+
+	pub fn byte_at(self, idx: i64) -> Option<u8>:
+		if idx < 0 || idx >= self.len():
+			return Option::None
+		return Option::Some(self[idx])
+
+	pub fn trim(self) -> String:
+		let n = self.len()
+		let mut start: i64 = 0
+		while start < n && is_ascii_ws(self[start]):
+			start = start + 1
+		let mut end = n
+		while end > start && is_ascii_ws(self[end - 1]):
+			end = end - 1
+		if end <= start:
+			return String::new()
+		return string_from_raw_slice((self as i64) + start, end - start)
+
+	pub fn split(self, sep: str) -> Vec<String>:
+		let mut out: Vec<String> = Vec::new()
+		let sep_len = sep.len()
+		if sep_len == 0:
+			out.push(String::from(self))
+			return out
+		let base = self as i64
+		let total = self.len()
+		let mut cur = base
+		let end = base + total
+		unsafe:
+			while cur <= end:
+				let hit = strstr(cur as str, sep)
+				if (hit as i64) == 0:
+					out.push(string_from_raw_slice(cur, end - cur))
+					break
+				let hit_addr = hit as i64
+				out.push(string_from_raw_slice(cur, hit_addr - cur))
+				cur = hit_addr + sep_len
+		return out
+
+	pub fn replace(self, from: str, to: str) -> String:
+		let from_len = from.len()
+		if from_len == 0:
+			return String::from(self)
+		let mut out = String::with_capacity(self.len())
+		let base = self as i64
+		let end = base + self.len()
+		let mut cur = base
+		unsafe:
+			while cur < end:
+				let hit = strstr(cur as str, from)
+				if (hit as i64) == 0:
+					out.append(cur as str)
+					break
+				let hit_addr = hit as i64
+				let chunk_len = hit_addr - cur
+				if chunk_len > 0:
+					if out.ensure_extra(chunk_len):
+						let dst = ((out.ptr as i64) + out.len) as *void
+						memcpy(dst, cur as *void, chunk_len)
+						out.len = out.len + chunk_len
+						let term = ((out.ptr as i64) + out.len) as *u8
+						*term = b'\0'
+				out.append(to)
+				cur = hit_addr + from_len
+		return out
+
+	pub fn parse_i64(self) -> Option<i64>:
+		let n = self.len()
+		let mut start: i64 = 0
+		while start < n && is_ascii_ws(self[start]):
+			start = start + 1
+		let mut end = n
+		while end > start && is_ascii_ws(self[end - 1]):
+			end = end - 1
+		if start >= end:
+			return Option::None
+		let mut neg = false
+		let first = self[start]
+		if first == b'-':
+			neg = true
+			start = start + 1
+		elif first == b'+':
+			start = start + 1
+		if start >= end:
+			return Option::None
+		let min_div10: i64 = -922337203685477580
+		let mut acc: i64 = 0
+		let mut i = start
+		while i < end:
+			let b = self[i]
+			if b < b'0' || b > b'9':
+				return Option::None
+			let d = (b - b'0') as i64
+			if acc < min_div10:
+				return Option::None
+			acc = acc * 10
+			let limit_digit = if neg: 8 else: 7
+			if acc == min_div10 * 10 && d > limit_digit:
+				return Option::None
+			acc = acc - d
+			i = i + 1
+		if neg:
+			return Option::Some(acc)
+		return Option::Some(0 - acc)
+
+	pub fn parse_f64(self) -> Option<f64>:
+		let trimmed = self.trim()
+		if trimmed.is_empty():
+			return Option::None
+		let s = trimmed.as_str()
+		unsafe:
+			let mut end_ptr: i64 = 0
+			let val = strtod(s, (&mut end_ptr) as *i64)
+			if end_ptr != ((s as i64) + trimmed.len()):
+				return Option::None
+			return Option::Some(val)
+
+	pub fn slice(self, start: i64, end: i64) -> String:
+		let n = self.len()
+		let mut s = if start < 0: 0 else: start
+		let mut e = if end > n: n else: end
+		if s > n:
+			s = n
+		if e <= s:
+			return String::new()
+		return string_from_raw_slice((self as i64) + s, e - s)
+
+impl PartialEq for String:
+	pub fn eq(&self, other: &String) -> bool:
+		return self.as_str() == other.as_str()
+
+impl Hash for String:
+	pub fn hash(&self) -> u64:
+		return self.as_str().hash()
+
+impl PartialEq for str:
+	pub fn eq(&self, other: &Self) -> bool:
+		return *self == *other
+
+impl Hash for str:
+	pub fn hash(&self) -> u64:
+		let mut h: u64 = 14695981039346656037 as u64
+		let prime: u64 = 1099511628211 as u64
+		let n = (*self).len()
+		let mut i: i64 = 0
+		while i < n:
+			h = (h ^ ((*self)[i] as u64)) * prime
+			i = i + 1
+		return h
+
+impl i64:
+	pub fn to_string(self) -> String:
+		return format!("{}", self)
+
+impl f64:
+	pub fn to_string(self) -> String:
+		return format!("{}", self)

@@ -24,7 +24,7 @@ pub fn extract_generic_params_struct(decl: &StructDecl, mono: &RefCell<Monomorph
     if params.is_empty()
         && matches!(
             decl.name.as_str(),
-            "std_vec_Vec" | "Vec" | "std_vec_VecIter" | "VecIter"
+            "std_vec_Vec" | "Vec" | "std_vec_VecIter" | "VecIter" | "std_vec_VecRefIter" | "VecRefIter"
         )
     {
         let impls = mono.borrow().impl_templates.clone();

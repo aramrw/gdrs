@@ -11,6 +11,37 @@ use crate::codegen::layout::{
     emit_memcpy_bytes, find_struct_layout, is_aggregate_type, size_and_align, tuple_field_offsets,
 };
 
+fn store_scalar_in_temp_slot(builder: &mut FunctionBuilder, val: Value) -> Value {
+    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        8,
+        0,
+    ));
+    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+    builder.ins().store(MemFlags::new(), val, ptr, 0);
+    ptr
+}
+
+fn is_ref_passthrough_ty(
+    ty: &Type,
+    struct_layouts: &std::collections::HashMap<String, crate::sanal::StructLayout>,
+    enum_layouts: &std::collections::HashMap<String, Vec<(String, i64, Vec<Type>)>>,
+) -> bool {
+    is_aggregate_type(ty, struct_layouts, enum_layouts)
+        || matches!(
+            ty,
+            Type::Obj(_)
+                | Type::Enum(_)
+                | Type::String
+                | Type::Vec(_)
+                | Type::Slice(_)
+                | Type::Array(_, _)
+                | Type::Ref(_)
+                | Type::MutRef(_)
+                | Type::DynTrait(_)
+        )
+}
+
 pub fn compile_ref<M: Module>(
     builder: &mut FunctionBuilder,
     inner_expr: &TypedExpr,
@@ -35,48 +66,14 @@ pub fn compile_ref<M: Module>(
                 return builder.ins().stack_addr(types::I64, slot, 0);
             }
             let val = compile_expr(builder, inner_expr, cg, module);
-            if is_aggregate_type(ty, &cg.meta.struct_layouts, cg.meta.enum_layouts)
-                || matches!(
-                    ty,
-                    Type::Obj(_)
-                        | Type::Enum(_)
-                        | Type::Str
-                        | Type::String
-                        | Type::Vec(_)
-                        | Type::Slice(_)
-                        | Type::Array(_, _)
-                        | Type::Ref(_)
-                        | Type::MutRef(_)
-                        | Type::DynTrait(_)
-                )
-            {
+            if is_ref_passthrough_ty(ty, &cg.meta.struct_layouts, cg.meta.enum_layouts) {
                 val
             } else {
-                let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    8,
-                    0,
-                ));
-                let ptr = builder.ins().stack_addr(types::I64, slot, 0);
-                builder.ins().store(MemFlags::new(), val, ptr, 0);
-                ptr
+                store_scalar_in_temp_slot(builder, val)
             }
         }
         TypedExpr::FieldAccess(target, field_name, field_ty, _) => {
-            if is_aggregate_type(field_ty, &cg.meta.struct_layouts, cg.meta.enum_layouts)
-                || matches!(
-                    field_ty,
-                    Type::Obj(_)
-                        | Type::Enum(_)
-                        | Type::Str
-                        | Type::String
-                        | Type::Vec(_)
-                        | Type::Slice(_)
-                        | Type::Array(_, _)
-                        | Type::Ref(_)
-                        | Type::MutRef(_)
-                )
-            {
+            if is_ref_passthrough_ty(field_ty, &cg.meta.struct_layouts, cg.meta.enum_layouts) {
                 return compile_expr(builder, inner_expr, cg, module);
             }
             let (base_ptr, unwrapped_target) =
@@ -131,7 +128,15 @@ pub fn compile_ref<M: Module>(
                 ptr_val
             }
         }
-        _ => compile_expr(builder, inner_expr, cg, module),
+        _ => {
+            let ty = inner_expr.ty();
+            let val = compile_expr(builder, inner_expr, cg, module);
+            if is_ref_passthrough_ty(&ty, &cg.meta.struct_layouts, cg.meta.enum_layouts) {
+                val
+            } else {
+                store_scalar_in_temp_slot(builder, val)
+            }
+        }
     }
 }
 

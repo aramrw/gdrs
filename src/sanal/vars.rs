@@ -470,7 +470,7 @@ fn resolve_ref_borrow_info(
             if matches!(
                 dest_ty,
                 Type::Ref(_) | Type::MutRef(_) | Type::Str | Type::Slice(_)
-            ) || matches!(dest_ty, Type::Obj(s) if s.contains("VecIter")) =>
+            ) || matches!(dest_ty, Type::Obj(s) if s.contains("VecIter") || s.contains("VecRefIter")) =>
         {
             let from_caller = scopes.lookup(src_name).is_some_and(|i| i.from_caller);
             let inherited = scopes
@@ -525,7 +525,7 @@ fn check_compound_assign_borrow_depths(
         }
         TypedExpr::Ident(src, ty, _)
             if matches!(ty, Type::Ref(_) | Type::MutRef(_) | Type::Str | Type::Slice(_))
-                || matches!(ty, Type::Obj(s) if s.contains("VecIter")) =>
+                || matches!(ty, Type::Obj(s) if s.contains("VecIter") || s.contains("VecRefIter")) =>
         {
             if let Some(target) = scopes.borrow_target(src) {
                 check_target(errors, &target);

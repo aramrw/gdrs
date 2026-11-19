@@ -155,7 +155,7 @@ pub fn compile_program_to_object_bytes_with_options(
             } else {
                 Linkage::Local
             }
-        } else if func.name.starts_with("std_") {
+        } else if func.name.starts_with("std_") || func.is_std {
             Linkage::Local
         } else {
             Linkage::Export
